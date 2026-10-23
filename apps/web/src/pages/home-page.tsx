@@ -1,0 +1,85 @@
+import { useCallback, useEffect, useState } from 'react'
+import { LoginPage } from './login-page.tsx'
+import { ClipboardBoard } from '@/components/clipboard-board.tsx'
+import { Shell } from '@/components/shell.tsx'
+import { Button } from '@/components/ui/button.tsx'
+import { api } from '@/lib/api.ts'
+import { spaceLabel } from '@/lib/format.ts'
+import { useSession } from '@/lib/session.tsx'
+import type { ConnectionStatus, Item, SpaceSummary } from '@/lib/types.ts'
+
+const spaceKey = 'dropit-space'
+
+export function HomePage() {
+  const { status, me, refresh } = useSession()
+  const [spaces, setSpaces] = useState<SpaceSummary[]>([])
+  const [spaceId, setSpaceId] = useState<string | null>(null)
+  const [connection, setConnection] = useState<ConnectionStatus>('idle')
+
+  useEffect(() => {
+    if (!me) return
+    let cancelled = false
+    api<{ spaces: SpaceSummary[] }>('/api/spaces')
+      .then((body) => {
+        if (cancelled) return
+        setSpaces(body.spaces)
+        const stored = sessionStorage.getItem(spaceKey)
+        const picked = body.spaces.find((space) => space.id === stored) ?? body.spaces.find((space) => space.ownerId === me.user.id) ?? body.spaces[0]
+        setSpaceId(picked?.id ?? null)
+      })
+      .catch(() => {
+        if (!cancelled) setSpaces([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [me])
+
+  const onSpace = useCallback((id: string) => {
+    setSpaceId(id)
+    sessionStorage.setItem(spaceKey, id)
+  }, [])
+
+  const onStatus = useCallback((next: ConnectionStatus) => setConnection(next), [])
+  const onAuthLost = useCallback(() => {
+    void refresh()
+  }, [refresh])
+
+  if (status === 'loading') return <main className="px-6 py-16 text-sm text-muted-foreground">正在连接…</main>
+  if (status === 'error') {
+    return (
+      <main className="mx-auto max-w-md px-6 py-16">
+        <h1 className="text-3xl font-black">无法连接</h1>
+        <Button type="button" className="mt-6" onClick={() => void refresh()}>
+          重试
+        </Button>
+      </main>
+    )
+  }
+  if (!me) return <LoginPage />
+
+  const current = spaces.find((space) => space.id === spaceId) ?? null
+
+  return (
+    <Shell connection={connection} spaces={spaces} spaceId={current?.id} onSpace={onSpace}>
+      {current ? (
+        <ClipboardBoard
+          base={`/api/spaces/${current.id}`}
+          title={spaceLabel(current, me.user.id, spaces)}
+          subtitle="文本、文件和截图会同步到这个空间里的其他设备。"
+          quotaBytes={me.quotaBytes}
+          usedBytes={me.usedBytes}
+          maxFileBytes={me.maxFileBytes}
+          maxTextBytes={me.maxTextBytes}
+          sender={(item: Item) => (item.userId === me.user.id ? '我' : '成员')}
+          canRetract={(item) => item.userId === me.user.id || current.ownerId === me.user.id}
+          onActivity={() => void refresh()}
+          onAuthLost={onAuthLost}
+          onStatus={onStatus}
+        />
+      ) : (
+        <p className="text-sm text-muted-foreground">没有可用空间。</p>
+      )}
+    </Shell>
+  )
+}

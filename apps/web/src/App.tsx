@@ -1,32 +1,26 @@
-import { useTheme } from '@/components/theme-provider.tsx'
-
-const themes = ['light', 'dark', 'system'] as const
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router'
+import { Toaster } from '@/components/ui/sonner.tsx'
+import { SessionProvider } from '@/lib/session.tsx'
+import { AdminPage } from '@/pages/admin-page.tsx'
+import { HomePage } from '@/pages/home-page.tsx'
+import { InvitePage } from '@/pages/invite-page.tsx'
+import { LoginPage } from '@/pages/login-page.tsx'
+import { RoomPage } from '@/pages/room-page.tsx'
 
 export function App() {
-  const { theme, setTheme } = useTheme()
-
   return (
-    <main className="min-h-svh bg-background text-foreground">
-      <div className="mx-auto flex max-w-lg flex-col gap-4 px-6 py-16">
-        <p className="text-sm text-muted-foreground">dropit</p>
-        <h1 className="text-3xl font-semibold tracking-tight">Scaffold</h1>
-        <p className="text-muted-foreground">
-          Frontend shell. Product screens land after a design is chosen.
-        </p>
-        <div className="flex gap-2">
-          {themes.map((value) => (
-            <button
-              key={value}
-              type="button"
-              aria-pressed={theme === value}
-              onClick={() => setTheme(value)}
-              className="border border-border bg-card px-3 py-1.5 text-sm text-card-foreground"
-            >
-              {value}
-            </button>
-          ))}
-        </div>
-      </div>
-    </main>
+    <SessionProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<HomePage />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/invite/:token" element={<InvitePage />} />
+          <Route path="/rooms/:token" element={<RoomPage />} />
+          <Route path="/admin" element={<AdminPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+        <Toaster position="top-center" />
+      </BrowserRouter>
+    </SessionProvider>
   )
 }
