@@ -18,7 +18,7 @@ at `APP_ORIGIN` (typically terminated by a trusted reverse proxy).
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | unset | Enables Google login only when both are set |
 | `TRUST_PROXY` | empty | Comma-separated trusted proxy CIDRs/IPs (`loopback` allowed); never blindly trust every address |
 | `MAX_FILE_BYTES` | 26214400 | 25 MiB per file |
-| `USER_QUOTA_BYTES` | 1073741824 | 1 GiB across a user's uploads and text |
+| `USER_QUOTA_BYTES` | 1073741824 | 1 GiB default across a user's uploads and text. Admins may set a per-user override; `null` keeps this default |
 | `RETENTION_HOURS` | 168 | Private/shared entry retention |
 | `ROOM_MAX_FILE_BYTES` | 5242880 | 5 MiB, must be smaller than MAX_FILE_BYTES |
 | `ROOM_QUOTA_BYTES` | 52428800 | 50 MiB, must be smaller than USER_QUOTA_BYTES |

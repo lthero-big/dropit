@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { ClipboardBoard } from '@/components/clipboard-board.tsx'
 import { Shell } from '@/components/shell.tsx'
@@ -11,6 +11,7 @@ import type { ConnectionStatus, ScopeInfo } from '@/lib/types.ts'
 
 export function RoomPage() {
   const { token = '' } = useParams()
+  const navigate = useNavigate()
   const { me } = useSession()
   const [scope, setScope] = useState<ScopeInfo | null>(null)
   const [missing, setMissing] = useState(false)
@@ -37,6 +38,15 @@ export function RoomPage() {
 
   const onStatus = useCallback((next: ConnectionStatus) => setConnection(next), [])
   const onAuthLost = useCallback(() => setMissing(true), [])
+
+  async function createAnother() {
+    try {
+      const room = await api<{ token: string }>('/api/rooms', { method: 'POST' })
+      navigate(`/rooms/${room.token}`)
+    } catch (error) {
+      toast.error(errorText(error))
+    }
+  }
 
   if (missing) {
     return (
@@ -65,6 +75,9 @@ export function RoomPage() {
               }}
             >
               复制链接
+            </Button>
+            <Button type="button" variant="outline" size="sm" onClick={() => void createAnother()}>
+              新建房间
             </Button>
           </div>
           <ClipboardBoard

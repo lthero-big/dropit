@@ -49,6 +49,24 @@ function integer(value: unknown, min: number, max: number): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new ApiError(400, 'INVALID_INPUT');
   return value;
 }
+function emailAddress(value: unknown): string {
+  const email = string(value, 200).trim().toLowerCase();
+  if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(email)) throw new ApiError(400, 'INVALID_INPUT');
+  return email;
+}
+function personName(value: unknown): string {
+  const raw = string(value, 80);
+  let name = '';
+  for (const char of raw) {
+    const code = char.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) continue;
+    name += char;
+  }
+  name = name.trim();
+  if (!name) throw new ApiError(400, 'INVALID_INPUT');
+  return name;
+}
+const maxQuotaBytes = 100 * 1024 ** 3;
 
 export function createBackend(options: BackendOptions = {}) {
   const config = options.config ?? loadConfig();
@@ -146,7 +164,8 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.get('/api/me', c => {
     const auth = service.requireSession(c.get('session'));
-    return c.json({ user: auth.user, usedBytes: repo.usage(auth.user.id), quotaBytes: config.userQuotaBytes,
+    return c.json({ user: auth.user, usedBytes: repo.usage(auth.user.id),
+      quotaBytes: repo.quotaOverride(auth.user.id) ?? config.userQuotaBytes,
       maxFileBytes: config.maxFileBytes, maxTextBytes: config.maxTextBytes, retentionMs: config.retentionMs });
   });
   app.post('/api/auth/logout', c => {
@@ -163,17 +182,62 @@ export function createBackend(options: BackendOptions = {}) {
     const space = repo.space(invite.spaceId)!;
     return c.json({ spaceName: space.name, expiresAt: invite.expiresAt, remainingUses: invite.maxUses - invite.uses });
   });
+  const effectiveQuota = (userId: string) => repo.quotaOverride(userId) ?? config.userQuotaBytes;
   app.get('/api/admin/users', c => {
     service.admin(c.get('session'));
-    return c.json({ users: repo.users().map(user => ({ ...user, quotaBytes: config.userQuotaBytes })) });
+    return c.json({ users: repo.users().map(user => ({
+      id: user.id, email: user.email, name: user.name, role: user.role, disabled: user.disabled,
+      pending: user.pending, createdAt: user.createdAt, usedBytes: user.usedBytes,
+      quotaBytes: user.quotaBytes ?? config.userQuotaBytes, quotaOverride: user.quotaBytes,
+    })) });
+  });
+  app.post('/api/admin/users', async c => {
+    service.admin(c.get('session'));
+    const body = await json(c, 2048);
+    const email = emailAddress(body.email);
+    const name = body.name === undefined ? email.slice(0, email.indexOf('@')).slice(0, 80) : personName(body.name);
+    let role: 'admin' | 'user' = 'user';
+    if (body.role !== undefined) {
+      if (body.role !== 'admin' && body.role !== 'user') throw new ApiError(400, 'INVALID_INPUT');
+      role = body.role;
+    }
+    // Configured bootstrap addresses are admins at creation, including pre-provision.
+    if (config.adminEmails.includes(email)) role = 'admin';
+    const quotaBytes = body.quotaBytes === undefined ? null : integer(body.quotaBytes, 1, maxQuotaBytes);
+    const user = repo.provisionUser({ email, name, role, quotaBytes, now: now() });
+    return c.json({ ...user, usedBytes: 0, quotaBytes: quotaBytes ?? config.userQuotaBytes, quotaOverride: quotaBytes }, 201);
+  });
+  app.post('/api/admin/users/:id/logout', c => {
+    service.admin(c.get('session'));
+    repo.revokeSessions(c.req.param('id'));
+    events.revalidate();
+    return c.body(null, 204);
   });
   app.patch('/api/admin/users/:id', async c => {
     service.admin(c.get('session'));
-    const body = await json(c, 1024);
-    if (typeof body.disabled !== 'boolean') throw new ApiError(400, 'INVALID_INPUT');
-    repo.disableUser(c.req.param('id'), body.disabled);
+    const body = await json(c, 2048);
+    const patch: { disabled?: boolean; role?: 'admin' | 'user'; name?: string; quotaBytes?: number | null } = {};
+    if ('disabled' in body) {
+      if (typeof body.disabled !== 'boolean') throw new ApiError(400, 'INVALID_INPUT');
+      patch.disabled = body.disabled;
+    }
+    if ('role' in body) {
+      if (body.role !== 'admin' && body.role !== 'user') throw new ApiError(400, 'INVALID_INPUT');
+      patch.role = body.role;
+    }
+    if ('name' in body) patch.name = personName(body.name);
+    if ('quotaBytes' in body) patch.quotaBytes = body.quotaBytes === null ? null : integer(body.quotaBytes, 1, maxQuotaBytes);
+    if (!('disabled' in body || 'role' in body || 'name' in body || 'quotaBytes' in body)) throw new ApiError(400, 'INVALID_INPUT');
+    repo.updateUser(c.req.param('id'), patch);
     events.revalidate();
     return c.body(null, 204);
+  });
+  app.get('/api/admin/limits', c => {
+    service.admin(c.get('session'));
+    const { maxFileBytes, maxTextBytes, maxItems, userQuotaBytes, retentionMs, roomQuotaBytes, roomMaxFileBytes,
+      roomRetentionMs, rateWindowMs, rateGeneral, rateAuth, rateInvite, rateUpload, rateRoom, sessionMs } = config;
+    return c.json({ maxFileBytes, maxTextBytes, maxItems, userQuotaBytes, retentionMs, roomQuotaBytes, roomMaxFileBytes,
+      roomRetentionMs, rateWindowMs, rateGeneral, rateAuth, rateInvite, rateUpload, rateRoom, sessionMs });
   });
   app.get('/api/admin/invites', c => { service.admin(c.get('session')); return c.json({ invites: repo.invites() }); });
   app.post('/api/admin/invites', async c => {
@@ -202,9 +266,10 @@ export function createBackend(options: BackendOptions = {}) {
   for (const base of ['/api/spaces/:space', '/api/rooms/:room']) {
     app.get(base, c => {
       const space = scope(c);
+      const session = c.get('session');
       return c.json({ id: space.id, name: space.name, expiresAt: space.expiresAt,
         maxFileBytes: space.roomHash ? config.roomMaxFileBytes : config.maxFileBytes,
-        quotaBytes: space.roomHash ? config.roomQuotaBytes : config.userQuotaBytes });
+        quotaBytes: space.roomHash ? config.roomQuotaBytes : effectiveQuota(session!.user.id) });
     });
     app.get(`${base}/items`, c => c.json(service.snapshot(scope(c))));
     app.post(`${base}/items/text`, async c => {

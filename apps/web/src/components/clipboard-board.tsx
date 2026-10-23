@@ -48,6 +48,7 @@ export function ClipboardBoard({
   const channel = useChannel(base)
   const now = useClock(channel.offset)
   const [draft, setDraft] = useState('')
+  const [query, setQuery] = useState('')
   const [pending, setPending] = useState<string | null>(null)
   const [progress, setProgress] = useState<{ name: string; ratio: number } | null>(null)
   const [dragOver, setDragOver] = useState(false)
@@ -56,6 +57,10 @@ export function ClipboardBoard({
   const seenAuth = useRef(0)
   const sendFilesRef = useRef<(files: File[]) => Promise<void>>(async () => {})
   const visible = channel.items.filter((item) => item.expiresAt > now)
+  const needle = query.trim().toLowerCase()
+  const shown = needle
+    ? visible.filter((item) => `${item.text ?? ''}\n${item.filename ?? ''}`.toLowerCase().includes(needle))
+    : visible
   const roomUsed = usedBytes ?? channel.items.reduce((sum, item) => sum + item.size, 0)
 
   useEffect(() => {
@@ -255,6 +260,17 @@ export function ClipboardBoard({
             </div>
           ) : null}
         </form>
+        <label className="mt-6 block border-2 border-foreground">
+          <span className="sr-only">搜索</span>
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索文本或文件名"
+            aria-label="搜索"
+            className="w-full bg-transparent px-3 py-2 text-sm outline-none"
+          />
+        </label>
         {dragOver ? (
           <div className="pointer-events-none fixed inset-0 z-30 grid place-items-center border-4 border-primary bg-background/80">
             <p className="border-2 border-primary bg-background px-6 py-4 text-sm font-extrabold tracking-widest uppercase">松开以上传</p>
@@ -273,8 +289,11 @@ export function ClipboardBoard({
         {channel.status !== 'connecting' && visible.length === 0 ? (
           <p className="border-t border-foreground py-8 text-sm text-muted-foreground">还没有内容。发送文本或文件，其他设备会实时收到。</p>
         ) : null}
+        {visible.length > 0 && shown.length === 0 ? (
+          <p className="border-t border-foreground py-8 text-sm text-muted-foreground">没有匹配的内容。</p>
+        ) : null}
         <ul>
-          {visible.map((item) => (
+          {shown.map((item) => (
             <li key={item.id} className="border-b border-foreground px-3 py-4 hover:shadow-[inset_0_0_0_2px_var(--primary)]">
               <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
                 <span className="bg-foreground px-2 py-0.5 font-extrabold tracking-wider text-background uppercase">{sender(item)}</span>

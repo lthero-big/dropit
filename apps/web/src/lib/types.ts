@@ -4,6 +4,7 @@ export interface User {
   name: string
   role: 'admin' | 'user'
   disabled: number
+  pending: number
   createdAt: number
 }
 
@@ -69,6 +70,25 @@ export interface InvitePreview {
 export interface AdminUser extends User {
   usedBytes: number
   quotaBytes: number
+  quotaOverride: number | null
+}
+
+export interface AdminLimits {
+  maxFileBytes: number
+  maxTextBytes: number
+  maxItems: number
+  userQuotaBytes: number
+  retentionMs: number
+  roomQuotaBytes: number
+  roomMaxFileBytes: number
+  roomRetentionMs: number
+  rateWindowMs: number
+  rateGeneral: number
+  rateAuth: number
+  rateInvite: number
+  rateUpload: number
+  rateRoom: number
+  sessionMs: number
 }
 
 export type ServerMessage =

@@ -21,14 +21,15 @@ Missing/expired/revoked session returns `401 UNAUTHENTICATED`.
 | GET | `/me` | `{user, usedBytes, quotaBytes, maxFileBytes, maxTextBytes, retentionMs}` |
 | GET | `/invites/:token` | `{spaceName, expiresAt, remainingUses}`; invalid/revoked/used/expired: 404 |
 
-`User = {id, email, name, role: 'admin'|'user', disabled: 0|1, createdAt}`.
-The invite page does **not** create an account or consume a use. It sends the token
-to the OAuth start URL. Only a successful verified OAuth identity can atomically
-consume a use, create an account/private space and join the invited space. Existing
-members do not spend additional uses on the same still-valid invitation. Existing
-users may sign in without an invite. A consumed/expired token is never accepted,
-even if the user previously joined through it. OAuth state is single-use and valid
-for 10 minutes. Starting a new flow replaces the browser's previous flow cookie.
+`User = {id, email, name, role: 'admin'|'user', disabled: 0|1, pending: 0|1, createdAt}`.
+`pending` is 1 until the first verified OAuth identity is bound. The invite page does
+**not** create an account or consume a use. It sends the token to the OAuth start URL.
+Only a successful verified OAuth identity can atomically consume a use, create an
+account/private space and join the invited space. Existing members do not spend
+additional uses on the same still-valid invitation. Existing users may sign in
+without an invite. A consumed/expired token is never accepted, even if the user
+previously joined through it. OAuth state is single-use and valid for 10 minutes.
+Starting a new flow replaces the browser's previous flow cookie.
 
 If `ADMIN_EMAILS` is empty, the first successfully authenticated identity becomes
 admin. If configured, only a provider-verified matching email may bootstrap the
@@ -43,8 +44,11 @@ All paths here require an enabled admin, otherwise 401/403.
 
 | Method | Path | Body / response |
 | --- | --- | --- |
-| GET | `/admin/users` | `{users: [User & {usedBytes, quotaBytes}]}` |
-| PATCH | `/admin/users/:id` | `{disabled: boolean}` → 204; disabling immediately revokes every session/socket. Enabling requires a new login. Last enabled admin cannot be disabled (`409 LAST_ADMIN`). |
+| GET | `/admin/users` | `{users: [User & {usedBytes, quotaBytes, quotaOverride}]}`. `quotaBytes` is the effective quota. `quotaOverride` is the stored override, or `null` when the installation default applies. |
+| POST | `/admin/users` | `{email, name?: string, role?: 'admin' or 'user', quotaBytes?: number}` → 201, `User & {usedBytes, quotaBytes, quotaOverride}`. Pre-creates a pending account and its private space. No password and no invite token. The first later OAuth login whose **verified** email matches (case-insensitive) binds that identity, clears `pending`, and does not create a second user or space. A different provider subject with the same email is not linked and still needs an invite or admin bootstrap. Email must not already belong to any user (`409 EMAIL_IN_USE`). `ADMIN_EMAILS` matches are stored as `admin`. `quotaBytes` when omitted is the installation default (`quotaOverride: null`); when set, 1 byte through 100 GiB. |
+| PATCH | `/admin/users/:id` | At least one of `{disabled?: boolean, role?: 'admin'\|'user', name?: string, quotaBytes?: number\|null}` → 204. `quotaBytes: null` clears the override. Disabling immediately revokes every session/socket. Enabling requires a new login. Role and quota apply to the next request on existing sessions. The last enabled admin cannot be disabled or demoted (`409 LAST_ADMIN`). Email cannot be changed. |
+| POST | `/admin/users/:id/logout` | 204. Deletes every session for that user and closes their sockets. The account stays enabled; they can sign in again. Unknown id: `404`. |
+| GET | `/admin/limits` | Read-only installation limits from the environment: `{maxFileBytes, maxTextBytes, maxItems, userQuotaBytes, retentionMs, roomQuotaBytes, roomMaxFileBytes, roomRetentionMs, rateWindowMs, rateGeneral, rateAuth, rateInvite, rateUpload, rateRoom, sessionMs}`. There is no write API; change the environment and restart. |
 | GET | `/admin/invites` | `{invites: [Invite]}` (no secret token) |
 | POST | `/admin/invites` | `{spaceId, maxUses?: 1, expiresInHours?: 24}` → 201, `Invite & {token,url}`. Uses: 1–100; expiry: 1–720 hours. Admin must belong to target space. |
 | DELETE | `/admin/invites/:id` | 204; immediate revocation |
@@ -114,7 +118,11 @@ as a React text child / `textContent`, never HTML. Do not fetch arbitrary URLs f
 text or original file MIME. Use only the thumbnail endpoint for image previews.
 
 User quota counts all original text/file bytes **plus thumbnail bytes** uploaded
-by that user across spaces. Room quota counts all entries in that room. Limits
+by that user across spaces. The limit is that user's `quotaOverride` when set,
+otherwise `USER_QUOTA_BYTES` (also returned as `quotaBytes` on `GET /me`).
+Lowering a quota does not delete existing entries; further uploads fail with
+`QUOTA_EXCEEDED` until usage drops below the new limit. Room quota counts all
+entries in that room and is not affected by per-user overrides. Limits
 are checked atomically after streaming, so concurrent uploads cannot overdraw a
 quota; failed uploads are deleted. Entries per space are capped at `MAX_ITEMS`
 (temporary rooms at min(100, MAX_ITEMS)). Listings/snapshots are complete and
@@ -167,7 +175,7 @@ every 30s. Writes/withdrawals/expiry send events to the same authorized channel.
 | 401 | `UNAUTHENTICATED` → login |
 | 403 | `FORBIDDEN`, `ORIGIN_REJECTED`, `USER_DISABLED`, `INVITATION_REQUIRED`, `INVITE_INVALID`, `VERIFIED_EMAIL_REQUIRED` |
 | 404 | `NOT_FOUND`, `PROVIDER_UNAVAILABLE` |
-| 409 | `LAST_ADMIN` |
+| 409 | `LAST_ADMIN`, `EMAIL_IN_USE` |
 | 413 | `BODY_TOO_LARGE`, `TEXT_TOO_LARGE`, `FILE_TOO_LARGE`, `QUOTA_EXCEEDED`, `ITEM_LIMIT` → show configured limit |
 | 415 | `INVALID_IMAGE` → unsupported/corrupt/too many pixels |
 | 429 | `RATE_LIMITED`, `UPLOAD_BUSY`, `SOCKET_LIMIT`; HTTP responses have integer `Retry-After` seconds |

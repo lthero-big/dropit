@@ -45,7 +45,7 @@ export function InvitePage() {
   return (
     <div>
       <p className="mx-auto mt-10 max-w-md border-l-4 border-primary bg-secondary px-3 py-2 text-sm">
-        加入「{preview.spaceName === 'Private space' ? '私人空间' : preview.spaceName}」· 剩余 {preview.remainingUses} 次 ·{' '}
+        登录成功后自动加入「{preview.spaceName === 'Private space' ? '私人空间' : preview.spaceName}」· 剩余 {preview.remainingUses} 次 ·{' '}
         {formatRemain(preview.expiresAt - now)}
       </p>
       <LoginPage invite={token} />
