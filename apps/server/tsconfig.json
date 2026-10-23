@@ -1,21 +1,8 @@
 {
   "compilerOptions": {
-    "target": "ES2023",
-    "lib": ["ES2023"],
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "outDir": "dist",
-    "rootDir": "src",
-    "strict": true,
-    "skipLibCheck": true,
-    "verbatimModuleSyntax": true,
-    "erasableSyntaxOnly": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "types": ["node"]
+    "target": "ES2023", "module": "NodeNext", "moduleResolution": "NodeNext",
+    "strict": true, "esModuleInterop": true, "skipLibCheck": true,
+    "outDir": "dist", "rootDir": "src", "lib": ["ES2023", "DOM", "DOM.Iterable"]
   },
-  "include": ["src"]
+  "include": ["src/**/*.ts"]
 }

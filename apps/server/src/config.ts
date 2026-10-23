@@ -1,97 +1,49 @@
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath } from 'node:url';
 
-export interface AppConfig {
-  nodeEnv: string
-  host: string
-  port: number
-  appUrl: string
-  sessionSecret: string
-  githubClientId: string
-  githubClientSecret: string
-  googleClientId: string
-  googleClientSecret: string
-  adminEmails: string[]
-  dataDir: string
-  databasePath: string
-  staticDir: string | null
-  maxUploadBytes: number
-  userQuotaBytes: number
-  retentionHours: number
-  guestRetentionHours: number
-  trustProxy: boolean
+export interface Config {
+  origin: string; production: boolean; port: number; dataDir: string; adminEmails: string[];
+  trustProxy: string[]; maxFileBytes: number; userQuotaBytes: number; retentionMs: number;
+  roomQuotaBytes: number; roomMaxFileBytes: number; roomRetentionMs: number;
+  sessionMs: number; cleanupMs: number; maxTextBytes: number; maxItems: number;
+  rateWindowMs: number; rateGeneral: number; rateAuth: number; rateInvite: number;
+  rateUpload: number; rateRoom: number;
 }
 
-const DEV_SESSION_SECRET = 'dev-only-change-me'
-const WEAK_SECRETS = new Set(['', 'change-me', 'changeme', DEV_SESSION_SECRET])
-
-export function repoRootFrom(importMetaUrl: string): string {
-  return fileURLToPath(new URL('../../..', importMetaUrl))
-}
-
-export function loadConfig(
-  env: NodeJS.ProcessEnv,
-  options: { repoRoot?: string } = {},
-): AppConfig {
-  const nodeEnv = env.NODE_ENV || 'development'
-  const host = env.HOST || '0.0.0.0'
-  const port = readInt(env, 'PORT', 8787, 1, 65535)
-  const repoRoot = options.repoRoot ?? repoRootFrom(import.meta.url)
-  const dataDir = path.resolve(env.DATA_DIR || path.join(repoRoot, 'data'))
-  const databasePath = path.resolve(env.DATABASE_PATH || path.join(dataDir, 'dropit.sqlite'))
-  const staticDir = blankToNull(env.STATIC_DIR)
-  const sessionSecret = env.SESSION_SECRET || (nodeEnv === 'production' ? '' : DEV_SESSION_SECRET)
-
-  if (nodeEnv === 'production' && WEAK_SECRETS.has(sessionSecret)) {
-    throw new Error('SESSION_SECRET must be set to a unique value in production')
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const number = (key: string, fallback: number) => {
+    const value = Number(env[key] ?? fallback);
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`Invalid ${key}`);
+    return value;
+  };
+  const production = env.NODE_ENV === 'production';
+  const port = number('PORT', 8787);
+  if (port > 65535) throw new Error('Invalid PORT');
+  const url = new URL(env.APP_ORIGIN ?? `http://localhost:${port}`);
+  if (!['http:', 'https:'].includes(url.protocol) || url.origin !== url.href.replace(/\/$/, '') ||
+      (production && url.protocol !== 'https:')) throw new Error('APP_ORIGIN must be an origin (HTTPS in production)');
+  const config: Config = {
+    origin: url.origin, production, port, dataDir: env.DATA_DIR || fileURLToPath(new URL('../../../data', import.meta.url)),
+    adminEmails: (env.ADMIN_EMAILS ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+    trustProxy: (env.TRUST_PROXY ?? '').split(',').map(s => s.trim()).filter(Boolean),
+    maxFileBytes: number('MAX_FILE_BYTES', 25 * 1024 ** 2), userQuotaBytes: number('USER_QUOTA_BYTES', 1024 ** 3),
+    retentionMs: number('RETENTION_HOURS', 168) * 3600000,
+    roomQuotaBytes: number('ROOM_QUOTA_BYTES', 50 * 1024 ** 2),
+    roomMaxFileBytes: number('ROOM_MAX_FILE_BYTES', 5 * 1024 ** 2),
+    roomRetentionMs: number('ROOM_RETENTION_HOURS', 24) * 3600000,
+    sessionMs: number('SESSION_HOURS', 168) * 3600000, cleanupMs: number('CLEANUP_INTERVAL_MS', 60000),
+    maxTextBytes: number('MAX_TEXT_BYTES', 65536), maxItems: number('MAX_ITEMS', 1000),
+    rateWindowMs: number('RATE_WINDOW_MS', 60000), rateGeneral: number('RATE_GENERAL', 240),
+    rateAuth: number('RATE_AUTH', 20), rateInvite: number('RATE_INVITE', 10),
+    rateUpload: number('RATE_UPLOAD', 30), rateRoom: number('RATE_ROOM', 10),
+  };
+  for (const value of [config.retentionMs, config.roomRetentionMs, config.sessionMs]) {
+    if (!Number.isSafeInteger(value)) throw new Error('Retention/session duration is too large');
   }
-
-  return {
-    nodeEnv,
-    host,
-    port,
-    appUrl: stripTrailingSlash(env.APP_URL || `http://localhost:${port}`),
-    sessionSecret,
-    githubClientId: env.GITHUB_CLIENT_ID ?? '',
-    githubClientSecret: env.GITHUB_CLIENT_SECRET ?? '',
-    googleClientId: env.GOOGLE_CLIENT_ID ?? '',
-    googleClientSecret: env.GOOGLE_CLIENT_SECRET ?? '',
-    adminEmails: (env.ADMIN_EMAILS ?? '')
-      .split(',')
-      .map((email) => email.trim().toLowerCase())
-      .filter((email) => email.length > 0),
-    dataDir,
-    databasePath,
-    staticDir: staticDir ? path.resolve(staticDir) : null,
-    maxUploadBytes: readInt(env, 'MAX_UPLOAD_BYTES', 100 * 1024 * 1024, 1, 10 * 1024 * 1024 * 1024),
-    userQuotaBytes: readInt(env, 'USER_QUOTA_BYTES', 1024 * 1024 * 1024, 1, 1024 * 1024 * 1024 * 1024),
-    retentionHours: readInt(env, 'RETENTION_HOURS', 168, 1, 24 * 365),
-    guestRetentionHours: readInt(env, 'GUEST_RETENTION_HOURS', 24, 1, 24 * 30),
-    trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY?.toLowerCase() === 'true',
+  if (config.roomRetentionMs > 86400000 || config.roomRetentionMs > config.retentionMs ||
+      config.roomMaxFileBytes >= config.maxFileBytes || config.roomQuotaBytes >= config.userQuotaBytes ||
+      config.rateAuth >= config.rateGeneral || config.rateInvite >= config.rateGeneral ||
+      config.rateUpload >= config.rateGeneral || config.rateRoom >= config.rateUpload) {
+    throw new Error('Room retention must be <=24h; room quotas and sensitive rate limits must be stricter');
   }
-}
-
-function readInt(
-  env: NodeJS.ProcessEnv,
-  key: string,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
-  const raw = env[key]
-  if (raw === undefined || raw === '') return fallback
-  const value = Number(raw)
-  if (!Number.isInteger(value) || value < min || value > max) {
-    throw new Error(`${key} must be an integer from ${min} to ${max}`)
-  }
-  return value
-}
-
-function blankToNull(value: string | undefined): string | null {
-  if (value === undefined || value.trim() === '') return null
-  return value
-}
-
-function stripTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, '')
+  return config;
 }
