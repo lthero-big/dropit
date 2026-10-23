@@ -2,7 +2,8 @@ import { join } from 'node:path';
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { getConnInfo } from '@hono/node-server/conninfo';
-import { createNodeWebSocket } from '@hono/node-ws';
+import { upgradeWebSocket } from '@hono/node-server';
+import { WebSocketServer, type WebSocket } from 'ws';
 import { loadConfig, type Config } from './config.js';
 import { ApiError, hash, token, type Session } from './domain.js';
 import { SqliteRepository, type Repository } from './repository.js';
@@ -136,6 +137,8 @@ export function createBackend(options: BackendOptions = {}) {
     if (!code || code.length > 4096 || c.req.query('error')) throw new ApiError(400, 'OAUTH_DENIED');
     const identity = await provider.exchange(code, flow.verifier, `${config.origin}/api/auth/${providerName}/callback`);
     if (identity.provider !== providerName) throw new ApiError(400, 'OAUTH_PROVIDER_ERROR');
+    const retry = limiter.consume(`auth:identity:${hash(`${providerName}:${identity.subject}`)}`, config.rateAuth, now());
+    if (retry) { c.header('Retry-After', String(retry)); throw new ApiError(429, 'RATE_LIMITED'); }
     const session = token();
     repo.login(identity, flow.inviteHash, config.adminEmails, hash(session), now() + config.sessionMs, now());
     setCookie(c, sessionCookie, session, { ...cookie, maxAge: Math.floor(config.sessionMs / 1000) });
@@ -247,8 +250,7 @@ export function createBackend(options: BackendOptions = {}) {
     });
   }
 
-  const nodeWs = createNodeWebSocket({ app });
-  nodeWs.wss.options.maxPayload = 1024;
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 });
   const socketsByIp = new Map<string, number>();
   const socketsByUser = new Map<string, number>();
   for (const base of ['/api/spaces/:space', '/api/rooms/:room']) {
@@ -258,7 +260,7 @@ export function createBackend(options: BackendOptions = {}) {
       const auth = c.get('session');
       const ip = c.get('ip');
       const userKey = auth?.user.id ?? `room:${ip}`;
-      if ((socketsByIp.get(ip) ?? 0) >= 8 || (socketsByUser.get(userKey) ?? 0) >= 8 || nodeWs.wss.clients.size >= 256) throw new ApiError(429, 'SOCKET_LIMIT');
+      if ((socketsByIp.get(ip) ?? 0) >= 8 || (socketsByUser.get(userKey) ?? 0) >= 8 || wss.clients.size >= 256) throw new ApiError(429, 'SOCKET_LIMIT');
       const authorized = () => {
         if (space.roomHash) return Boolean(repo.room(space.roomHash, now()));
         return Boolean(auth && repo.session(auth.sessionHash, now()) && repo.isMember(space.id, auth.user.id));
@@ -274,17 +276,17 @@ export function createBackend(options: BackendOptions = {}) {
           if (count) map.set(key, count); else map.delete(key);
         }
       };
-      return nodeWs.upgradeWebSocket(c, {
+      return upgradeWebSocket(c, {
         onOpen(_event, ws) {
           if (!authorized()) { ws.close(1008); return; }
-          if ((socketsByIp.get(ip) ?? 0) >= 8 || (socketsByUser.get(userKey) ?? 0) >= 8 || nodeWs.wss.clients.size > 256) {
+          if ((socketsByIp.get(ip) ?? 0) >= 8 || (socketsByUser.get(userKey) ?? 0) >= 8 || wss.clients.size > 256) {
             ws.close(1013, 'Socket limit'); return;
           }
           opened = true;
           socketsByIp.set(ip, (socketsByIp.get(ip) ?? 0) + 1);
           socketsByUser.set(userKey, (socketsByUser.get(userKey) ?? 0) + 1);
           unsubscribe = events.subscribe(space.id, {
-            send(data) { if ((ws.raw?.bufferedAmount ?? 0) > 1024 ** 2) { ws.close(1013, 'Slow consumer'); release(); } else ws.send(data); },
+            send(data) { if (((ws.raw as WebSocket | undefined)?.bufferedAmount ?? 0) > 1024 ** 2) { ws.close(1013, 'Slow consumer'); release(); } else ws.send(data); },
             close(code, reason) { ws.close(code, reason); release(); },
           }, authorized);
           // Authoritative replacement snapshot on EVERY connect, including reconnect.
@@ -299,15 +301,15 @@ export function createBackend(options: BackendOptions = {}) {
   let validation: NodeJS.Timeout | undefined;
   let heartbeat: NodeJS.Timeout | undefined;
   const alive = new WeakSet<object>();
-  nodeWs.wss.on('connection', ws => { alive.add(ws); ws.on('pong', () => alive.add(ws)); });
+  wss.on('connection', ws => { alive.add(ws); ws.on('pong', () => alive.add(ws)); });
   return {
-    app, repo, files, events, service, config, injectWebSocket: nodeWs.injectWebSocket,
+    app, repo, files, events, service, config, websocket: { server: wss },
     async startMaintenance() {
       await service.cleanup();
       timer = setInterval(() => { void service.cleanup().catch(() => console.error('Cleanup failed; will retry')); }, config.cleanupMs).unref();
       validation = setInterval(() => events.revalidate(), 1000).unref();
       heartbeat = setInterval(() => {
-        for (const ws of nodeWs.wss.clients) {
+        for (const ws of wss.clients) {
           if (!alive.has(ws)) ws.terminate();
           else { alive.delete(ws); ws.ping(); }
         }
@@ -316,8 +318,8 @@ export function createBackend(options: BackendOptions = {}) {
     async close() {
       clearInterval(timer); clearInterval(validation); clearInterval(heartbeat);
       events.close();
-      for (const ws of nodeWs.wss.clients) ws.terminate();
-      nodeWs.wss.close();
+      for (const ws of wss.clients) ws.terminate();
+      wss.close();
       await service.cleanup();
       repo.close();
     },

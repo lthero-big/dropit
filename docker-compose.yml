@@ -1,0 +1,40 @@
+services:
+  dropit:
+    build: .
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      # Local HTTP demo. For production use HTTPS origin + NODE_ENV=production.
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: "8787"
+      HOST: 0.0.0.0
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8787}
+      DATA_DIR: /data
+      STATIC_DIR: /app/public
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      MAX_FILE_BYTES: ${MAX_FILE_BYTES:-26214400}
+      USER_QUOTA_BYTES: ${USER_QUOTA_BYTES:-1073741824}
+      RETENTION_HOURS: ${RETENTION_HOURS:-168}
+      ROOM_MAX_FILE_BYTES: ${ROOM_MAX_FILE_BYTES:-5242880}
+      ROOM_QUOTA_BYTES: ${ROOM_QUOTA_BYTES:-52428800}
+      ROOM_RETENTION_HOURS: ${ROOM_RETENTION_HOURS:-24}
+      SESSION_HOURS: ${SESSION_HOURS:-168}
+      CLEANUP_INTERVAL_MS: ${CLEANUP_INTERVAL_MS:-60000}
+      MAX_TEXT_BYTES: ${MAX_TEXT_BYTES:-65536}
+      MAX_ITEMS: ${MAX_ITEMS:-1000}
+      RATE_WINDOW_MS: ${RATE_WINDOW_MS:-60000}
+      RATE_GENERAL: ${RATE_GENERAL:-240}
+      RATE_AUTH: ${RATE_AUTH:-20}
+      RATE_INVITE: ${RATE_INVITE:-10}
+      RATE_UPLOAD: ${RATE_UPLOAD:-30}
+      RATE_ROOM: ${RATE_ROOM:-10}
+      TRUST_PROXY: ${TRUST_PROXY:-}
+    volumes:
+      - dropit-data:/data
+
+volumes:
+  dropit-data:

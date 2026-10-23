@@ -58,6 +58,6 @@ test('Configuration rejects unsafe origin, invalid limits and weak room policy',
 
 test('Filenames remove traversal, control and bidi characters, including long names', () => {
   const name = cleanFilename('../..\\unsafe\r\n\u202E' + 'a'.repeat(300));
-  assert(name.length <= 180); assert.doesNotMatch(name, /[\/\\\r\n\u202E]/);
+  assert(name.length <= 180); assert.doesNotMatch(name, /[/\\\r\n\u202E]/);
   assert.notEqual(cleanFilename('...'), '');
 });

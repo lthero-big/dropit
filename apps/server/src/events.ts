@@ -15,8 +15,8 @@ export class MemoryBroadcaster implements Broadcaster {
   }
   revalidate() {
     for (const entry of this.connections) if (!entry.authorized()) {
-      entry.socket.close(1008, 'Authorization expired');
       this.connections.delete(entry);
+      try { entry.socket.close(1008, 'Authorization expired'); } catch { /* already disconnected */ }
     }
   }
   publish(channel: string, event: unknown) {
@@ -24,8 +24,16 @@ export class MemoryBroadcaster implements Broadcaster {
     const data = JSON.stringify(event);
     for (const entry of this.connections) if (entry.channel === channel) {
       try { entry.socket.send(data); }
-      catch { entry.socket.close(1011); this.connections.delete(entry); }
+      catch {
+        this.connections.delete(entry);
+        try { entry.socket.close(1011); } catch { /* already disconnected */ }
+      }
     }
   }
-  close() { for (const entry of this.connections) entry.socket.close(1001, 'Server shutdown'); this.connections.clear(); }
+  close() {
+    for (const entry of this.connections) {
+      try { entry.socket.close(1001, 'Server shutdown'); } catch { /* already disconnected */ }
+    }
+    this.connections.clear();
+  }
 }

@@ -4,6 +4,7 @@ import { mkdtemp, readdir, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
+import type { Server } from 'node:http';
 import { serve } from '@hono/node-server';
 import WebSocket from 'ws';
 import sharp from 'sharp';
@@ -33,7 +34,7 @@ async function fixture(overrides: Partial<Config> = {}, providerName = 'github')
       return identities.get(code)!;
     },
   };
-  const config = { ...loadConfig({}), dataDir: directory, ...overrides };
+  const config = { ...loadConfig({}), origin, dataDir: directory, ...overrides };
   const backend = createBackend({ config, providers: { [providerName]: provider }, now: () => time,
     remoteAddress: c => c.req.header('x-test-ip') ?? '127.0.0.1' });
   const request = (path: string, init: RequestInit = {}, cookie = '') => backend.app.request(path, {
@@ -71,7 +72,7 @@ async function fixture(overrides: Partial<Config> = {}, providerName = 'github')
     return response.json();
   };
   const upload = (base: string, cookie: string, bytes: Uint8Array | string, mime = 'application/octet-stream', filename = 'test.bin') =>
-    request(`${base}/items/file`, { method: 'POST', headers: { 'content-type': mime, 'x-file-name': encodeURIComponent(filename) }, body: bytes }, cookie);
+    request(`${base}/items/file`, { method: 'POST', headers: { 'content-type': mime, 'x-file-name': encodeURIComponent(filename) }, body: typeof bytes === 'string' ? bytes : new Uint8Array(bytes) }, cookie);
   return { ...backend, request, json, start, finish, login, admin, invite, upload, directory,
     exchanges: () => exchanges, advance: (ms: number) => { time += ms; },
     async dispose() { await backend.close(); await rm(directory, { recursive: true, force: true }); } };
@@ -215,6 +216,7 @@ test('D2/G: plain text round trips; raster thumbnail, filename sanitization and 
   assert.equal(response.status, 201);
   const { item } = await response.json();
   assert.equal(item.hasThumbnail, true);
+  // eslint-disable-next-line no-control-regex -- explicitly verify filename control characters are removed
   assert.doesNotMatch(item.filename, /[\\/\u0000\r\n]/);
   assert.equal(item.fileKey, undefined);
   const thumbnail = await f.request(`${base}/items/${item.id}/thumbnail`, {}, admin.cookie);
@@ -320,6 +322,20 @@ test('F2: interrupted upload and thumbnail quota failure remove every staged fil
   assert.equal(f.repo.usage(admin.user.id), 0);
 });
 
+test('D1/D3: a disconnected subscriber cannot roll back committed files or block other subscribers', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  f.events.subscribe(admin.space.id, { send() { throw new Error('Disconnected'); }, close() { throw new Error('Disconnected'); } }, () => true);
+  const received: string[] = [];
+  f.events.subscribe(admin.space.id, { send(data) { received.push(data); }, close() {} }, () => true);
+  const response = await f.upload(base, admin.cookie, 'persist me');
+  assert.equal(response.status, 201);
+  const { item } = await response.json();
+  assert.equal(JSON.parse(received[0]).item.id, item.id);
+  assert.equal((await readdir(join(f.directory, 'files'))).length, 1);
+  assert.equal(await (await f.request(`${base}/items/${item.id}/download`, {}, admin.cookie)).text(), 'persist me');
+});
+
 test('G1/G4: missing, null and cross-site origins rejected; security headers on success and errors', async t => {
   const f = await fixture(); t.after(() => f.dispose());
   for (const untrusted of ['', 'null', 'https://attacker.example', `${origin}.attacker.example`]) {
@@ -368,8 +384,7 @@ async function connect(url: string, cookie = '', socketOrigin = origin) {
 test('D1/D4/C2/A2: real WS broadcasts within 1s, reconnect replaces snapshot, denial and immediate revocation', { timeout: 15000 }, async t => {
   const f = await fixture(); t.after(() => f.dispose());
   const admin = await f.admin();
-  const server = serve({ fetch: f.app.fetch, port: 0, hostname: '127.0.0.1' });
-  f.injectWebSocket(server);
+  const server = serve({ fetch: f.app.fetch, port: 0, hostname: '127.0.0.1', websocket: f.websocket }) as Server;
   await once(server, 'listening');
   t.after(() => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }));
   const address = server.address(); assert(address && typeof address !== 'string');
@@ -404,7 +419,7 @@ test('C2/E: actual WS cross-space denial and temporary room expiry closes subscr
   const member = await f.login('member', invite.token);
   const { spaces } = await (await f.request('/api/spaces', {}, member.cookie)).json();
   const privateSpace = spaces.find((space: any) => space.ownerId !== admin.user.id);
-  const server = serve({ fetch: f.app.fetch, port: 0, hostname: '127.0.0.1' }); f.injectWebSocket(server);
+  const server = serve({ fetch: f.app.fetch, port: 0, hostname: '127.0.0.1', websocket: f.websocket }) as Server;
   await once(server, 'listening');
   t.after(() => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }));
   const address = server.address(); assert(address && typeof address !== 'string');

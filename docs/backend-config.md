@@ -8,9 +8,11 @@ at `APP_ORIGIN` (typically terminated by a trusted reverse proxy).
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `NODE_ENV` | development | `production` enables Secure cookies and HSTS |
-| `APP_ORIGIN` | `http://localhost:3000` | Exact browser origin, no path |
-| `PORT` | 3000 | Listen port |
-| `DATA_DIR` | `./data` | Persistent SQLite and file directory |
+| `APP_ORIGIN` | `http://localhost:$PORT` | Exact browser origin, no path; example uses 5173 for Vite |
+| `PORT` | 8787 | Listen port |
+| `HOST` | `0.0.0.0` | Listen address (example uses loopback for local development) |
+| `DATA_DIR` | repository `data/` | Persistent SQLite and file directory; image sets `/data` |
+| `STATIC_DIR` | `apps/web/dist` | Built frontend directory; image sets `/app/public` |
 | `ADMIN_EMAILS` | empty | Comma-separated verified emails; if empty, first login becomes admin |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | unset | Enables GitHub login only when both are set |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | unset | Enables Google login only when both are set |

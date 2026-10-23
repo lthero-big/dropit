@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+
 export interface Config {
   origin: string; production: boolean; port: number; dataDir: string; adminEmails: string[];
   trustProxy: string[]; maxFileBytes: number; userQuotaBytes: number; retentionMs: number;
@@ -14,11 +16,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     return value;
   };
   const production = env.NODE_ENV === 'production';
-  const url = new URL(env.APP_ORIGIN ?? 'http://localhost:3000');
+  const port = number('PORT', 8787);
+  if (port > 65535) throw new Error('Invalid PORT');
+  const url = new URL(env.APP_ORIGIN ?? `http://localhost:${port}`);
   if (!['http:', 'https:'].includes(url.protocol) || url.origin !== url.href.replace(/\/$/, '') ||
       (production && url.protocol !== 'https:')) throw new Error('APP_ORIGIN must be an origin (HTTPS in production)');
   const config: Config = {
-    origin: url.origin, production, port: number('PORT', 3000), dataDir: env.DATA_DIR ?? './data',
+    origin: url.origin, production, port, dataDir: env.DATA_DIR || fileURLToPath(new URL('../../../data', import.meta.url)),
     adminEmails: (env.ADMIN_EMAILS ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
     trustProxy: (env.TRUST_PROXY ?? '').split(',').map(s => s.trim()).filter(Boolean),
     maxFileBytes: number('MAX_FILE_BYTES', 25 * 1024 ** 2), userQuotaBytes: number('USER_QUOTA_BYTES', 1024 ** 3),
@@ -32,6 +36,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rateAuth: number('RATE_AUTH', 20), rateInvite: number('RATE_INVITE', 10),
     rateUpload: number('RATE_UPLOAD', 30), rateRoom: number('RATE_ROOM', 10),
   };
+  for (const value of [config.retentionMs, config.roomRetentionMs, config.sessionMs]) {
+    if (!Number.isSafeInteger(value)) throw new Error('Retention/session duration is too large');
+  }
   if (config.roomRetentionMs > 86400000 || config.roomRetentionMs > config.retentionMs ||
       config.roomMaxFileBytes >= config.maxFileBytes || config.roomQuotaBytes >= config.userQuotaBytes ||
       config.rateAuth >= config.rateGeneral || config.rateInvite >= config.rateGeneral ||

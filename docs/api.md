@@ -163,7 +163,7 @@ every 30s. Writes/withdrawals/expiry send events to the same authorized channel.
 
 | HTTP | Codes / frontend action |
 | --- | --- |
-| 400 | `INVALID_INPUT`, `INVALID_JSON`, `JSON_REQUIRED`, `EMPTY_TEXT`, `EMPTY_FILE`, `INVALID_FILENAME`, `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR` |
+| 400 | `INVALID_INPUT`, `INVALID_JSON`, `JSON_REQUIRED`, `EMPTY_TEXT`, `EMPTY_FILE`, `UPLOAD_TIMEOUT`, `INVALID_FILENAME`, `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR` |
 | 401 | `UNAUTHENTICATED` → login |
 | 403 | `FORBIDDEN`, `ORIGIN_REJECTED`, `USER_DISABLED`, `INVITATION_REQUIRED`, `INVITE_INVALID`, `VERIFIED_EMAIL_REQUIRED` |
 | 404 | `NOT_FOUND`, `PROVIDER_UNAVAILABLE` |
@@ -175,7 +175,7 @@ every 30s. Writes/withdrawals/expiry send events to the same authorized channel.
 
 Rate windows default to 60s; limits are enforced separately by trusted client IP
 and authenticated account. General: 240; auth: 20; invite: 10; upload/write: 30;
-room create/write: 10; room access: 30. Limits are per process (MVP is one instance).
+room create/write: 10; room access: 30. Auth also limits the verified provider identity across IPs. Limits are per process (MVP is one instance).
 Missing Origin is rejected for writes, including command-line calls. With no
 `TRUST_PROXY`, forwarding headers are ignored. When configured, CIDRs are walked
 from the actual socket through X-Forwarded-For; the first untrusted hop is client IP.

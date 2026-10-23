@@ -5,3 +5,10 @@ data/
 .env.*
 !.env.example
 *.log
+coverage/
+*.sqlite
+*.sqlite-*
+*.tsbuildinfo
+.DS_Store
+.idea/
+.vscode/

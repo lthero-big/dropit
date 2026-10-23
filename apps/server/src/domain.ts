@@ -18,6 +18,7 @@ export interface Identity { provider: string; subject: string; email: string; na
 export interface Session { user: User; sessionHash: string; expiresAt: number }
 
 export function cleanFilename(input: string): string {
+  // eslint-disable-next-line no-control-regex -- filenames must strip control characters
   return input.normalize('NFKC').replace(/[\\/\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '_')
     .replace(/^\.+/, '').trim().slice(0, 180) || 'download';
 }
