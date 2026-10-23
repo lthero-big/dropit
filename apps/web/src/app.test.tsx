@@ -41,6 +41,24 @@ const me = {
 
 const space = { id: 's1', name: 'Private space', ownerId: 'u1', expiresAt: null }
 
+const limits = {
+  maxFileBytes: 500,
+  maxTextBytes: 1000,
+  maxItems: 1000,
+  userQuotaBytes: 1000,
+  retentionMs: 86_400_000,
+  roomQuotaBytes: 200,
+  roomMaxFileBytes: 100,
+  roomRetentionMs: 3_600_000,
+  rateWindowMs: 60_000,
+  rateGeneral: 240,
+  rateAuth: 20,
+  rateInvite: 10,
+  rateUpload: 30,
+  rateRoom: 10,
+  sessionMs: 86_400_000,
+}
+
 function item(partial: Partial<Item> & Pick<Item, 'id' | 'text'>): Item {
   return {
     spaceId: 's1',
@@ -206,17 +224,21 @@ describe('dropit web', () => {
       if (url === '/api/spaces') return json({ spaces: [space] })
       if (url === '/api/admin/users') {
         return json({
-          users: [{ ...me.user, usedBytes: 20, quotaBytes: 1000 }, { id: 'u2', email: 'be@example.com', name: 'Bea', role: 'user', disabled: 0, createdAt: 2, usedBytes: 5, quotaBytes: 1000 }],
+          users: [
+            { ...me.user, pending: 0, usedBytes: 20, quotaBytes: 1000, quotaOverride: null },
+            { id: 'u2', email: 'be@example.com', name: 'Bea', role: 'user', disabled: 0, pending: 0, createdAt: 2, usedBytes: 5, quotaBytes: 1000, quotaOverride: null },
+          ],
         })
       }
       if (url === '/api/admin/invites') return json({ invites: [] })
+      if (url === '/api/admin/limits') return json(limits)
       if (url === '/api/admin/users/u2' && init?.method === 'PATCH') return new Response(null, { status: 204 })
       if (url === '/api/spaces/s1/items/text') return json({ error: { code: 'QUOTA_EXCEEDED' } }, 413, { 'Retry-After': '3' })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
     renderAt('/admin')
     expect(await screen.findByRole('heading', { name: '管理' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '用户' }))
+    fireEvent.click(screen.getByRole('tab', { name: '用户' }))
     expect(await screen.findByText('Bea')).toBeTruthy()
     expect(screen.getByText('20 B / 1000 B')).toBeTruthy()
     const stop = screen.getAllByRole('button', { name: '停用' })
@@ -235,6 +257,119 @@ describe('dropit web', () => {
     fireEvent.change(await screen.findByLabelText('要发送的文本'), { target: { value: 'too much' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     expect(await screen.findByText(/已超过配额，3 秒后再试/)).toBeTruthy()
+  })
+
+  it('pre-provisions a user, edits the role, and force-logs them out', async () => {
+    stubFetch((url, init) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/spaces') return json({ spaces: [space] })
+      if (url === '/api/admin/limits') return json(limits)
+      if (url === '/api/admin/invites') return json({ invites: [] })
+      if (url === '/api/admin/users' && init?.method === 'POST') return json({ id: 'u3' }, 201)
+      if (url === '/api/admin/users') {
+        return json({
+          users: [
+            { ...me.user, pending: 0, usedBytes: 20, quotaBytes: 1000, quotaOverride: null },
+            { id: 'u2', email: 'be@example.com', name: 'Bea', role: 'user', disabled: 0, pending: 1, createdAt: 2, usedBytes: 5, quotaBytes: 5 * 1024 * 1024, quotaOverride: 5 * 1024 * 1024 },
+          ],
+        })
+      }
+      if (url === '/api/admin/users/u2/logout' && init?.method === 'POST') return new Response(null, { status: 204 })
+      if (url === '/api/admin/users/u2' && init?.method === 'PATCH') return new Response(null, { status: 204 })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/admin')
+    fireEvent.click(await screen.findByRole('tab', { name: '用户' }))
+    expect(await screen.findByText('待首次登录')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '新建用户' }))
+    fireEvent.change(screen.getByLabelText('邮箱'), { target: { value: 'new@example.com' } })
+    fireEvent.change(screen.getByLabelText('显示名称'), { target: { value: 'New' } })
+    fireEvent.change(screen.getByLabelText('角色'), { target: { value: 'admin' } })
+    fireEvent.click(screen.getByRole('checkbox', { name: '使用安装默认配额' }))
+    fireEvent.change(screen.getByLabelText('配额（MB）'), { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: '创建用户' }))
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/admin/users' && call.init?.method === 'POST')).toBe(true))
+    const created = calls.find((call) => call.url === '/api/admin/users' && call.init?.method === 'POST')
+    expect(created?.init?.body).toBe(JSON.stringify({ email: 'new@example.com', name: 'New', role: 'admin', quotaBytes: 2 * 1024 * 1024 }))
+
+    fireEvent.click(screen.getAllByRole('button', { name: '编辑' })[1]!)
+    fireEvent.click(screen.getByRole('button', { name: '强制下线' }))
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/admin/users/u2/logout' && call.init?.method === 'POST')).toBe(true))
+    fireEvent.change(screen.getByLabelText('角色'), { target: { value: 'admin' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/admin/users/u2' && call.init?.method === 'PATCH')).toBe(true))
+    const saved = calls.find((call) => call.url === '/api/admin/users/u2' && call.init?.method === 'PATCH')
+    expect(saved?.init?.body).toBe(JSON.stringify({ name: 'Bea', role: 'admin', disabled: false, quotaBytes: 5 * 1024 * 1024 }))
+  })
+
+  it('labels invite state and shows read-only limits', async () => {
+    stubFetch((url, init) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/spaces') return json({ spaces: [space] })
+      if (url === '/api/admin/limits') return json(limits)
+      if (url === '/api/admin/users') return json({ users: [] })
+      if (url === '/api/admin/invites' && init?.method === 'POST') return json({ url: 'http://localhost/invite/once' }, 201)
+      if (url === '/api/admin/invites') {
+        return json({
+          invites: [
+            { id: 'i1', spaceId: 's1', maxUses: 5, uses: 5, expiresAt: Date.now() + 3_600_000, revoked: 0, createdBy: 'u1' },
+            { id: 'i2', spaceId: 's1', maxUses: 5, uses: 0, expiresAt: Date.now() - 1000, revoked: 0, createdBy: 'u1' },
+            { id: 'i3', spaceId: 's1', maxUses: 5, uses: 0, expiresAt: Date.now() + 3_600_000, revoked: 1, createdBy: 'u1' },
+          ],
+        })
+      }
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/admin')
+    expect(await screen.findByText('已用尽')).toBeTruthy()
+    expect(screen.getAllByText('已过期').length).toBeGreaterThan(0)
+    expect(screen.getByText('已撤销')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '撤销' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '生成邀请' }))
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/admin/invites' && call.init?.method === 'POST')).toBe(true))
+    const post = calls.find((call) => call.url === '/api/admin/invites' && call.init?.method === 'POST')
+    expect(post?.init?.body).toBe(JSON.stringify({ spaceId: 's1', maxUses: 5, expiresInHours: 168 }))
+    fireEvent.click(screen.getByRole('tab', { name: '限制' }))
+    expect(await screen.findByText(/这些限制来自环境变量/)).toBeTruthy()
+  })
+
+  it('filters clipboard text on the current snapshot', async () => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/spaces') return json({ spaces: [space] })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/')
+    await screen.findByRole('button', { name: '发送' })
+    FakeSocket.instances.at(-1)?.emit({
+      type: 'snapshot',
+      items: [item({ id: 'a', text: 'alpha secret' }), item({ id: 'b', text: 'beta' })],
+      serverTime: Date.now(),
+      expiresAt: null,
+    })
+    expect(await screen.findByText('alpha secret')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('搜索'), { target: { value: 'alpha' } })
+    expect(screen.getByText('alpha secret')).toBeTruthy()
+    expect(screen.queryByText('beta')).toBeNull()
+    fireEvent.change(screen.getByLabelText('搜索'), { target: { value: 'missing' } })
+    expect(screen.getByText('没有匹配的内容。')).toBeTruthy()
+  })
+
+  it('opens another temporary room from the room page', async () => {
+    let rooms = 0
+    stubFetch((url, init) => {
+      if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
+      if (url === '/api/rooms' && init?.method === 'POST') {
+        rooms += 1
+        return json({ token: `room-${rooms}`, expiresAt: Date.now() + 60_000, url: `/rooms/room-${rooms}` }, 201)
+      }
+      if (url.startsWith('/api/rooms/')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/rooms/existing')
+    expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '新建房间' }))
+    expect(await screen.findByText(/\/rooms\/room-1/)).toBeTruthy()
   })
 
   it('says when an invite or room is gone', async () => {

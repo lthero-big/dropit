@@ -5,13 +5,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import type { Server } from 'node:http';
+import Database from 'better-sqlite3';
 import { serve } from '@hono/node-server';
 import WebSocket from 'ws';
 import sharp from 'sharp';
 import { createBackend } from '../src/backend.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { hash, type Identity } from '../src/domain.js';
+import { migration1 } from '../src/migrations.js';
 import type { OAuthProvider } from '../src/oauth.js';
+import { SqliteRepository } from '../src/repository.js';
 
 const origin = 'http://localhost:3000';
 const cookieValue = (response: Response, name: string) => response.headers.getSetCookie().find(c => c.startsWith(`${name}=`))?.split(';')[0] ?? '';
@@ -51,12 +54,12 @@ async function fixture(overrides: Partial<Config> = {}, providerName = 'github')
     assert.equal(url.searchParams.get('code_challenge')?.length, 43);
     return { state: url.searchParams.get('state')!, browser: cookieValue(response, 'dropit_oauth'), response };
   };
-  const finish = async (flow: Awaited<ReturnType<typeof start>>, subject: string) => {
-    identities.set(subject, { provider: providerName, subject, email: `${subject}@example.com`, name: subject });
+  const finish = async (flow: Awaited<ReturnType<typeof start>>, subject: string, email?: string) => {
+    identities.set(subject, { provider: providerName, subject, email: email ?? `${subject}@example.com`, name: subject });
     return request(`/api/auth/${providerName}/callback?${new URLSearchParams({ state: flow.state, code: subject })}`, {}, flow.browser);
   };
-  const login = async (subject: string, invite?: string) => {
-    const response = await finish(await start(invite), subject);
+  const login = async (subject: string, invite?: string, email?: string) => {
+    const response = await finish(await start(invite), subject, email);
     return { response, cookie: cookieValue(response, 'dropit_session') };
   };
   const admin = async () => {
@@ -437,6 +440,103 @@ test('C2/E: actual WS cross-space denial and temporary room expiry closes subscr
   assert.equal((await socket.next()).type, 'snapshot');
   const closed = once(socket.ws, 'close'); f.advance(1001); await f.service.cleanup();
   assert.equal((await closed)[0], 1008);
+});
+
+test('admin pre-provisions a user that the first verified login binds', async t => {
+  const f = await fixture({ userQuotaBytes: 100 }); t.after(() => f.dispose());
+  const admin = await f.admin();
+  assert.equal((await f.json('/api/admin/users', { email: 'not-an-email' }, admin.cookie)).status, 400);
+  assert.equal((await f.json('/api/admin/users', { email: 'admin@example.com' }, admin.cookie)).status, 409);
+  assert.equal((await f.json(`/api/admin/users/${admin.user.id}`, {}, admin.cookie, 'PATCH')).status, 400);
+  const createdResponse = await f.json('/api/admin/users', { email: 'guest@example.com', name: 'Guest', role: 'user', quotaBytes: 10 }, admin.cookie);
+  assert.equal(createdResponse.status, 201);
+  const created = await createdResponse.json();
+  assert.equal(created.pending, 1);
+  assert.equal(created.quotaBytes, 10);
+  assert.equal(created.quotaOverride, 10);
+  assert.equal(f.repo.spaces(created.id).length, 1);
+  const blockedResponse = await f.json('/api/admin/users', { email: 'blocked@example.com' }, admin.cookie);
+  const blockedUser = await blockedResponse.json();
+  assert.equal((await f.json(`/api/admin/users/${blockedUser.id}`, { disabled: true }, admin.cookie, 'PATCH')).status, 204);
+  const blocked = await f.login('blocked');
+  assert.equal(blocked.response.status, 403);
+  assert.equal((await blocked.response.json()).error.code, 'USER_DISABLED');
+  assert.equal(f.repo.users().length, 3);
+
+  const claimed = await f.login('guest');
+  assert.equal(claimed.response.status, 302);
+  const guestMe = await (await f.request('/api/me', {}, claimed.cookie)).json();
+  assert.equal(guestMe.user.id, created.id);
+  assert.equal(guestMe.user.pending, 0);
+  assert.equal(guestMe.quotaBytes, 10);
+  const spaces = await (await f.request('/api/spaces', {}, claimed.cookie)).json();
+  assert.equal(spaces.spaces.length, 1);
+  assert.equal(f.repo.users().length, 3);
+  const other = await f.login('other', undefined, 'guest@example.com');
+  assert.equal(other.response.status, 403);
+  assert.equal((await other.response.json()).error.code, 'INVITATION_REQUIRED');
+  assert.equal(f.repo.users().length, 3);
+
+  const base = `/api/spaces/${spaces.spaces[0].id}`;
+  assert.equal((await f.json(`${base}/items/text`, { text: '12345678901' }, claimed.cookie)).status, 413);
+  assert.equal((await f.json(`${base}/items/text`, { text: '1234567890' }, claimed.cookie)).status, 201);
+  assert.equal((await f.json(`/api/spaces/${admin.space.id}/items/text`, { text: '12345678901' }, admin.cookie)).status, 201);
+  assert.equal((await f.json(`/api/admin/users/${created.id}`, { quotaBytes: null }, admin.cookie, 'PATCH')).status, 204);
+  assert.equal((await (await f.request('/api/me', {}, claimed.cookie)).json()).quotaBytes, 100);
+  assert.equal((await f.json(`${base}/items/text`, { text: '12345678901' }, claimed.cookie)).status, 201);
+  assert.equal((await f.json('/api/admin/users', { email: 'nope@example.com' }, claimed.cookie)).status, 403);
+  assert.equal((await f.request('/api/admin/limits', {}, claimed.cookie)).status, 403);
+  const limits = await (await f.request('/api/admin/limits', {}, admin.cookie)).json();
+  assert.equal(limits.userQuotaBytes, 100);
+  assert.equal('adminEmails' in limits, false);
+  assert.equal('dataDir' in limits, false);
+  assert.equal((await f.request('/api/admin/users/missing/logout', { method: 'POST' }, admin.cookie)).status, 404);
+  assert.equal((await f.json('/api/admin/users/missing', { name: 'No' }, admin.cookie, 'PATCH')).status, 404);
+
+  assert.equal((await f.json(`/api/admin/users/${created.id}`, { role: 'admin', name: 'Guest 2' }, admin.cookie, 'PATCH')).status, 204);
+  assert.equal((await f.json(`/api/admin/users/${admin.user.id}`, { role: 'user' }, admin.cookie, 'PATCH')).status, 204);
+  assert.equal((await f.json(`/api/admin/users/${created.id}`, { role: 'user' }, claimed.cookie, 'PATCH')).status, 409);
+  assert.equal((await f.request(`/api/admin/users/${created.id}/logout`, { method: 'POST' }, claimed.cookie)).status, 204);
+  assert.equal((await f.request('/api/me', {}, claimed.cookie)).status, 401);
+  assert.equal(f.repo.users().find(user => user.id === created.id)?.disabled, 0);
+  assert.equal((await f.login('guest')).response.status, 302);
+});
+
+test('ADMIN_EMAILS pre-provision is stored as admin and claimed by that mailbox', async t => {
+  const f = await fixture({ adminEmails: ['owner@example.com', 'boss@example.com'] }); t.after(() => f.dispose());
+  const owner = await f.login('owner');
+  assert.equal(owner.response.status, 302);
+  const response = await f.json('/api/admin/users', { email: 'Boss@Example.com', role: 'user' }, owner.cookie);
+  assert.equal(response.status, 201);
+  const body = await response.json();
+  assert.equal(body.email, 'boss@example.com');
+  assert.equal(body.role, 'admin');
+  assert.equal(body.pending, 1);
+  const claimed = await f.login('boss');
+  assert.equal(claimed.response.status, 302);
+  const me = await (await f.request('/api/me', {}, claimed.cookie)).json();
+  assert.equal(me.user.id, body.id);
+  assert.equal(me.user.role, 'admin');
+  assert.equal(me.user.pending, 0);
+});
+
+test('schema v1 migrates without dropping users', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dropit-mig-'));
+  const path = join(directory, 'dropit.sqlite');
+  const db = new Database(path);
+  db.exec(migration1);
+  db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt) VALUES (?,?,?,?,?,?)').run('u', 'old@example.com', 'Old', 'user', 0, 1);
+  db.close();
+  const repo = new SqliteRepository(path);
+  t.after(async () => {
+    repo.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const users = repo.users();
+  assert.equal(users.length, 1);
+  assert.equal(users[0]?.email, 'old@example.com');
+  assert.equal(users[0]?.pending, 0);
+  assert.equal(users[0]?.quotaBytes, null);
 });
 
 test('A2: production cookie has Secure and __Host prefix', async t => {

@@ -21,3 +21,12 @@ CREATE INDEX item_expiry ON items(expiresAt);
 CREATE TABLE garbage (key TEXT PRIMARY KEY);
 PRAGMA user_version=1;
 `;
+
+// Pending accounts are claimed by the first verified OAuth identity with the same email.
+// quotaBytes NULL means the installation default (USER_QUOTA_BYTES).
+export const migration2 = `
+ALTER TABLE users ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN quotaBytes INTEGER;
+CREATE INDEX user_email ON users(email);
+PRAGMA user_version=2;
+`;

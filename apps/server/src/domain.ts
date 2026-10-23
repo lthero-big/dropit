@@ -5,7 +5,7 @@ export class ApiError extends Error {
 }
 export const token = () => randomBytes(32).toString('base64url');
 export const hash = (value: string) => createHash('sha256').update(value).digest('base64url');
-export interface User { id: string; email: string; name: string; role: 'admin' | 'user'; disabled: number; createdAt: number }
+export interface User { id: string; email: string; name: string; role: 'admin' | 'user'; disabled: number; pending: number; createdAt: number }
 export interface Space { id: string; name: string; ownerId: string | null; expiresAt: number | null; roomHash: string | null }
 export interface Invite { id: string; tokenHash: string; spaceId: string; maxUses: number; uses: number; expiresAt: number; revoked: number; createdBy: string }
 export interface Item {

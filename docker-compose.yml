@@ -2,6 +2,8 @@ services:
   dropit:
     build: .
     ports:
+      # Loopback only. On a private LAN host, bind that address instead
+      # (for example "192.168.1.152:8787:8787"). Do not publish 0.0.0.0.
       - "127.0.0.1:8787:8787"
     environment:
       # Local HTTP demo. For production use HTTPS origin + NODE_ENV=production.

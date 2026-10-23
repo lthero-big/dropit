@@ -60,8 +60,8 @@ export class ClipboardService {
       expiresAt: Math.min(now + this.config.retentionMs, space.expiresAt ?? Infinity) };
   }
   private commit(item: Item, room: boolean) {
-    this.repo.addItem(item, room ? this.config.roomQuotaBytes : this.config.userQuotaBytes,
-      room ? Math.min(100, this.config.maxItems) : this.config.maxItems);
+    const quota = room ? this.config.roomQuotaBytes : (this.repo.quotaOverride(item.userId!) ?? this.config.userQuotaBytes);
+    this.repo.addItem(item, quota, room ? Math.min(100, this.config.maxItems) : this.config.maxItems);
     this.events.publish(item.spaceId, { type: 'item.created', item: publicItem(item) });
     return publicItem(item);
   }

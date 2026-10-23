@@ -3,7 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ApiError, type Flow, type Identity, type Invite, type Item, type Session, type Space, type User } from './domain.js';
-import { migration1 } from './migrations.js';
+import { migration1, migration2 } from './migrations.js';
+
+type UserRow = User & { quotaBytes: number | null };
+
+function toUser(row: UserRow): User {
+  return { id: row.id, email: row.email, name: row.name, role: row.role, disabled: row.disabled, pending: row.pending, createdAt: row.createdAt };
+}
 
 export interface Repository {
   saveFlow(flow: Flow): void;
@@ -11,8 +17,11 @@ export interface Repository {
   login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number): User;
   session(sessionHash: string, now: number): Session | undefined;
   logout(sessionHash: string): void;
-  users(): (User & { usedBytes: number })[];
-  disableUser(id: string, disabled: boolean): void;
+  users(): (User & { usedBytes: number; quotaBytes: number | null })[];
+  provisionUser(input: { email: string; name: string; role: 'admin' | 'user'; quotaBytes: number | null; now: number }): User;
+  updateUser(id: string, patch: { disabled?: boolean; role?: 'admin' | 'user'; name?: string; quotaBytes?: number | null }): void;
+  revokeSessions(id: string): void;
+  quotaOverride(userId: string): number | null;
   spaces(userId: string): Space[];
   space(id: string): Space | undefined;
   room(roomHash: string, now: number): Space | undefined;
@@ -43,8 +52,11 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version === 0) this.db.transaction(() => this.db.exec(migration1))();
-    else if (version !== 1) throw new Error(`Unsupported schema version ${version}`);
+    if (version > 2) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 2) this.db.transaction(() => {
+      if (version < 1) this.db.exec(migration1);
+      this.db.exec(migration2);
+    })();
   }
   saveFlow(flow: Flow) {
     this.db.prepare('INSERT INTO flows VALUES (@stateHash,@browserHash,@provider,@verifier,@inviteHash,@expiresAt)').run(flow);
@@ -59,56 +71,93 @@ export class SqliteRepository implements Repository {
   }
   login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number) {
     return this.db.transaction(() => {
-      let user = this.db.prepare('SELECT u.* FROM users u JOIN identities i ON i.userId=u.id WHERE i.provider=? AND i.subject=?')
-        .get(identity.provider, identity.subject) as User | undefined;
-      if (user?.disabled) throw new ApiError(403, 'USER_DISABLED');
+      let row = this.db.prepare('SELECT u.* FROM users u JOIN identities i ON i.userId=u.id WHERE i.provider=? AND i.subject=?')
+        .get(identity.provider, identity.subject) as UserRow | undefined;
+      if (row?.disabled) throw new ApiError(403, 'USER_DISABLED');
       const invite = inviteHash ? this.invite(inviteHash, now) : undefined;
       if (inviteHash && !invite) throw new ApiError(403, 'INVITE_INVALID');
-      if (!user) {
+      if (!row) {
+        const pending = this.db.prepare('SELECT * FROM users WHERE pending=1 AND lower(email)=lower(?)').get(identity.email) as UserRow | undefined;
+        // A disabled pre-provisioned account must not be bypassed by creating a second user.
+        if (pending?.disabled) throw new ApiError(403, 'USER_DISABLED');
+        if (pending) {
+          this.db.prepare('UPDATE users SET pending=0 WHERE id=?').run(pending.id);
+          this.db.prepare('INSERT INTO identities (provider,subject,userId) VALUES (?,?,?)').run(identity.provider, identity.subject, pending.id);
+          row = { ...pending, pending: 0 };
+        }
+      }
+      if (!row) {
         const first = (this.db.prepare('SELECT count(*) AS n FROM users').get() as { n: number }).n === 0;
         const admin = admins.includes(identity.email.toLowerCase()) || (first && admins.length === 0);
         if (!admin && !invite) throw new ApiError(403, 'INVITATION_REQUIRED');
-        user = { id: randomUUID(), email: identity.email, name: identity.name, role: admin ? 'admin' : 'user', disabled: 0, createdAt: now };
-        this.db.prepare('INSERT INTO users VALUES (@id,@email,@name,@role,@disabled,@createdAt)').run(user);
-        this.db.prepare('INSERT INTO identities VALUES (?,?,?)').run(identity.provider, identity.subject, user.id);
+        row = { id: randomUUID(), email: identity.email, name: identity.name, role: admin ? 'admin' : 'user', disabled: 0, pending: 0, createdAt: now, quotaBytes: null };
+        this.db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt,pending,quotaBytes) VALUES (@id,@email,@name,@role,@disabled,@createdAt,@pending,@quotaBytes)').run(row);
+        this.db.prepare('INSERT INTO identities (provider,subject,userId) VALUES (?,?,?)').run(identity.provider, identity.subject, row.id);
         const spaceId = randomUUID();
-        this.db.prepare('INSERT INTO spaces VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', user.id);
-        this.db.prepare('INSERT INTO members VALUES (?,?)').run(spaceId, user.id);
+        this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
+        this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
       }
       if (invite) {
         // Membership already held: login is idempotent and does not spend another use.
-        if (!this.isMember(invite.spaceId, user.id)) {
+        if (!this.isMember(invite.spaceId, row.id)) {
           const result = this.db.prepare('UPDATE invites SET uses=uses+1 WHERE id=? AND uses<maxUses AND revoked=0 AND expiresAt>?').run(invite.id, now);
           if (result.changes !== 1) throw new ApiError(403, 'INVITE_INVALID');
-          this.db.prepare('INSERT INTO members VALUES (?,?)').run(invite.spaceId, user.id);
+          this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(invite.spaceId, row.id);
         }
       }
-      this.db.prepare('INSERT INTO sessions VALUES (?,?,?)').run(sessionHash, user.id, expiresAt);
-      return user;
+      this.db.prepare('INSERT INTO sessions (sessionHash,userId,expiresAt) VALUES (?,?,?)').run(sessionHash, row.id, expiresAt);
+      return toUser(row);
     }).immediate();
   }
   session(sessionHash: string, now: number): Session | undefined {
     const row = this.db.prepare('SELECT u.*, s.expiresAt FROM sessions s JOIN users u ON u.id=s.userId WHERE s.sessionHash=? AND s.expiresAt>? AND u.disabled=0')
-      .get(sessionHash, now) as (User & { expiresAt: number }) | undefined;
+      .get(sessionHash, now) as (UserRow & { expiresAt: number }) | undefined;
     if (!row) return undefined;
-    const { expiresAt, ...user } = row;
-    return { user, expiresAt, sessionHash };
+    return { user: toUser(row), expiresAt: row.expiresAt, sessionHash };
   }
   logout(sessionHash: string) { this.db.prepare('DELETE FROM sessions WHERE sessionHash=?').run(sessionHash); }
   users() {
-    return this.db.prepare('SELECT u.*, coalesce((SELECT sum(storedBytes) FROM items WHERE userId=u.id),0) AS usedBytes FROM users u ORDER BY createdAt').all() as (User & { usedBytes: number })[];
+    return this.db.prepare(`SELECT u.id,u.email,u.name,u.role,u.disabled,u.createdAt,u.pending,u.quotaBytes,
+      coalesce((SELECT sum(storedBytes) FROM items WHERE userId=u.id),0) AS usedBytes
+      FROM users u ORDER BY createdAt`).all() as (User & { usedBytes: number; quotaBytes: number | null })[];
   }
-  disableUser(id: string, disabled: boolean) {
+  provisionUser(input: { email: string; name: string; role: 'admin' | 'user'; quotaBytes: number | null; now: number }) {
+    return this.db.transaction(() => {
+      const taken = this.db.prepare('SELECT 1 FROM users WHERE lower(email)=lower(?)').get(input.email);
+      if (taken) throw new ApiError(409, 'EMAIL_IN_USE');
+      const row: UserRow = { id: randomUUID(), email: input.email, name: input.name, role: input.role, disabled: 0, pending: 1, createdAt: input.now, quotaBytes: input.quotaBytes };
+      this.db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt,pending,quotaBytes) VALUES (@id,@email,@name,@role,@disabled,@createdAt,@pending,@quotaBytes)').run(row);
+      const spaceId = randomUUID();
+      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
+      this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
+      return toUser(row);
+    }).immediate();
+  }
+  updateUser(id: string, patch: { disabled?: boolean; role?: 'admin' | 'user'; name?: string; quotaBytes?: number | null }) {
     this.db.transaction(() => {
-      const user = this.db.prepare('SELECT * FROM users WHERE id=?').get(id) as User | undefined;
+      const user = this.db.prepare('SELECT * FROM users WHERE id=?').get(id) as UserRow | undefined;
       if (!user) throw new ApiError(404, 'NOT_FOUND');
-      if (disabled && !user.disabled && user.role === 'admin') {
+      const nextDisabled = patch.disabled ?? Boolean(user.disabled);
+      const nextRole = patch.role ?? user.role;
+      const wasEnabledAdmin = user.role === 'admin' && user.disabled === 0;
+      const staysEnabledAdmin = nextRole === 'admin' && !nextDisabled;
+      if (wasEnabledAdmin && !staysEnabledAdmin) {
         const { n } = this.db.prepare("SELECT count(*) AS n FROM users WHERE role='admin' AND disabled=0").get() as { n: number };
         if (n <= 1) throw new ApiError(409, 'LAST_ADMIN');
       }
-      this.db.prepare('UPDATE users SET disabled=? WHERE id=?').run(Number(disabled), id);
-      if (disabled) this.db.prepare('DELETE FROM sessions WHERE userId=?').run(id);
+      this.db.prepare('UPDATE users SET disabled=?, role=?, name=?, quotaBytes=? WHERE id=?').run(
+        Number(nextDisabled), nextRole, patch.name ?? user.name,
+        patch.quotaBytes === undefined ? user.quotaBytes : patch.quotaBytes, id);
+      if (nextDisabled && user.disabled === 0) this.db.prepare('DELETE FROM sessions WHERE userId=?').run(id);
     }).immediate();
+  }
+  revokeSessions(id: string) {
+    if (!this.db.prepare('SELECT 1 FROM users WHERE id=?').get(id)) throw new ApiError(404, 'NOT_FOUND');
+    this.db.prepare('DELETE FROM sessions WHERE userId=?').run(id);
+  }
+  quotaOverride(userId: string) {
+    const row = this.db.prepare('SELECT quotaBytes FROM users WHERE id=?').get(userId) as { quotaBytes: number | null } | undefined;
+    return row?.quotaBytes ?? null;
   }
   spaces(userId: string) { return this.db.prepare('SELECT s.* FROM spaces s JOIN members m ON m.spaceId=s.id WHERE m.userId=?').all(userId) as Space[]; }
   space(id: string) { return this.db.prepare('SELECT * FROM spaces WHERE id=?').get(id) as Space | undefined; }
