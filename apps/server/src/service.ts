@@ -56,7 +56,7 @@ export class ClipboardService {
     const now = this.now();
     return { id: randomUUID(), spaceId: space.id, userId: space.roomHash ? null : session!.user.id,
       kind: 'text', text: null, filename: null, mime: null, size: 0, storedBytes: 0,
-      fileKey: null, thumbnailKey: null, createdAt: now,
+      fileKey: null, thumbnailKey: null, createdAt: now, updatedAt: now,
       expiresAt: Math.min(now + this.config.retentionMs, space.expiresAt ?? Infinity) };
   }
   private commit(item: Item, room: boolean) {
@@ -70,6 +70,20 @@ export class ClipboardService {
     if (!text.trim()) throw new ApiError(400, 'EMPTY_TEXT');
     if (size > this.config.maxTextBytes) throw new ApiError(413, 'TEXT_TOO_LARGE');
     return this.commit({ ...this.baseItem(space, session), text, size, storedBytes: size }, Boolean(space.roomHash));
+  }
+  editText(space: Space, session: Session | undefined, id: string, text: string) {
+    const current = this.item(space, id);
+    if (current.kind !== 'text') throw new ApiError(400, 'INVALID_INPUT');
+    // Rooms: any capability holder. Spaces: the author only, so an owner cannot rewrite someone else.
+    if (!space.roomHash && current.userId !== session?.user.id) throw new ApiError(403, 'FORBIDDEN');
+    const size = Buffer.byteLength(text);
+    if (!text.trim()) throw new ApiError(400, 'EMPTY_TEXT');
+    if (size > this.config.maxTextBytes) throw new ApiError(413, 'TEXT_TOO_LARGE');
+    const quota = space.roomHash ? this.config.roomQuotaBytes : (this.repo.quotaOverride(current.userId!) ?? this.config.userQuotaBytes);
+    const updated = this.repo.replaceText(id, text, size, quota, this.now());
+    const item = publicItem(updated);
+    this.events.publish(space.id, { type: 'item.updated', item });
+    return item;
   }
   async upload(space: Space, session: Session | undefined, body: ReadableStream<Uint8Array>, filename: string, mime: string) {
     if (this.activeUploads >= 4) throw new ApiError(429, 'UPLOAD_BUSY');

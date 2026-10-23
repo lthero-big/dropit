@@ -48,6 +48,23 @@ const labels: Record<string, string> = {
   INTERNAL_ERROR: '服务暂时不可用',
 }
 
+const oauthLoginErrors = new Set([
+  'OAUTH_STATE_INVALID',
+  'OAUTH_DENIED',
+  'OAUTH_PROVIDER_ERROR',
+  'INVITE_INVALID',
+  'INVITATION_REQUIRED',
+  'USER_DISABLED',
+  'VERIFIED_EMAIL_REQUIRED',
+  'RATE_LIMITED',
+  'INTERNAL_ERROR',
+])
+
+export function loginErrorText(code: string | null): string | null {
+  if (!code || !oauthLoginErrors.has(code)) return null
+  return labels[code] ?? null
+}
+
 export function errorText(error: unknown): string {
   if (error instanceof ApiError) {
     const label = labels[error.code] ?? '请求失败'

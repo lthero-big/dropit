@@ -45,6 +45,10 @@ function string(value: unknown, max = 200): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > max) throw new ApiError(400, 'INVALID_INPUT');
   return value;
 }
+const oauthBrowserErrors = new Set([
+  'OAUTH_STATE_INVALID', 'OAUTH_DENIED', 'OAUTH_PROVIDER_ERROR', 'INVITE_INVALID',
+  'INVITATION_REQUIRED', 'USER_DISABLED', 'VERIFIED_EMAIL_REQUIRED', 'RATE_LIMITED', 'INTERNAL_ERROR',
+]);
 function integer(value: unknown, min: number, max: number): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new ApiError(400, 'INVALID_INPUT');
   return value;
@@ -126,13 +130,17 @@ export function createBackend(options: BackendOptions = {}) {
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND' } }, 404));
   app.get('/healthz', c => c.json({ status: 'ok' }));
   app.get('/api/auth/providers', c => c.json({ providers: Object.keys(providers) }));
+  const oauthFailure = (c: Ctx, error: unknown) => {
+    const code = error instanceof ApiError && oauthBrowserErrors.has(error.code) ? error.code : 'INTERNAL_ERROR';
+    return c.redirect(`${config.origin}/login?error=${code}`);
+  };
   app.get('/api/auth/:provider', c => {
     limit(c, 'auth', config.rateAuth, false);
     const providerName = c.req.param('provider');
     const provider = Object.hasOwn(providers, providerName) ? providers[providerName] : undefined;
     if (!provider) throw new ApiError(404, 'PROVIDER_UNAVAILABLE');
     const invite = c.req.query('invite');
-    if (invite && !repo.invite(hash(invite), now())) throw new ApiError(403, 'INVITE_INVALID');
+    if (invite && !repo.invite(hash(invite), now())) return c.redirect(`${config.origin}/login?error=INVITE_INVALID`);
     const state = token();
     const browser = token();
     const verifier = token();
@@ -142,25 +150,30 @@ export function createBackend(options: BackendOptions = {}) {
     return c.redirect(provider.authorizationUrl(state, hash(verifier), `${config.origin}/api/auth/${providerName}/callback`));
   });
   app.get('/api/auth/:provider/callback', async c => {
-    limit(c, 'auth', config.rateAuth, false);
-    const providerName = c.req.param('provider');
-    const provider = Object.hasOwn(providers, providerName) ? providers[providerName] : undefined;
-    const state = c.req.query('state');
-    const browser = getCookie(c, flowCookie);
-    if (!provider || !state || !browser) throw new ApiError(400, 'OAUTH_STATE_INVALID');
-    const flow = repo.consumeFlow(hash(state), hash(browser), providerName, now());
-    if (!flow) throw new ApiError(400, 'OAUTH_STATE_INVALID');
-    deleteCookie(c, flowCookie, { ...cookie, path: '/api/auth' });
-    const code = c.req.query('code');
-    if (!code || code.length > 4096 || c.req.query('error')) throw new ApiError(400, 'OAUTH_DENIED');
-    const identity = await provider.exchange(code, flow.verifier, `${config.origin}/api/auth/${providerName}/callback`);
-    if (identity.provider !== providerName) throw new ApiError(400, 'OAUTH_PROVIDER_ERROR');
-    const retry = limiter.consume(`auth:identity:${hash(`${providerName}:${identity.subject}`)}`, config.rateAuth, now());
-    if (retry) { c.header('Retry-After', String(retry)); throw new ApiError(429, 'RATE_LIMITED'); }
-    const session = token();
-    repo.login(identity, flow.inviteHash, config.adminEmails, hash(session), now() + config.sessionMs, now());
-    setCookie(c, sessionCookie, session, { ...cookie, maxAge: Math.floor(config.sessionMs / 1000) });
-    return c.redirect('/');
+    try {
+      limit(c, 'auth', config.rateAuth, false);
+      const providerName = c.req.param('provider');
+      const provider = Object.hasOwn(providers, providerName) ? providers[providerName] : undefined;
+      const state = c.req.query('state');
+      const browser = getCookie(c, flowCookie);
+      if (!provider || !state || !browser) throw new ApiError(400, 'OAUTH_STATE_INVALID');
+      const flow = repo.consumeFlow(hash(state), hash(browser), providerName, now());
+      if (!flow) throw new ApiError(400, 'OAUTH_STATE_INVALID');
+      deleteCookie(c, flowCookie, { ...cookie, path: '/api/auth' });
+      const code = c.req.query('code');
+      // Provider error text stays off the redirect. Only a fixed code is shown.
+      if (!code || code.length > 4096 || c.req.query('error')) throw new ApiError(400, 'OAUTH_DENIED');
+      const identity = await provider.exchange(code, flow.verifier, `${config.origin}/api/auth/${providerName}/callback`);
+      if (identity.provider !== providerName) throw new ApiError(400, 'OAUTH_PROVIDER_ERROR');
+      const retry = limiter.consume(`auth:identity:${hash(`${providerName}:${identity.subject}`)}`, config.rateAuth, now());
+      if (retry) { c.header('Retry-After', String(retry)); throw new ApiError(429, 'RATE_LIMITED'); }
+      const session = token();
+      repo.login(identity, flow.inviteHash, config.adminEmails, hash(session), now() + config.sessionMs, now());
+      setCookie(c, sessionCookie, session, { ...cookie, maxAge: Math.floor(config.sessionMs / 1000) });
+      return c.redirect(`${config.origin}/`);
+    } catch (error) {
+      return oauthFailure(c, error);
+    }
   });
   app.get('/api/me', c => {
     const auth = service.requireSession(c.get('session'));
@@ -292,6 +305,12 @@ export function createBackend(options: BackendOptions = {}) {
       if (mime.length > 200) throw new ApiError(400, 'INVALID_INPUT');
       if (!c.req.raw.body) throw new ApiError(400, 'EMPTY_FILE');
       return c.json({ item: await service.upload(space, c.get('session'), c.req.raw.body, filename, mime) }, 201);
+    });
+    app.patch(`${base}/items/:id`, async c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      const body = await json(c, config.maxTextBytes * 6 + 1024);
+      return c.json({ item: service.editText(space, c.get('session'), c.req.param('id')!, string(body.text, Infinity)) });
     });
     app.delete(`${base}/items/:id`, async c => {
       const space = scope(c);

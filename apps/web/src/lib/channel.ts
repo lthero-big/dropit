@@ -58,7 +58,7 @@ export function useChannel(base: string | null) {
           attempt = 0
           return
         }
-        if (message.type === 'item.created') {
+        if (message.type === 'item.created' || message.type === 'item.updated') {
           setItems((current) => upsert(current, message.item))
           return
         }

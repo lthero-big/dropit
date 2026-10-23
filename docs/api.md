@@ -15,8 +15,8 @@ Missing/expired/revoked session returns `401 UNAUTHENTICATED`.
 | Method | Path | Response / request |
 | --- | --- | --- |
 | GET | `/auth/providers` | `{providers: ['github','google']}`; only configured providers appear |
-| GET | `/auth/:provider?invite=:token` | Navigate the browser here; 302 to OAuth provider, sets flow-binding cookie. Optional invite is bound to this flow. |
-| GET | `/auth/:provider/callback` | OAuth-only callback; state, browser cookie and PKCE required; sets session and redirects to `/`. Errors are JSON. |
+| GET | `/auth/:provider?invite=:token` | Navigate the browser here; 302 to OAuth provider, sets flow-binding cookie. Optional invite is bound to this flow. An invalid invite redirects to `{APP_ORIGIN}/login?error=INVITE_INVALID` and does not start a flow. Unknown provider names stay JSON `404`. Auth-start rate limits stay JSON `429` with `Retry-After`. |
+| GET | `/auth/:provider/callback` | OAuth-only callback; state, browser cookie and PKCE required; sets session and redirects to `{APP_ORIGIN}/`. Browser-visible failures redirect to `{APP_ORIGIN}/login?error=CODE`. The code is one of `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR`, `INVITE_INVALID`, `INVITATION_REQUIRED`, `USER_DISABLED`, `VERIFIED_EMAIL_REQUIRED`, `RATE_LIMITED`, `INTERNAL_ERROR`. Provider error text is not copied into the URL. |
 | POST | `/auth/logout` | 204; immediately revokes this session, closes its sockets and clears cookie |
 | GET | `/me` | `{user, usedBytes, quotaBytes, maxFileBytes, maxTextBytes, retentionMs}` |
 | GET | `/invites/:token` | `{spaceName, expiresAt, remainingUses}`; invalid/revoked/used/expired: 404 |
@@ -77,6 +77,7 @@ Space routes require membership; room routes require the unexpired capability.
 | GET | `base` | `{id,name,expiresAt,maxFileBytes,quotaBytes}` |
 | GET | `base/items` | `{type:'snapshot', items:Item[],serverTime,expiresAt}`; current nonexpired entries, newest first |
 | POST | `base/items/text` | `{text:string}` → 201 `{item:Item}`; nonblank UTF-8, max `MAX_TEXT_BYTES` |
+| PATCH | `base/items/:id` | `{text:string}` → 200 `{item:Item}`. Text only. Same blank and size rules as create. `createdAt` and `expiresAt` stay; `updatedAt` becomes the edit time. Quota counts `newSize - oldSize` and always allows a shrink. Spaces: the author only (`403` for anyone else, including the space owner). Rooms: any current capability holder. Files return `400 INVALID_INPUT`. Unknown id or another space returns `404`. |
 | POST | `base/items/file` | **Raw binary body**, original type in `Content-Type`, filename in `X-File-Name: encodeURIComponent(name)` → 201 `{item:Item}` |
 | GET | `base/items/:id/download` | Raw bytes, `application/octet-stream`, `Content-Disposition: attachment`, `nosniff`. No range/resume support. |
 | GET | `base/items/:id/thumbnail` | Sanitized, re-encoded `image/webp` up to 320×320; 404 if no thumbnail |
@@ -95,6 +96,7 @@ interface Item {
   size: number; // original UTF-8 text/file bytes
   hasThumbnail: boolean;
   createdAt: number;
+  updatedAt: number; // equals createdAt until the text is edited in place
   expiresAt: number;
 }
 ```
@@ -120,8 +122,9 @@ text or original file MIME. Use only the thumbnail endpoint for image previews.
 User quota counts all original text/file bytes **plus thumbnail bytes** uploaded
 by that user across spaces. The limit is that user's `quotaOverride` when set,
 otherwise `USER_QUOTA_BYTES` (also returned as `quotaBytes` on `GET /me`).
-Lowering a quota does not delete existing entries; further uploads fail with
-`QUOTA_EXCEEDED` until usage drops below the new limit. Room quota counts all
+Lowering a quota does not delete existing entries; further uploads and text
+edits that grow past the limit fail with `QUOTA_EXCEEDED` until usage drops
+below the new limit. Shrinking a text item is always allowed. Room quota counts all
 entries in that room and is not affected by per-user overrides. Limits
 are checked atomically after streaming, so concurrent uploads cannot overdraw a
 quota; failed uploads are deleted. Entries per space are capped at `MAX_ITEMS`
@@ -144,12 +147,14 @@ Server → client JSON messages:
 type Message =
   | {type: 'snapshot'; items: Item[]; serverTime: number; expiresAt: number | null}
   | {type: 'item.created'; item: Item}
+  | {type: 'item.updated'; item: Item}
   | {type: 'item.deleted'; id: string};
 ```
 
 On **every** connection, replace the local list with the first `snapshot`, then
-apply created events by upserting `item.id` and deleted events by removing `id`.
-This reconciles entries created/deleted/expired while offline. Reconnect using
+apply created and updated events by upserting `item.id` (order stays `createdAt`)
+and deleted events by removing `id`.
+This reconciles entries created, edited, deleted or expired while offline. Reconnect using
 exponential backoff with jitter (e.g. 0.5s, 1s, 2s … max 30s), then consume the new
 snapshot. Alternatively, `GET base/items` is an authoritative HTTP refresh. The
 backend does not run browser reconnection code. Display expiry using serverTime;
@@ -168,6 +173,10 @@ every 30s. Writes/withdrawals/expiry send events to the same authorized channel.
 ```json
 {"error":{"code":"QUOTA_EXCEEDED"}}
 ```
+
+OAuth start and callback navigations are the exception: browser-visible failures
+redirect to `/login?error=CODE` instead of this JSON body. Unknown provider names
+and auth-start rate limits still use JSON.
 
 | HTTP | Codes / frontend action |
 | --- | --- |
