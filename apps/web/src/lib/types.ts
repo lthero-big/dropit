@@ -1,0 +1,79 @@
+export interface User {
+  id: string
+  email: string
+  name: string
+  role: 'admin' | 'user'
+  disabled: number
+  createdAt: number
+}
+
+export interface Me {
+  user: User
+  usedBytes: number
+  quotaBytes: number
+  maxFileBytes: number
+  maxTextBytes: number
+  retentionMs: number
+}
+
+export interface SpaceSummary {
+  id: string
+  name: string
+  ownerId: string | null
+  expiresAt: number | null
+}
+
+export interface ScopeInfo {
+  id: string
+  name: string
+  expiresAt: number | null
+  maxFileBytes: number
+  quotaBytes: number
+}
+
+export interface Item {
+  id: string
+  spaceId: string
+  userId: string | null
+  kind: 'text' | 'file'
+  text: string | null
+  filename: string | null
+  mime: string | null
+  size: number
+  hasThumbnail: boolean
+  createdAt: number
+  expiresAt: number
+}
+
+export interface Invite {
+  id: string
+  spaceId: string
+  maxUses: number
+  uses: number
+  expiresAt: number
+  revoked: number
+  createdBy: string
+}
+
+export interface InviteCreated extends Invite {
+  token: string
+  url: string
+}
+
+export interface InvitePreview {
+  spaceName: string
+  expiresAt: number
+  remainingUses: number
+}
+
+export interface AdminUser extends User {
+  usedBytes: number
+  quotaBytes: number
+}
+
+export type ServerMessage =
+  | { type: 'snapshot'; items: Item[]; serverTime: number; expiresAt: number | null }
+  | { type: 'item.created'; item: Item }
+  | { type: 'item.deleted'; id: string }
+
+export type ConnectionStatus = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'stopped'

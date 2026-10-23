@@ -1,6 +1,6 @@
 # dropit
 
-跨设备实时传递文本和文件的云剪贴板。后端 MVP 已实现；前端目前保留 Vite + React + TypeScript + Tailwind v4 + shadcn 主题壳，业务界面等待 UI 选定后接入。
+跨设备实时传递文本和文件的云剪贴板。前端按 Swiss 极简方案实现（登录、邀请、空间剪贴板、临时房间、管理后台），文本只作纯文本渲染，WebSocket 断线后按指数退避重连并用 snapshot 补拉。
 
 - 后端：Hono、SQLite WAL、本地磁盘、GitHub/Google OAuth（state + PKCE）、邀请制、服务器会话、私人/共享空间、临时房间、限流与配额、缩略图、定时清理。
 - WebSocket 使用 `@hono/node-server` 2.x 内置接口（替代已废弃的 `@hono/node-ws`），仅允许经过授权的空间/房间订阅。
