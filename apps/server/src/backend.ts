@@ -1,0 +1,325 @@
+import { join } from 'node:path';
+import { Hono, type Context } from 'hono';
+import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
+import { getConnInfo } from '@hono/node-server/conninfo';
+import { createNodeWebSocket } from '@hono/node-ws';
+import { loadConfig, type Config } from './config.js';
+import { ApiError, hash, token, type Session } from './domain.js';
+import { SqliteRepository, type Repository } from './repository.js';
+import { DiskFileStorage, type FileStorage } from './files.js';
+import { MemoryBroadcaster, type Broadcaster } from './events.js';
+import { oauthProviders, type OAuthProvider } from './oauth.js';
+import { ClipboardService } from './service.js';
+import { clientIpResolver, RateLimiter } from './rate-limit.js';
+
+type Env = { Variables: { session: Session | undefined; ip: string } };
+type Ctx = Context<Env>;
+export interface BackendOptions {
+  config?: Config; repo?: Repository; files?: FileStorage; events?: Broadcaster;
+  providers?: Record<string, OAuthProvider>; now?: () => number; remoteAddress?: (c: Context) => string;
+}
+
+async function json(c: Ctx, limit: number): Promise<Record<string, unknown>> {
+  if (!c.req.header('content-type')?.startsWith('application/json')) throw new ApiError(400, 'JSON_REQUIRED');
+  const reader = c.req.raw.body?.getReader();
+  if (!reader) throw new ApiError(400, 'INVALID_JSON');
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) { await reader.cancel(); throw new ApiError(413, 'BODY_TOO_LARGE'); }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  try {
+    const result: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (typeof result !== 'object' || !result || Array.isArray(result)) throw new Error();
+    return result as Record<string, unknown>;
+  } catch { throw new ApiError(400, 'INVALID_JSON'); }
+}
+function string(value: unknown, max = 200): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > max) throw new ApiError(400, 'INVALID_INPUT');
+  return value;
+}
+function integer(value: unknown, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new ApiError(400, 'INVALID_INPUT');
+  return value;
+}
+
+export function createBackend(options: BackendOptions = {}) {
+  const config = options.config ?? loadConfig();
+  const now = options.now ?? Date.now;
+  const repo = options.repo ?? new SqliteRepository(join(config.dataDir, 'dropit.sqlite'));
+  const files = options.files ?? new DiskFileStorage(join(config.dataDir, 'files'));
+  const events = options.events ?? new MemoryBroadcaster();
+  const providers = options.providers ?? oauthProviders();
+  const service = new ClipboardService(config, repo, files, events, now);
+  const app = new Hono<Env>();
+  const limiter = new RateLimiter(config.rateWindowMs);
+  const resolveIp = clientIpResolver(config);
+  const sessionCookie = config.production ? '__Host-dropit_session' : 'dropit_session';
+  const flowCookie = config.production ? '__Secure-dropit_oauth' : 'dropit_oauth';
+  const cookie = { httpOnly: true, secure: config.production, sameSite: 'Lax' as const, path: '/' };
+  const limit = (c: Ctx, group: string, count: number, account = true) => {
+    const keys = [`${group}:ip:${c.get('ip')}`];
+    if (account && c.get('session')) keys.push(`${group}:user:${c.get('session')!.user.id}`);
+    for (const key of keys) {
+      const retry = limiter.consume(key, count, now());
+      if (retry) { c.header('Retry-After', String(retry)); throw new ApiError(429, 'RATE_LIMITED'); }
+    }
+  };
+  app.use('*', async (c, next) => {
+    c.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
+    c.header('X-Content-Type-Options', 'nosniff');
+    c.header('X-Frame-Options', 'DENY');
+    c.header('Referrer-Policy', 'no-referrer');
+    c.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    if (config.production) c.header('Strict-Transport-Security', 'max-age=31536000');
+    await next();
+  });
+  app.use('/api/*', async (c, next) => {
+    c.header('Cache-Control', 'no-store');
+    let remote: string;
+    try { remote = options.remoteAddress?.(c) ?? getConnInfo(c).remote.address ?? 'unknown'; }
+    catch { remote = 'unknown'; }
+    let ip: string;
+    try { ip = resolveIp(remote, c.req.header('x-forwarded-for')); }
+    catch { ip = remote; }
+    c.set('ip', ip);
+    const rawSession = getCookie(c, sessionCookie);
+    c.set('session', rawSession ? repo.session(hash(rawSession), now()) : undefined);
+    limit(c, 'general', config.rateGeneral);
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && c.req.header('origin') !== config.origin) throw new ApiError(403, 'ORIGIN_REJECTED');
+    await next();
+  });
+  app.onError((error, c) => {
+    if (error instanceof ApiError) {
+      if (error.status === 429 && !c.res.headers.has('Retry-After')) c.header('Retry-After', '1');
+      return c.json({ error: { code: error.code } }, error.status);
+    }
+    // Do not log request URLs, cookies, OAuth codes, tokens, filenames or text.
+    console.error('Backend operation failed', error instanceof Error ? error.name : 'UnknownError');
+    return c.json({ error: { code: 'INTERNAL_ERROR' } }, 500);
+  });
+  app.notFound(c => c.json({ error: { code: 'NOT_FOUND' } }, 404));
+  app.get('/healthz', c => c.json({ status: 'ok' }));
+  app.get('/api/auth/providers', c => c.json({ providers: Object.keys(providers) }));
+  app.get('/api/auth/:provider', c => {
+    limit(c, 'auth', config.rateAuth, false);
+    const providerName = c.req.param('provider');
+    const provider = Object.hasOwn(providers, providerName) ? providers[providerName] : undefined;
+    if (!provider) throw new ApiError(404, 'PROVIDER_UNAVAILABLE');
+    const invite = c.req.query('invite');
+    if (invite && !repo.invite(hash(invite), now())) throw new ApiError(403, 'INVITE_INVALID');
+    const state = token();
+    const browser = token();
+    const verifier = token();
+    repo.saveFlow({ stateHash: hash(state), browserHash: hash(browser), provider: providerName, verifier,
+      inviteHash: invite ? hash(invite) : null, expiresAt: now() + 600000 });
+    setCookie(c, flowCookie, browser, { ...cookie, path: '/api/auth', maxAge: 600 });
+    return c.redirect(provider.authorizationUrl(state, hash(verifier), `${config.origin}/api/auth/${providerName}/callback`));
+  });
+  app.get('/api/auth/:provider/callback', async c => {
+    limit(c, 'auth', config.rateAuth, false);
+    const providerName = c.req.param('provider');
+    const provider = Object.hasOwn(providers, providerName) ? providers[providerName] : undefined;
+    const state = c.req.query('state');
+    const browser = getCookie(c, flowCookie);
+    if (!provider || !state || !browser) throw new ApiError(400, 'OAUTH_STATE_INVALID');
+    const flow = repo.consumeFlow(hash(state), hash(browser), providerName, now());
+    if (!flow) throw new ApiError(400, 'OAUTH_STATE_INVALID');
+    deleteCookie(c, flowCookie, { ...cookie, path: '/api/auth' });
+    const code = c.req.query('code');
+    if (!code || code.length > 4096 || c.req.query('error')) throw new ApiError(400, 'OAUTH_DENIED');
+    const identity = await provider.exchange(code, flow.verifier, `${config.origin}/api/auth/${providerName}/callback`);
+    if (identity.provider !== providerName) throw new ApiError(400, 'OAUTH_PROVIDER_ERROR');
+    const session = token();
+    repo.login(identity, flow.inviteHash, config.adminEmails, hash(session), now() + config.sessionMs, now());
+    setCookie(c, sessionCookie, session, { ...cookie, maxAge: Math.floor(config.sessionMs / 1000) });
+    return c.redirect('/');
+  });
+  app.get('/api/me', c => {
+    const auth = service.requireSession(c.get('session'));
+    return c.json({ user: auth.user, usedBytes: repo.usage(auth.user.id), quotaBytes: config.userQuotaBytes,
+      maxFileBytes: config.maxFileBytes, maxTextBytes: config.maxTextBytes, retentionMs: config.retentionMs });
+  });
+  app.post('/api/auth/logout', c => {
+    const auth = service.requireSession(c.get('session'));
+    repo.logout(auth.sessionHash);
+    events.revalidate();
+    deleteCookie(c, sessionCookie, cookie);
+    return c.body(null, 204);
+  });
+  app.get('/api/invites/:token', c => {
+    limit(c, 'invite', config.rateInvite);
+    const invite = repo.invite(hash(c.req.param('token')), now());
+    if (!invite) throw new ApiError(404, 'NOT_FOUND');
+    const space = repo.space(invite.spaceId)!;
+    return c.json({ spaceName: space.name, expiresAt: invite.expiresAt, remainingUses: invite.maxUses - invite.uses });
+  });
+  app.get('/api/admin/users', c => {
+    service.admin(c.get('session'));
+    return c.json({ users: repo.users().map(user => ({ ...user, quotaBytes: config.userQuotaBytes })) });
+  });
+  app.patch('/api/admin/users/:id', async c => {
+    service.admin(c.get('session'));
+    const body = await json(c, 1024);
+    if (typeof body.disabled !== 'boolean') throw new ApiError(400, 'INVALID_INPUT');
+    repo.disableUser(c.req.param('id'), body.disabled);
+    events.revalidate();
+    return c.body(null, 204);
+  });
+  app.get('/api/admin/invites', c => { service.admin(c.get('session')); return c.json({ invites: repo.invites() }); });
+  app.post('/api/admin/invites', async c => {
+    service.admin(c.get('session')); limit(c, 'invite', config.rateInvite);
+    const body = await json(c, 2048);
+    return c.json(service.createInvite(c.get('session'), string(body.spaceId), integer(body.maxUses ?? 1, 1, 100), integer(body.expiresInHours ?? 24, 1, 720)), 201);
+  });
+  app.delete('/api/admin/invites/:id', c => {
+    service.admin(c.get('session')); limit(c, 'invite', config.rateInvite);
+    repo.revokeInvite(c.req.param('id'));
+    return c.body(null, 204);
+  });
+  app.get('/api/spaces', c => {
+    const auth = service.requireSession(c.get('session'));
+    return c.json({ spaces: repo.spaces(auth.user.id).map(({ roomHash: _room, ...space }) => space) });
+  });
+  app.post('/api/rooms', c => { limit(c, 'room-create', config.rateRoom); return c.json(service.createRoom(), 201); });
+
+  const scope = (c: Ctx) => {
+    if (c.req.param('room')) {
+      limit(c, 'room-access', config.rateUpload);
+      return service.room(c.req.param('room')!);
+    }
+    return service.space(c.req.param('space')!, c.get('session'));
+  };
+  for (const base of ['/api/spaces/:space', '/api/rooms/:room']) {
+    app.get(base, c => {
+      const space = scope(c);
+      return c.json({ id: space.id, name: space.name, expiresAt: space.expiresAt,
+        maxFileBytes: space.roomHash ? config.roomMaxFileBytes : config.maxFileBytes,
+        quotaBytes: space.roomHash ? config.roomQuotaBytes : config.userQuotaBytes });
+    });
+    app.get(`${base}/items`, c => c.json(service.snapshot(scope(c))));
+    app.post(`${base}/items/text`, async c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      const body = await json(c, config.maxTextBytes * 6 + 1024);
+      return c.json({ item: service.text(space, c.get('session'), string(body.text, Infinity)) }, 201);
+    });
+    app.post(`${base}/items/file`, async c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'upload', space.roomHash ? config.rateRoom : config.rateUpload);
+      const max = space.roomHash ? config.roomMaxFileBytes : config.maxFileBytes;
+      const length = Number(c.req.header('content-length'));
+      if (Number.isFinite(length) && length > max) throw new ApiError(413, 'FILE_TOO_LARGE');
+      let filename: string;
+      try { filename = decodeURIComponent(c.req.header('x-file-name') ?? 'download'); }
+      catch { throw new ApiError(400, 'INVALID_FILENAME'); }
+      if (filename.length > 4096) throw new ApiError(400, 'INVALID_FILENAME');
+      const mime = (c.req.header('content-type') ?? 'application/octet-stream').split(';')[0].trim().toLowerCase();
+      if (mime.length > 200) throw new ApiError(400, 'INVALID_INPUT');
+      if (!c.req.raw.body) throw new ApiError(400, 'EMPTY_FILE');
+      return c.json({ item: await service.upload(space, c.get('session'), c.req.raw.body, filename, mime) }, 201);
+    });
+    app.delete(`${base}/items/:id`, async c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      await service.retract(space, c.req.param('id')!, c.get('session'));
+      return c.body(null, 204);
+    });
+    app.get(`${base}/items/:id/download`, c => {
+      const item = service.item(scope(c), c.req.param('id')!);
+      if (!item.fileKey) throw new ApiError(404, 'NOT_FOUND');
+      c.header('Content-Type', 'application/octet-stream');
+      c.header('Content-Length', String(item.size));
+      c.header('Content-Disposition', `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(item.filename!).replace(/['()*]/g, ch => '%' + ch.charCodeAt(0).toString(16))}`);
+      return c.body(files.stream(item.fileKey));
+    });
+    app.get(`${base}/items/:id/thumbnail`, c => {
+      const item = service.item(scope(c), c.req.param('id')!);
+      if (!item.thumbnailKey) throw new ApiError(404, 'NOT_FOUND');
+      c.header('Content-Type', 'image/webp');
+      return c.body(files.stream(item.thumbnailKey));
+    });
+  }
+
+  const nodeWs = createNodeWebSocket({ app });
+  nodeWs.wss.options.maxPayload = 1024;
+  const socketsByIp = new Map<string, number>();
+  const socketsByUser = new Map<string, number>();
+  for (const base of ['/api/spaces/:space', '/api/rooms/:room']) {
+    app.get(`${base}/ws`, c => {
+      if (c.req.header('origin') !== config.origin) throw new ApiError(403, 'ORIGIN_REJECTED');
+      const space = scope(c);
+      const auth = c.get('session');
+      const ip = c.get('ip');
+      const userKey = auth?.user.id ?? `room:${ip}`;
+      if ((socketsByIp.get(ip) ?? 0) >= 8 || (socketsByUser.get(userKey) ?? 0) >= 8 || nodeWs.wss.clients.size >= 256) throw new ApiError(429, 'SOCKET_LIMIT');
+      const authorized = () => {
+        if (space.roomHash) return Boolean(repo.room(space.roomHash, now()));
+        return Boolean(auth && repo.session(auth.sessionHash, now()) && repo.isMember(space.id, auth.user.id));
+      };
+      let unsubscribe: (() => void) | undefined;
+      let opened = false;
+      const release = () => {
+        unsubscribe?.();
+        if (!opened) return;
+        opened = false;
+        for (const [map, key] of [[socketsByIp, ip], [socketsByUser, userKey]] as const) {
+          const count = (map.get(key) ?? 1) - 1;
+          if (count) map.set(key, count); else map.delete(key);
+        }
+      };
+      return nodeWs.upgradeWebSocket(c, {
+        onOpen(_event, ws) {
+          if (!authorized()) { ws.close(1008); return; }
+          if ((socketsByIp.get(ip) ?? 0) >= 8 || (socketsByUser.get(userKey) ?? 0) >= 8 || nodeWs.wss.clients.size > 256) {
+            ws.close(1013, 'Socket limit'); return;
+          }
+          opened = true;
+          socketsByIp.set(ip, (socketsByIp.get(ip) ?? 0) + 1);
+          socketsByUser.set(userKey, (socketsByUser.get(userKey) ?? 0) + 1);
+          unsubscribe = events.subscribe(space.id, {
+            send(data) { if ((ws.raw?.bufferedAmount ?? 0) > 1024 ** 2) { ws.close(1013, 'Slow consumer'); release(); } else ws.send(data); },
+            close(code, reason) { ws.close(code, reason); release(); },
+          }, authorized);
+          // Authoritative replacement snapshot on EVERY connect, including reconnect.
+          ws.send(JSON.stringify(service.snapshot(space)));
+        },
+        onMessage(_event, ws) { ws.close(1008, 'Read-only channel'); },
+        onClose: release, onError: release,
+      });
+    });
+  }
+  let timer: NodeJS.Timeout | undefined;
+  let validation: NodeJS.Timeout | undefined;
+  let heartbeat: NodeJS.Timeout | undefined;
+  const alive = new WeakSet<object>();
+  nodeWs.wss.on('connection', ws => { alive.add(ws); ws.on('pong', () => alive.add(ws)); });
+  return {
+    app, repo, files, events, service, config, injectWebSocket: nodeWs.injectWebSocket,
+    async startMaintenance() {
+      await service.cleanup();
+      timer = setInterval(() => { void service.cleanup().catch(() => console.error('Cleanup failed; will retry')); }, config.cleanupMs).unref();
+      validation = setInterval(() => events.revalidate(), 1000).unref();
+      heartbeat = setInterval(() => {
+        for (const ws of nodeWs.wss.clients) {
+          if (!alive.has(ws)) ws.terminate();
+          else { alive.delete(ws); ws.ping(); }
+        }
+      }, 30000).unref();
+    },
+    async close() {
+      clearInterval(timer); clearInterval(validation); clearInterval(heartbeat);
+      events.close();
+      for (const ws of nodeWs.wss.clients) ws.terminate();
+      nodeWs.wss.close();
+      await service.cleanup();
+      repo.close();
+    },
+  };
+}
