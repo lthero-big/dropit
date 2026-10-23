@@ -1,0 +1,28 @@
+services:
+  dropit:
+    build: .
+    ports:
+      - "8787:8787"
+    environment:
+      NODE_ENV: production
+      PORT: "8787"
+      HOST: 0.0.0.0
+      APP_URL: http://localhost:8787
+      DATA_DIR: /data
+      STATIC_DIR: /app/public
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-104857600}
+      USER_QUOTA_BYTES: ${USER_QUOTA_BYTES:-1073741824}
+      RETENTION_HOURS: ${RETENTION_HOURS:-168}
+      GUEST_RETENTION_HOURS: ${GUEST_RETENTION_HOURS:-24}
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+    volumes:
+      - dropit-data:/data
+
+volumes:
+  dropit-data:

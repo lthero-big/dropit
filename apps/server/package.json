@@ -1,0 +1,32 @@
+{
+  "name": "@dropit/server",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "lint": "oxlint .",
+    "typecheck": "tsc -p tsconfig.typecheck.json --pretty false",
+    "test": "vitest run"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "better-sqlite3": "^12",
+    "hono": "^4",
+    "ws": "^8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7",
+    "@types/node": "^22",
+    "@types/ws": "^8",
+    "oxlint": "^1.88.0",
+    "tsx": "^4",
+    "typescript": "~6.0.3",
+    "vitest": "^4"
+  }
+}
