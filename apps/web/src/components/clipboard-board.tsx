@@ -26,6 +26,7 @@ export function ClipboardBoard({
   maxTextBytes,
   deadline = null,
   sender,
+  canEdit,
   canRetract,
   onActivity,
   onAuthLost,
@@ -40,6 +41,7 @@ export function ClipboardBoard({
   maxTextBytes: number
   deadline?: number | null
   sender: (item: Item) => string
+  canEdit: (item: Item) => boolean
   canRetract: (item: Item) => boolean
   onActivity?: () => void
   onAuthLost?: () => void
@@ -50,6 +52,9 @@ export function ClipboardBoard({
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState('')
   const [pending, setPending] = useState<string | null>(null)
+  const [editing, setEditing] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [savingEdit, setSavingEdit] = useState(false)
   const [progress, setProgress] = useState<{ name: string; ratio: number } | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [sending, setSending] = useState(false)
@@ -171,6 +176,35 @@ export function ClipboardBoard({
       if (error instanceof ApiError && error.status === 401) onAuthLost?.()
     } finally {
       setSending(false)
+    }
+  }
+
+  async function saveEdit(item: Item) {
+    const text = editDraft.trim()
+    if (!base || savingEdit) return
+    if (!text) {
+      toast.error('文本不能为空')
+      return
+    }
+    if (utf8Size(text) > maxTextBytes) {
+      toast.error(`文本超过长度上限（${formatBytes(maxTextBytes)}）`)
+      return
+    }
+    setSavingEdit(true)
+    try {
+      const result = await api<{ item: Item }>(`${base}/items/${item.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      })
+      channel.upsert(result.item)
+      setEditing(null)
+      onActivity?.()
+    } catch (error) {
+      toast.error(errorText(error))
+      if (error instanceof ApiError && error.status === 401) onAuthLost?.()
+    } finally {
+      setSavingEdit(false)
     }
   }
 
@@ -298,9 +332,35 @@ export function ClipboardBoard({
               <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
                 <span className="bg-foreground px-2 py-0.5 font-extrabold tracking-wider text-background uppercase">{sender(item)}</span>
                 <span className="text-muted-foreground">{formatWhen(item.createdAt, now)}</span>
+                {item.updatedAt > item.createdAt ? <span className="text-muted-foreground">已编辑</span> : null}
                 <span className="text-muted-foreground">剩余 {formatRemain(item.expiresAt - now)}</span>
               </div>
-              {item.kind === 'text' ? (
+              {item.kind === 'text' && editing === item.id ? (
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void saveEdit(item)
+                  }}
+                >
+                  <label className="sr-only" htmlFor={`edit-${item.id}`}>
+                    编辑文本
+                  </label>
+                  <textarea
+                    id={`edit-${item.id}`}
+                    value={editDraft}
+                    onChange={(event) => setEditDraft(event.target.value)}
+                    className="min-h-20 w-full resize-y border border-foreground bg-transparent p-2 text-[15px] outline-none"
+                  />
+                  <div className="mt-2 flex gap-2">
+                    <Button type="submit" size="sm" disabled={savingEdit}>
+                      保存
+                    </Button>
+                    <Button type="button" variant="outline" size="sm" onClick={() => setEditing(null)}>
+                      取消
+                    </Button>
+                  </div>
+                </form>
+              ) : item.kind === 'text' ? (
                 <p className="text-[15px] break-words whitespace-pre-wrap">{item.text}</p>
               ) : (
                 <div className="flex items-start gap-3">
@@ -333,11 +393,26 @@ export function ClipboardBoard({
                   >
                     复制
                   </Button>
-                ) : (
+                ) : null}
+                {canEdit(item) && editing !== item.id ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setEditing(item.id)
+                      setEditDraft(item.text ?? '')
+                      setPending(null)
+                    }}
+                  >
+                    编辑
+                  </Button>
+                ) : null}
+                {item.kind === 'file' ? (
                   <Button type="button" variant="outline" size="sm" asChild>
                     <a href={`${base}/items/${item.id}/download`}>下载</a>
                   </Button>
-                )}
+                ) : null}
                 {canRetract(item) ? (
                   <Button type="button" variant="outline" size="sm" onClick={() => void retract(item)}>
                     {pending === item.id ? '确认撤回' : '撤回'}

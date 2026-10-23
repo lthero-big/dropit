@@ -30,3 +30,10 @@ ALTER TABLE users ADD COLUMN quotaBytes INTEGER;
 CREATE INDEX user_email ON users(email);
 PRAGMA user_version=2;
 `;
+
+// updatedAt stays equal to createdAt until the text is edited in place.
+export const migration3 = `
+ALTER TABLE items ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0;
+UPDATE items SET updatedAt = createdAt WHERE updatedAt = 0;
+PRAGMA user_version=3;
+`;

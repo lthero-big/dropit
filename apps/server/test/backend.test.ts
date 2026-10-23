@@ -18,6 +18,12 @@ import { SqliteRepository } from '../src/repository.js';
 
 const origin = 'http://localhost:3000';
 const cookieValue = (response: Response, name: string) => response.headers.getSetCookie().find(c => c.startsWith(`${name}=`))?.split(';')[0] ?? '';
+function oauthError(response: Response) {
+  assert.equal(response.status, 302);
+  const location = new URL(response.headers.get('location')!);
+  assert.equal(`${location.origin}${location.pathname}`, `${origin}/login`);
+  return location.searchParams.get('error');
+}
 
 async function fixture(overrides: Partial<Config> = {}, providerName = 'github') {
   const directory = await mkdtemp(join(tmpdir(), 'dropit-'));
@@ -87,17 +93,19 @@ test('A1/B2: state and browser binding, PKCE, replay and failed exchange cannot 
   for (const [query, cookie] of [
     ['code=admin', flow.browser], [`state=wrong&code=admin`, flow.browser],
     [`state=${flow.state}&code=admin`, 'dropit_oauth=another-browser'],
-  ]) assert.equal((await f.request(`/api/auth/github/callback?${query}`, {}, cookie)).status, 400);
+  ]) assert.equal(oauthError(await f.request(`/api/auth/github/callback?${query}`, {}, cookie)), 'OAUTH_STATE_INVALID');
   assert.equal(f.exchanges(), 0);
   assert.equal(f.repo.users().length, 0);
   const denied = await f.request(`/api/auth/github/callback?state=${flow.state}&error=access_denied`, {}, flow.browser);
-  assert.equal(denied.status, 400);
+  assert.equal(oauthError(denied), 'OAUTH_DENIED');
+  assert.equal(denied.headers.get('location')!.includes('access_denied'), false);
   assert.equal(f.repo.users().length, 0);
   const successful = await f.login('admin');
   assert.equal(successful.response.status, 302);
+  assert.equal(new URL(successful.response.headers.get('location')!).pathname, '/');
   assert.match(successful.response.headers.getSetCookie().join(';'), /HttpOnly/);
   assert.match(successful.response.headers.getSetCookie().join(';'), /SameSite=Lax/);
-  assert.equal((await f.finish(flow, 'admin')).status, 400);
+  assert.equal(oauthError(await f.finish(flow, 'admin')), 'OAUTH_STATE_INVALID');
   assert.equal(f.repo.users().length, 1);
   assert.equal((await f.request('/api/auth/password')).status, 404);
 });
@@ -105,7 +113,7 @@ test('A1/B2: state and browser binding, PKCE, replay and failed exchange cannot 
 test('A1: OAuth flow expiry is enforced before token exchange', async t => {
   const f = await fixture(); t.after(() => f.dispose());
   const flow = await f.start(); f.advance(600001);
-  assert.equal((await f.finish(flow, 'admin')).status, 400);
+  assert.equal(oauthError(await f.finish(flow, 'admin')), 'OAUTH_STATE_INVALID');
   assert.equal(f.exchanges(), 0);
 });
 
@@ -115,8 +123,8 @@ test('B2: failed provider exchange never consumes invitation or creates an accou
   const invite = await f.invite(admin.cookie, admin.space.id);
   const flow = await f.start(invite.token);
   const response = await f.request(`/api/auth/github/callback?state=${flow.state}&code=fail`, {}, flow.browser);
-  assert.equal(response.status, 500);
-  assert.deepEqual(await response.json(), { error: { code: 'INTERNAL_ERROR' } });
+  assert.equal(oauthError(response), 'INTERNAL_ERROR');
+  assert.equal(response.headers.get('location')!.includes('refused'), false);
   assert.equal(f.repo.users().length, 1);
   assert.equal(f.repo.invite(hash(invite.token), Date.now())?.uses, 0);
   assert.equal((await f.login('member', invite.token)).response.status, 302);
@@ -127,7 +135,7 @@ test('A3/B3: bootstrap admin, invite-only signup, verified ADMIN_EMAILS and inde
   const f = await fixture(); t.after(() => f.dispose());
   const admin = await f.admin();
   assert.equal(admin.user.role, 'admin');
-  assert.equal((await f.login('stranger')).response.status, 403);
+  assert.equal(oauthError((await f.login('stranger')).response), 'INVITATION_REQUIRED');
   assert.equal(f.repo.users().length, 1);
   const invite = await f.invite(admin.cookie, admin.space.id);
   const user = await f.login('member', invite.token);
@@ -137,7 +145,7 @@ test('A3/B3: bootstrap admin, invite-only signup, verified ADMIN_EMAILS and inde
   const spaces = await (await f.request('/api/spaces', {}, user.cookie)).json();
   assert.equal(spaces.spaces.length, 2);
   const configured = await fixture({ adminEmails: ['owner@example.com'] }, 'google'); t.after(() => configured.dispose());
-  assert.equal((await configured.login('stranger')).response.status, 403);
+  assert.equal(oauthError((await configured.login('stranger')).response), 'INVITATION_REQUIRED');
   const owner = await configured.login('owner');
   assert.equal(owner.response.status, 302);
   assert.equal((await (await configured.request('/api/me', {}, owner.cookie)).json()).user.role, 'admin');
@@ -149,20 +157,23 @@ test('B1: concurrent one-use invite consumption creates only one account; invali
   const invite = await f.invite(admin.cookie, admin.space.id);
   const flows = await Promise.all([f.start(invite.token), f.start(invite.token)]);
   const results = await Promise.all([f.finish(flows[0], 'one'), f.finish(flows[1], 'two')]);
-  assert.deepEqual(results.map(r => r.status).sort(), [302, 403]);
+  assert.deepEqual(results.map(r => r.status).sort(), [302, 302]);
+  assert.deepEqual(results.map(r => new URL(r.headers.get('location')!).pathname === '/' ? 'ok' : new URL(r.headers.get('location')!).searchParams.get('error')).sort(), ['INVITE_INVALID', 'ok']);
   assert.equal(f.repo.users().length, 2);
   assert.equal(f.repo.invites()[0].uses, 1);
   assert.equal((await f.request(`/api/invites/${invite.token}`)).status, 404);
   const revoked = await f.invite(admin.cookie, admin.space.id, 3);
   const revokedFlow = await f.start(revoked.token);
   assert.equal((await f.request(`/api/admin/invites/${revoked.id}`, { method: 'DELETE' }, admin.cookie)).status, 204);
-  assert.equal((await f.finish(revokedFlow, 'revoked')).status, 403);
+  assert.equal(oauthError(await f.finish(revokedFlow, 'revoked')), 'INVITE_INVALID');
   const expired = await f.invite(admin.cookie, admin.space.id);
   const expiredFlow = await f.start(expired.token);
   f.advance(24 * 3600000 + 1);
   assert.equal((await f.request(`/api/invites/${expired.token}`)).status, 404);
-  assert.equal((await f.finish(expiredFlow, 'expired')).status, 400);
+  // The 10-minute OAuth flow expires before the 24-hour invite, so the callback reports state first.
+  assert.equal(oauthError(await f.finish(expiredFlow, 'expired')), 'OAUTH_STATE_INVALID');
   assert.equal(f.repo.users().length, 2);
+  assert.equal(oauthError(await f.request('/api/auth/github?invite=not-a-real-token')), 'INVITE_INVALID');
 });
 
 test('B4/A2: admin-only APIs, logout and disable revoke sessions immediately, enable requires fresh login', async t => {
@@ -177,7 +188,7 @@ test('B4/A2: admin-only APIs, logout and disable revoke sessions immediately, en
   assert.equal((await f.json(`/api/admin/users/${admin.user.id}`, { disabled: true }, admin.cookie, 'PATCH')).status, 409);
   assert.equal((await f.json(`/api/admin/users/${me.user.id}`, { disabled: true }, admin.cookie, 'PATCH')).status, 204);
   assert.equal((await f.request('/api/me', {}, member.cookie)).status, 401);
-  assert.equal((await f.login('member')).response.status, 403);
+  assert.equal(oauthError((await f.login('member')).response), 'USER_DISABLED');
   assert.equal((await f.json(`/api/admin/users/${me.user.id}`, { disabled: false }, admin.cookie, 'PATCH')).status, 204);
   assert.equal((await f.request('/api/me', {}, member.cookie)).status, 401);
   const fresh = await f.login('member');
@@ -458,9 +469,8 @@ test('admin pre-provisions a user that the first verified login binds', async t 
   const blockedResponse = await f.json('/api/admin/users', { email: 'blocked@example.com' }, admin.cookie);
   const blockedUser = await blockedResponse.json();
   assert.equal((await f.json(`/api/admin/users/${blockedUser.id}`, { disabled: true }, admin.cookie, 'PATCH')).status, 204);
-  const blocked = await f.login('blocked');
-  assert.equal(blocked.response.status, 403);
-  assert.equal((await blocked.response.json()).error.code, 'USER_DISABLED');
+  const blocked = await f.login('blocked', undefined, 'blocked@example.com');
+  assert.equal(oauthError(blocked.response), 'USER_DISABLED');
   assert.equal(f.repo.users().length, 3);
 
   const claimed = await f.login('guest');
@@ -473,8 +483,7 @@ test('admin pre-provisions a user that the first verified login binds', async t 
   assert.equal(spaces.spaces.length, 1);
   assert.equal(f.repo.users().length, 3);
   const other = await f.login('other', undefined, 'guest@example.com');
-  assert.equal(other.response.status, 403);
-  assert.equal((await other.response.json()).error.code, 'INVITATION_REQUIRED');
+  assert.equal(oauthError(other.response), 'INVITATION_REQUIRED');
   assert.equal(f.repo.users().length, 3);
 
   const base = `/api/spaces/${spaces.spaces[0].id}`;
@@ -520,12 +529,66 @@ test('ADMIN_EMAILS pre-provision is stored as admin and claimed by that mailbox'
   assert.equal(me.user.pending, 0);
 });
 
+test('text edits keep the item, sync, and enforce author and quota', async t => {
+  const f = await fixture({ userQuotaBytes: 20 }); t.after(() => f.dispose());
+  const admin = await f.admin();
+  const invite = await f.invite(admin.cookie, admin.space.id);
+  const member = await f.login('member', invite.token);
+  const me = await (await f.request('/api/me', {}, member.cookie)).json();
+  const base = `/api/spaces/${admin.space.id}`;
+  const received: string[] = [];
+  f.events.subscribe(admin.space.id, { send(data) { received.push(data); }, close() {} }, () => true);
+  const createdResponse = await f.json(`${base}/items/text`, { text: 'hello' }, member.cookie);
+  assert.equal(createdResponse.status, 201);
+  const created = await createdResponse.json();
+  assert.equal(created.item.updatedAt, created.item.createdAt);
+  f.advance(1000);
+  const edited = await f.json(`${base}/items/${created.item.id}`, { text: 'hello!' }, member.cookie, 'PATCH');
+  assert.equal(edited.status, 200);
+  const body = await edited.json();
+  assert.equal(body.item.id, created.item.id);
+  assert.equal(body.item.text, 'hello!');
+  assert.equal(body.item.size, Buffer.byteLength('hello!'));
+  assert.equal(body.item.createdAt, created.item.createdAt);
+  assert.equal(body.item.expiresAt, created.item.expiresAt);
+  assert.equal(body.item.updatedAt, created.item.updatedAt + 1000);
+  const event = JSON.parse(received.at(-1)!);
+  assert.equal(event.type, 'item.updated');
+  assert.equal(event.item.text, 'hello!');
+  const grown = await f.json(`${base}/items/${created.item.id}`, { text: 'x'.repeat(21) }, member.cookie, 'PATCH');
+  assert.equal(grown.status, 413);
+  assert.equal((await grown.json()).error.code, 'QUOTA_EXCEEDED');
+  assert.equal((await (await f.request(`${base}/items`, {}, member.cookie)).json()).items.find((item: { id: string }) => item.id === created.item.id).text, 'hello!');
+  const shrunk = await f.json(`${base}/items/${created.item.id}`, { text: 'ok' }, member.cookie, 'PATCH');
+  assert.equal(shrunk.status, 200);
+  const empty = await f.json(`${base}/items/${created.item.id}`, { text: '   ' }, member.cookie, 'PATCH');
+  assert.equal(empty.status, 400);
+  assert.equal((await empty.json()).error.code, 'EMPTY_TEXT');
+  const uploaded = await (await f.upload(base, member.cookie, 'abcd')).json();
+  const fileEdit = await f.json(`${base}/items/${uploaded.item.id}`, { text: 'nope' }, member.cookie, 'PATCH');
+  assert.equal(fileEdit.status, 400);
+  assert.equal((await fileEdit.json()).error.code, 'INVALID_INPUT');
+  const forbidden = await f.json(`${base}/items/${created.item.id}`, { text: 'rewritten' }, admin.cookie, 'PATCH');
+  assert.equal(forbidden.status, 403);
+  const { spaces } = await (await f.request('/api/spaces', {}, member.cookie)).json();
+  const privateSpace = spaces.find((space: { ownerId: string }) => space.ownerId === me.user.id);
+  assert.equal((await f.json(`/api/spaces/${privateSpace.id}/items/${created.item.id}`, { text: 'no' }, member.cookie, 'PATCH')).status, 404);
+  const room = await (await f.request('/api/rooms', { method: 'POST' })).json();
+  const roomItem = await (await f.json(`/api/rooms/${room.token}/items/text`, { text: 'room' })).json();
+  const roomEdit = await f.json(`/api/rooms/${room.token}/items/${roomItem.item.id}`, { text: 'room edited' }, '', 'PATCH');
+  assert.equal(roomEdit.status, 200);
+  assert.equal((await roomEdit.json()).item.text, 'room edited');
+});
+
 test('schema v1 migrates without dropping users', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'dropit-mig-'));
   const path = join(directory, 'dropit.sqlite');
   const db = new Database(path);
   db.exec(migration1);
   db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt) VALUES (?,?,?,?,?,?)').run('u', 'old@example.com', 'Old', 'user', 0, 1);
+  db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,?,?)').run('s', 'Private space', 'u', null, null);
+  db.prepare(`INSERT INTO items (id,spaceId,userId,kind,text,filename,mime,size,storedBytes,fileKey,thumbnailKey,createdAt,expiresAt)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('i', 's', 'u', 'text', 'old text', null, null, 8, 8, null, null, 50, 9_999_999_999_999);
   db.close();
   const repo = new SqliteRepository(path);
   t.after(async () => {
@@ -537,6 +600,10 @@ test('schema v1 migrates without dropping users', async t => {
   assert.equal(users[0]?.email, 'old@example.com');
   assert.equal(users[0]?.pending, 0);
   assert.equal(users[0]?.quotaBytes, null);
+  const migrated = repo.item('i', Date.now());
+  assert.equal(migrated?.text, 'old text');
+  assert.equal(migrated?.createdAt, 50);
+  assert.equal(migrated?.updatedAt, 50);
 });
 
 test('A2: production cookie has Secure and __Host prefix', async t => {

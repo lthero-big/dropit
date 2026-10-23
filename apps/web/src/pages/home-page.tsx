@@ -72,6 +72,7 @@ export function HomePage() {
           maxFileBytes={me.maxFileBytes}
           maxTextBytes={me.maxTextBytes}
           sender={(item: Item) => (item.userId === me.user.id ? '我' : '成员')}
+          canEdit={(item) => item.kind === 'text' && item.userId === me.user.id}
           canRetract={(item) => item.userId === me.user.id || current.ownerId === me.user.id}
           onActivity={() => void refresh()}
           onAuthLost={onAuthLost}

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ApiError, type Flow, type Identity, type Invite, type Item, type Session, type Space, type User } from './domain.js';
-import { migration1, migration2 } from './migrations.js';
+import { migration1, migration2, migration3 } from './migrations.js';
 
 type UserRow = User & { quotaBytes: number | null };
 
@@ -35,6 +35,7 @@ export interface Repository {
   items(spaceId: string, now: number): Item[];
   item(id: string, now: number): Item | undefined;
   addItem(item: Item, quota: number, maxItems: number): void;
+  replaceText(id: string, text: string, size: number, quota: number, now: number): Item;
   deleteItem(id: string): Item | undefined;
   expire(now: number): Item[];
   garbage(): string[];
@@ -52,10 +53,11 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 2) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 2) this.db.transaction(() => {
+    if (version > 3) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 3) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
-      this.db.exec(migration2);
+      if (version < 2) this.db.exec(migration2);
+      this.db.exec(migration3);
     })();
   }
   saveFlow(flow: Flow) {
@@ -191,7 +193,28 @@ export class SqliteRepository implements Repository {
       const count = (this.db.prepare('SELECT count(*) AS n FROM items WHERE spaceId=?').get(item.spaceId) as { n: number }).n;
       if (used + item.storedBytes > quota) throw new ApiError(413, 'QUOTA_EXCEEDED');
       if (count >= maxItems) throw new ApiError(413, 'ITEM_LIMIT');
-      this.db.prepare('INSERT INTO items VALUES (@id,@spaceId,@userId,@kind,@text,@filename,@mime,@size,@storedBytes,@fileKey,@thumbnailKey,@createdAt,@expiresAt)').run(item);
+      this.db.prepare(`INSERT INTO items (id,spaceId,userId,kind,text,filename,mime,size,storedBytes,fileKey,thumbnailKey,createdAt,expiresAt,updatedAt)
+        VALUES (@id,@spaceId,@userId,@kind,@text,@filename,@mime,@size,@storedBytes,@fileKey,@thumbnailKey,@createdAt,@expiresAt,@updatedAt)`).run(item);
+    }).immediate();
+  }
+  replaceText(id: string, text: string, size: number, quota: number, now: number) {
+    return this.db.transaction(() => {
+      const current = this.db.prepare('SELECT * FROM items WHERE id=? AND expiresAt>?').get(id, now) as Item | undefined;
+      if (!current || current.kind !== 'text') throw new ApiError(404, 'NOT_FOUND');
+      const space = this.space(current.spaceId);
+      if (!space || (space.expiresAt !== null && space.expiresAt <= now)) throw new ApiError(404, 'NOT_FOUND');
+      if (current.userId) {
+        const user = this.db.prepare('SELECT disabled FROM users WHERE id=?').get(current.userId) as { disabled: number } | undefined;
+        if (!user || user.disabled || !this.isMember(current.spaceId, current.userId)) throw new ApiError(403, 'FORBIDDEN');
+      }
+      const delta = size - current.storedBytes;
+      if (delta > 0) {
+        const used = current.userId ? this.usage(current.userId) :
+          (this.db.prepare('SELECT coalesce(sum(storedBytes),0) AS n FROM items WHERE spaceId=?').get(current.spaceId) as { n: number }).n;
+        if (used + delta > quota) throw new ApiError(413, 'QUOTA_EXCEEDED');
+      }
+      this.db.prepare('UPDATE items SET text=?, size=?, storedBytes=?, updatedAt=? WHERE id=?').run(text, size, size, now, id);
+      return { ...current, text, size, storedBytes: size, updatedAt: now };
     }).immediate();
   }
   deleteItem(id: string) {

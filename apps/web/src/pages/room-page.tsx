@@ -90,6 +90,7 @@ export function RoomPage() {
             maxTextBytes={me?.maxTextBytes ?? 65536}
             deadline={scope.expiresAt}
             sender={() => '访客'}
+            canEdit={(item) => item.kind === 'text'}
             canRetract={() => true}
             onAuthLost={onAuthLost}
             onStatus={onStatus}

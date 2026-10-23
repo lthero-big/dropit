@@ -43,6 +43,7 @@ export interface Item {
   size: number
   hasThumbnail: boolean
   createdAt: number
+  updatedAt: number
   expiresAt: number
 }
 
@@ -94,6 +95,7 @@ export interface AdminLimits {
 export type ServerMessage =
   | { type: 'snapshot'; items: Item[]; serverTime: number; expiresAt: number | null }
   | { type: 'item.created'; item: Item }
+  | { type: 'item.updated'; item: Item }
   | { type: 'item.deleted'; id: string }
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'stopped'

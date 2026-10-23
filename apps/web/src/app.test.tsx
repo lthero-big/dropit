@@ -71,6 +71,7 @@ function item(partial: Partial<Item> & Pick<Item, 'id' | 'text'>): Item {
     createdAt: 1_700_000_000_000,
     expiresAt: Date.now() + 3_600_000,
     ...partial,
+    updatedAt: partial.updatedAt ?? partial.createdAt ?? 1_700_000_000_000,
   }
 }
 
@@ -122,6 +123,23 @@ afterEach(() => {
 })
 
 describe('dropit web', () => {
+  it('shows a fixed Chinese message for OAuth failures and ignores unknown codes', async () => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
+      if (url === '/api/auth/providers') return json({ providers: ['github'] })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/login?error=INVITATION_REQUIRED')
+    expect((await screen.findByRole('alert')).textContent).toContain('需要邀请才能注册')
+    expect(screen.queryByText('INVITATION_REQUIRED')).toBeNull()
+    cleanup()
+    renderAt('/login?error=%3Cscript%3Ealert(1)%3C/script%3E')
+    await screen.findByRole('link', { name: '使用 GitHub 继续' })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(document.body.textContent).not.toContain('<script>')
+    expect(document.body.textContent).not.toContain('alert(1)')
+  })
+
   it('shows configured OAuth providers and starts a temporary room', async () => {
     stubFetch((url, init) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
@@ -331,6 +349,64 @@ describe('dropit web', () => {
     expect(post?.init?.body).toBe(JSON.stringify({ spaceId: 's1', maxUses: 5, expiresInHours: 168 }))
     fireEvent.click(screen.getByRole('tab', { name: '限制' }))
     expect(await screen.findByText(/这些限制来自环境变量/)).toBeTruthy()
+  })
+
+  it('edits the author text in place and applies item.updated', async () => {
+    stubFetch((url, init) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/spaces') return json({ spaces: [space] })
+      if (url === '/api/spaces/s1/items/mine' && init?.method === 'PATCH') {
+        return json({ item: item({ id: 'mine', text: 'new note', updatedAt: 1_700_000_000_000 + 5_000, size: 8 }) })
+      }
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/')
+    await screen.findByRole('button', { name: '发送' })
+    const socket = FakeSocket.instances.at(-1)
+    socket?.emit({
+      type: 'snapshot',
+      items: [
+        item({ id: 'mine', text: 'old note' }),
+        item({ id: 'theirs', text: 'their note', userId: 'u2' }),
+        item({ id: 'file', text: null, kind: 'file', filename: 'a.bin' }),
+      ],
+      serverTime: Date.now(),
+      expiresAt: null,
+    })
+    expect(await screen.findByText('old note')).toBeTruthy()
+    expect(screen.queryByText('已编辑')).toBeNull()
+    expect(screen.getAllByRole('button', { name: '编辑' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    fireEvent.change(screen.getByLabelText('编辑文本'), { target: { value: 'new note' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    expect(await screen.findByText('new note')).toBeTruthy()
+    expect(screen.getByText('已编辑')).toBeTruthy()
+    const patch = calls.find((call) => call.url === '/api/spaces/s1/items/mine')
+    expect(patch?.init?.method).toBe('PATCH')
+    expect(patch?.init?.body).toBe(JSON.stringify({ text: 'new note' }))
+    socket?.emit({
+      type: 'item.updated',
+      item: item({ id: 'mine', text: 'remote note', updatedAt: 1_700_000_000_000 + 9_000 }),
+    })
+    expect(await screen.findByText('remote note')).toBeTruthy()
+    expect(screen.queryByText('new note')).toBeNull()
+  })
+
+  it('lets a room capability holder edit text', async () => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
+      if (url.startsWith('/api/rooms/room-token')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/rooms/room-token')
+    await screen.findByRole('heading', { name: '临时房间' })
+    FakeSocket.instances.at(-1)?.emit({
+      type: 'snapshot',
+      items: [item({ id: 'room-text', text: 'room note', spaceId: 'room', userId: null })],
+      serverTime: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    })
+    expect(await screen.findByRole('button', { name: '编辑' })).toBeTruthy()
   })
 
   it('filters clipboard text on the current snapshot', async () => {

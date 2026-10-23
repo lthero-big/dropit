@@ -11,7 +11,7 @@ export interface Invite { id: string; tokenHash: string; spaceId: string; maxUse
 export interface Item {
   id: string; spaceId: string; userId: string | null; kind: 'text' | 'file'; text: string | null;
   filename: string | null; mime: string | null; size: number; storedBytes: number;
-  fileKey: string | null; thumbnailKey: string | null; createdAt: number; expiresAt: number;
+  fileKey: string | null; thumbnailKey: string | null; createdAt: number; updatedAt: number; expiresAt: number;
 }
 export interface Flow { stateHash: string; browserHash: string; provider: string; verifier: string; inviteHash: string | null; expiresAt: number }
 export interface Identity { provider: string; subject: string; email: string; name: string }
