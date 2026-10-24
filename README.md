@@ -84,7 +84,7 @@ docker run --rm -p 192.168.1.152:8787:8787 \
 
 `ClipboardService` 依赖 `Repository`、`FileStorage`、`Broadcaster` 接口，具体实现分别是 `repository.ts`、`files.ts`、`events.ts`；组合根为 `backend.ts` / `index.ts`。SQLite 驱动和 SQL 只存在于 repository，迁移使用 `user_version` 并在事务内执行。
 
-原始文件下载仍是带鉴权的 attachment，不支持断点续传。图片预览只用 sharp 重编码的 WebP 缩略图。视频和音频另有 `/media`：服务端按文件头判断类型，忽略上传时声明的 MIME，并支持单段 `Range` 以便播放器拖动。SVG/HTML 不内联。上传流按实际字节限额，并在事务里核对配额。定时清理会删除过期记录和文件；删除失败保留队列待重试，进程中断遗留文件在一小时后回收。备份应使用 SQLite backup API，或停服后复制整个数据目录。
+原始文件下载是带鉴权的 attachment，支持单段 `Range` 断点续传。图片预览只用 sharp 重编码的 WebP 缩略图。视频和音频另有 `/media`：服务端按文件头判断类型，忽略上传时声明的 MIME，并支持单段 `Range` 以便播放器拖动。SVG/HTML 不内联。上传流按实际字节限额，并在事务里核对配额。定时清理会删除过期记录和文件；删除失败保留队列待重试，进程中断遗留文件在一小时后回收。备份应使用 SQLite backup API，或停服后复制整个数据目录。
 
 ## 分享链接
 
@@ -102,7 +102,19 @@ docker run --rm -p 192.168.1.152:8787:8787 \
 
 在剪贴板或房间页按 Ctrl/⌘ K 打开命令面板，可以按文本、文件名和标签跳到一条内容，或把焦点放回输入框。临时房间页可以把当前房间地址画成二维码，方便另一台设备扫码打开同一个链接；二维码里只有这个地址，没有会话。侧栏「在线」显示当前这条 WebSocket 频道上的连接数，有人加入或离开时会更新。
 
-本期为单进程/单实例：限流、广播和在线人数都驻内存，上传和普通下载不提供断点续传，也没有多实例一致性。前端按 API 文档重连并用服务端 snapshot 替换本地列表。真实 OAuth 联调需要用户提供凭据，自动化用例均使用 mock。
+本期为单进程/单实例：限流、广播和在线人数都驻内存。上传不提供断点续传；普通下载支持单段 `Range`。没有多实例一致性。前端按 API 文档重连并用服务端 snapshot 替换本地列表。真实 OAuth 联调需要用户提供凭据，自动化用例均使用 mock。
+
+## 命令行
+
+`apps/cli` 提供命令 `dropit`（包名 `@dropit/cli`）。它覆盖设备码登录、发送文本、上传、列出、下载、删除、分享、实时监听和临时房间。个人访问令牌不会打印到终端；分享链接和房间链接是能力凭据，会打印出来。
+
+```bash
+pnpm --filter @dropit/cli build
+npm install -g ./apps/cli
+dropit login --url http://127.0.0.1:8787
+```
+
+未全局安装时，在仓库里运行 `npx --yes ./apps/cli --help`。用法、配置文件和环境变量见 [apps/cli/README.md](apps/cli/README.md)。
 
 ## CI
 
