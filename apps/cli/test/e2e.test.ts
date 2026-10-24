@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { type ChildProcess, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -323,6 +323,37 @@ test('download uses the server filename, refuses overwrite, and resumes with Ran
   const again = await run(['get', resumeId, '-o', resumeDir, '-c'], env);
   assert.equal(again.code, 0, redact(again.stderr));
   assert.deepEqual(await readFile(partialPath), restored);
+  await rm(dir, { recursive: true, force: true });
+  await rm(work, { recursive: true, force: true });
+});
+
+test('resume refuses a same-name symlink and leaves its target unchanged', async () => {
+  const dir = await home();
+  const work = await mkdtemp(join(tmpdir(), 'dropit-cli-symlink-'));
+  const env = cliEnv(dir, { DROPIT_TOKEN: token });
+  const source = join(work, 'linked.bin');
+  const bytes = Buffer.from('symlink-target-bytes');
+  await writeFile(source, bytes);
+  const pushed = await run(['push', source], env);
+  assert.equal(pushed.code, 0, redact(pushed.stderr));
+  const id = pushed.stdout.split('\t')[0]?.trim() ?? '';
+  const out = join(work, 'out');
+  await mkdir(out);
+  const outside = join(work, 'outside.bin');
+  const marker = Buffer.from('do-not-touch');
+  await writeFile(outside, marker);
+  const link = join(out, 'linked.bin');
+  await symlink(outside, link);
+  for (const args of [
+    ['get', id, '-o', out, '-c'],
+    ['get', id, '-o', out, '-c', '--force'],
+  ]) {
+    const resumed = await run(args, env);
+    assert.notEqual(resumed.code, 0);
+    assert.equal(resumed.stderr.includes('拒绝符号链接'), true);
+    assert.deepEqual(await readFile(outside), marker);
+    assert.equal((await lstat(link)).isSymbolicLink(), true);
+  }
   await rm(dir, { recursive: true, force: true });
   await rm(work, { recursive: true, force: true });
 });

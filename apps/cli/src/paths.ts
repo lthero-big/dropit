@@ -1,9 +1,11 @@
-import { createWriteStream } from 'node:fs';
-import { mkdir, rename, rm, stat } from 'node:fs/promises';
+import { constants, createWriteStream, openSync, type WriteStream } from 'node:fs';
+import { lstat, mkdir, rename, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { CliError } from './errors.js';
+
+const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
 
 export function withoutControls(value: string): string {
   let cleaned = '';
@@ -42,7 +44,9 @@ export async function prepareDirectory(dir: string): Promise<void> {
 
 export async function existingSize(dest: string, resume: boolean, force: boolean): Promise<number> {
   try {
-    const info = await stat(dest);
+    const link = await lstat(dest);
+    if (resume && link.isSymbolicLink()) throw new CliError('UNSAFE_PATH', '拒绝符号链接');
+    const info = link.isSymbolicLink() ? await stat(dest) : link;
     if (!info.isFile()) throw new CliError('EXISTS', '目标已存在且不是文件');
     if (!resume && !force) throw new CliError('EXISTS', '文件已存在，加 --force 覆盖');
     return resume ? info.size : 0;
@@ -66,9 +70,22 @@ export function downloadPlan(status: number, existing: number, contentRange: str
   throw new CliError('HTTP_' + String(status), '下载失败');
 }
 
+function openDownload(path: string, append: boolean): WriteStream {
+  const flags = append
+    ? constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT
+    : constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC;
+  try {
+    const fd = openSync(path, noFollow === 0 ? flags : flags | noFollow);
+    return createWriteStream(path, { fd, autoClose: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') throw new CliError('UNSAFE_PATH', '拒绝符号链接');
+    throw error;
+  }
+}
+
 export async function saveStream(dest: string, stream: Readable, append: boolean): Promise<void> {
   const partial = append ? dest : `${dest}.${process.pid}.dropit-partial`;
-  const output = createWriteStream(partial, { flags: append ? 'a' : 'w' });
+  const output = openDownload(partial, append);
   try {
     await pipeline(stream, output);
     if (!append) await rename(partial, dest);

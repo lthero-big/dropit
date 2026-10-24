@@ -1,7 +1,8 @@
 // Path-boundary checks for AC-M5. The server suite covers token and device-code abuse.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, mkdtemp, mkdir, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
@@ -86,5 +87,46 @@ test('AC-M5: an existing file is kept unless --force, and a failed write leaves 
     assert.deepEqual(await readdir(dir), ['clip.txt']);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('AC-M5: resume refuses a symlink and does not write through it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dropit-p2-symlink-'));
+  const box = join(root, 'box');
+  const outside = join(root, 'outside.txt');
+  const link = join(box, 'clip.txt');
+  await mkdir(box);
+  await writeFile(outside, 'safe');
+  await symlink(outside, link);
+  try {
+    for (const force of [false, true]) {
+      await assert.rejects(() => existingSize(link, true, force), (error: unknown) => {
+        assert.ok(error instanceof CliError);
+        assert.equal(error.code, 'UNSAFE_PATH');
+        assert.equal(error.message, '拒绝符号链接');
+        assert.notEqual(error.exitCode, 0);
+        return true;
+      });
+    }
+    assert.equal(await readFile(outside, 'utf8'), 'safe');
+    assert.equal((await lstat(link)).isSymbolicLink(), true);
+    if (typeof constants.O_NOFOLLOW === 'number') {
+      await assert.rejects(
+        () => saveStream(link, Readable.from(Buffer.from('xx')), true),
+        (error: unknown) => {
+          assert.ok(error instanceof CliError);
+          assert.equal(error.code, 'UNSAFE_PATH');
+          return true;
+        },
+      );
+      assert.equal(await readFile(outside, 'utf8'), 'safe');
+      assert.equal((await lstat(link)).isSymbolicLink(), true);
+    }
+    const regular = join(box, 'part.bin');
+    await writeFile(regular, 'abc');
+    await saveStream(regular, Readable.from(Buffer.from('def')), true);
+    assert.equal(await readFile(regular, 'utf8'), 'abcdef');
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
