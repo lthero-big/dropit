@@ -89,7 +89,7 @@ Application/validation/rate errors use the ordinary error envelope below.
 
 The `verification_uri` is `{APP_ORIGIN}/device`. The complete URI carries only the
 short user code and a public `verification_id`; it must never carry `device_code`.
-The browser confirmation UI (delivered separately) must display the requested
+The browser confirmation UI at `/device` (also embedded on `/settings`) displays the requested
 device name, IP summary, scopes and lifetime before asking the user to allow it.
 Preserve both query parameters across login. The device code is 256 random bits
 and held only by the CLI. The user code is 8 random uppercase letters/digits,
