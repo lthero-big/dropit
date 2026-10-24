@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
 import { useChannel } from '@/lib/channel.ts'
 import { connectionText, copyText, formatBytes, formatRemain, formatWhen, useClock, utf8Size } from '@/lib/format.ts'
+import { MarkdownText } from '@/lib/markdown.tsx'
+import { mediaKind } from '@/lib/media.ts'
 import type { ConnectionStatus, Item } from '@/lib/types.ts'
 
 function filesFromList(list: FileList | File[] | null | undefined): File[] {
@@ -392,24 +394,26 @@ export function ClipboardBoard({
                   </div>
                 </form>
               ) : item.kind === 'text' ? (
-                <p className="text-[15px] break-words whitespace-pre-wrap">{item.text}</p>
+                <MarkdownText text={item.text ?? ''} />
               ) : (
-                <div className="flex items-start gap-3">
+                <div>
                   {item.hasThumbnail ? (
                     <img
                       src={`${base}/items/${item.id}/thumbnail`}
                       alt=""
-                      className="size-16 border border-foreground object-cover"
+                      className="mb-2 max-h-80 max-w-full border border-foreground object-contain"
                     />
+                  ) : mediaKind(item) === 'video' ? (
+                    <video controls preload="metadata" src={`${base}/items/${item.id}/media`} className="mb-2 max-h-80 w-full bg-foreground" />
+                  ) : mediaKind(item) === 'audio' ? (
+                    <audio controls preload="metadata" src={`${base}/items/${item.id}/media`} className="mb-2 w-full" />
                   ) : (
-                    <span className="grid size-16 place-items-center bg-foreground text-xs font-extrabold text-background">
+                    <span className="mb-2 grid size-16 place-items-center bg-foreground text-xs font-extrabold text-background">
                       {extension(item.filename || 'file')}
                     </span>
                   )}
-                  <div>
-                    <p className="text-sm font-bold break-words">{item.filename}</p>
-                    <p className="text-xs text-muted-foreground">{formatBytes(item.size)}</p>
-                  </div>
+                  <p className="text-sm font-bold break-words">{item.filename}</p>
+                  <p className="text-xs text-muted-foreground">{formatBytes(item.size)}</p>
                 </div>
               )}
               <div className="mt-3 flex flex-wrap gap-2">

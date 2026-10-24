@@ -3,6 +3,8 @@ import { Link, useParams } from 'react-router'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api } from '@/lib/api.ts'
 import { formatBytes } from '@/lib/format.ts'
+import { MarkdownText } from '@/lib/markdown.tsx'
+import { mediaKind } from '@/lib/media.ts'
 import type { PublicShare } from '@/lib/types.ts'
 
 export function SharePage() {
@@ -43,7 +45,9 @@ export function SharePage() {
           <h1 className="mt-8 border-l-[14px] border-primary pl-4 text-4xl font-black">分享的内容</h1>
           <p className="mt-3 text-xs text-muted-foreground">只读。此页面不需要登录。</p>
           {share.item.kind === 'text' ? (
-            <p className="mt-6 text-[15px] break-words whitespace-pre-wrap">{share.item.text}</p>
+            <div className="mt-6">
+              <MarkdownText text={share.item.text ?? ''} />
+            </div>
           ) : (
             <div className="mt-6">
               {share.item.hasThumbnail ? (
@@ -51,6 +55,20 @@ export function SharePage() {
                   src={`/api/s/${encodeURIComponent(token)}/thumbnail?access=${encodeURIComponent(share.access)}`}
                   alt=""
                   className="max-h-80 border border-foreground object-contain"
+                />
+              ) : mediaKind({ ...share.item, hasThumbnail: share.item.hasThumbnail }) === 'video' ? (
+                <video
+                  controls
+                  preload="metadata"
+                  src={`/api/s/${encodeURIComponent(token)}/media?access=${encodeURIComponent(share.access)}`}
+                  className="max-h-80 w-full bg-foreground"
+                />
+              ) : mediaKind({ ...share.item, hasThumbnail: share.item.hasThumbnail }) === 'audio' ? (
+                <audio
+                  controls
+                  preload="metadata"
+                  src={`/api/s/${encodeURIComponent(token)}/media?access=${encodeURIComponent(share.access)}`}
+                  className="w-full"
                 />
               ) : null}
               <p className="mt-3 text-sm font-bold break-words">{share.item.filename}</p>

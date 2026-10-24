@@ -8,7 +8,8 @@ import { ApiError } from './domain.js';
 export interface FileStorage {
   write(body: ReadableStream<Uint8Array>, limit: number): Promise<{ key: string; size: number }>;
   bytes(key: string): Promise<Buffer>;
-  stream(key: string): ReadableStream<Uint8Array>;
+  prefix(key: string, length: number): Promise<Buffer>;
+  stream(key: string, start?: number, end?: number): ReadableStream<Uint8Array>;
   remove(key: string): Promise<void>;
   commit(key: string): void;
   sweep(referenced: Set<string>, olderThan: number): Promise<void>;
@@ -54,7 +55,17 @@ export class DiskFileStorage implements FileStorage {
     } finally { clearTimeout(deadline); reader.releaseLock(); }
   }
   bytes(key: string) { return readFile(this.path(key)); }
-  stream(key: string) { return Readable.toWeb(createReadStream(this.path(key))) as ReadableStream<Uint8Array>; }
+  async prefix(key: string, length: number) {
+    const handle = await open(this.path(key), 'r');
+    try {
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, 0);
+      return buffer.subarray(0, bytesRead);
+    } finally { await handle.close(); }
+  }
+  stream(key: string, start = 0, end?: number) {
+    return Readable.toWeb(createReadStream(this.path(key), { start, end })) as ReadableStream<Uint8Array>;
+  }
   async remove(key: string) {
     try { await unlink(this.path(key)); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
