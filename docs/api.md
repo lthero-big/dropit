@@ -1,11 +1,17 @@
-# dropit backend API (MVP)
+# dropit backend API
 
 Same-origin HTTP API under `/api`; all responses are JSON except downloads,
 thumbnails, media previews, OAuth redirects and empty `204` responses. Dates are Unix milliseconds;
-sizes are bytes. Requests use the server session cookie (`credentials: 'same-origin'`).
-There are no passwords, bearer session tokens, CORS origins or public mock logins.
+sizes are bytes. Browsers use the server session cookie (`credentials: 'same-origin'`);
+CLI clients use personal access tokens (PATs) in `Authorization: Bearer <token>`.
+There are no passwords, CORS origins or public mock logins.
 
-Every POST/PATCH/DELETE requires `Origin: <APP_ORIGIN>` (also for rooms/logout).
+Cookie and anonymous POST/PATCH/DELETE requests require `Origin: <APP_ORIGIN>`
+(also for rooms/logout). A valid Bearer token bypasses Origin checking, including
+WebSocket upgrades. Any Authorization header selects Bearer authentication: malformed,
+expired or revoked credentials return 401 even if a valid cookie is also present.
+Cookies never add authority to a Bearer request. Tokens in URLs are not accepted.
+The only unauthenticated machine exceptions are the two device endpoints below.
 JSON requests require `Content-Type: application/json`. Failed authorization of a
 known authenticated space and an unknown space both return `404 NOT_FOUND`.
 Missing/expired/revoked session returns `401 UNAUTHENTICATED`.
@@ -30,6 +36,85 @@ additional uses on the same still-valid invitation. Existing users may sign in
 without an invite. A consumed/expired token is never accepted, even if the user
 previously joined through it. OAuth state is single-use and valid for 10 minutes.
 Starting a new flow replaces the browser's previous flow cookie.
+
+## Personal access tokens
+
+PATs contain 256 random bits, encoded as 43 base64url characters. Only SHA-256
+digests are stored. Raw tokens appear once in the creation/claim response; list,
+rename and revocation responses never contain a raw token or its digest. Responses
+are `Cache-Control: no-store`. Never log or put credentials in a URL.
+
+| Method | Path | Body / response |
+| --- | --- | --- |
+| POST | `/tokens` | **Browser session + Origin only.** `{name, scopes?: ['read','write'], expiresInDays?: 90}` → 201, `Token & {token}`. Name: nonblank, max 80 characters. Scopes: a nonempty unique subset of `read`, `write`. Expiry: integer 1–3650 days, or `null` for never. |
+| GET | `/tokens` | Own `{tokens: Token[]}`; browser session or Bearer with `read`. Includes revoked/expired metadata. |
+| PATCH | `/tokens/:id` | **Browser session + Origin only.** `{name}` → 204; owner only. |
+| DELETE | `/tokens/:id` | 204; owner only; browser + Origin or Bearer with `write`. |
+| GET | `/admin/tokens?userId=` | Admin only; `{tokens: Token[]}`, optionally filtered by user. |
+| DELETE | `/admin/tokens/:id` | Admin only; 204; revoke any user's token. |
+
+`Token = {id,userId,name,scopes:('read'|'write')[],createdAt,lastUsedAt:number|null,
+expiresAt:number|null,revoked:0|1}`. Last use is recorded when authenticating an HTTP
+request or WS upgrade. GET/HEAD/OPTIONS (including WS) need `read`; mutations need
+`write` (`403 INSUFFICIENT_SCOPE`). Scopes are independent; the default grants both.
+PATs cannot mint PATs, rename tokens, or approve/deny devices
+(`403 BROWSER_SESSION_REQUIRED`), even when accompanied by a browser cookie.
+All existing membership, item ownership, quotas, IP/account limits and admin role
+checks apply to PATs. There is also a separate `RATE_TOKEN` bucket for each token.
+Revocation/disable immediately rejects further requests and closes established
+sockets with 1008. Disable permanently revokes that user's existing PATs; enabling
+the account does not revive them. Token expiry is checked on requests and socket
+revalidation (every second and before broadcasts). Cookie logout/session revocation
+does not revoke PATs. Bearer `POST /auth/logout` revokes the current PAT and leaves
+browser cookies alone; this call requires `write` (a read-only CLI can discard its
+local token and revoke it in the browser).
+
+## Device authorization (CLI login)
+
+Use JSON. The device application does not need a client secret. No new user is
+created here; the person approving must already have a valid OAuth-backed session.
+
+| Method | Path | Body / response |
+| --- | --- | --- |
+| POST | `/auth/device/authorize` | `{name, scopes?, expiresInDays?}` (same validation/defaults as PAT creation) → 200, `{device_code,user_code,verification_uri,verification_uri_complete,verification_id,expires_in:600,interval:5}`. |
+| POST | `/auth/device/token` | `{device_code}` → 200, `{access_token,token_type:'Bearer',scope:'read write',expires_in:number|null,token:Token}` once approved. `scope` reflects the actual requested scopes; expiry starts at claim time. |
+| GET | `/auth/device?user_code=ABCD-EFGH&verification_id=...` | **Browser session only.** `{name,ipSummary,scopes,expiresAt,tokenExpiresInDays:number|null}` for the pending request. No device secret or full IP is exposed. |
+| POST | `/auth/device/approve` | **Browser session + Origin only.** `{user_code,verification_id?}` → 204; approves for the current user. |
+| POST | `/auth/device/deny` | **Browser session + Origin only.** Same body → 204; permanent denial. |
+
+Only authorize and token accept no Origin **when no session cookie is present**.
+If Origin is sent, it must match APP_ORIGIN unless authenticating with a PAT.
+Cookie-only requests retain the usual Origin rule. Neither endpoint sets cookies.
+Application/validation/rate errors use the ordinary error envelope below.
+
+The `verification_uri` is `{APP_ORIGIN}/device`. The complete URI carries only the
+short user code and a public `verification_id`; it must never carry `device_code`.
+The browser confirmation UI (delivered separately) must display the requested
+device name, IP summary, scopes and lifetime before asking the user to allow it.
+Preserve both query parameters across login. The device code is 256 random bits
+and held only by the CLI. The user code is 8 random uppercase letters/digits,
+excluding I/L/O/0/1, displayed with a hyphen. Input is case insensitive and accepts
+spaces/hyphens. Both codes are stored only as SHA-256 digests. Requests expire
+after 10 minutes. Approval alone does not create a PAT: successful claim does so
+atomically and consumes the device code. Lost claim responses cannot be replayed;
+restart device login and revoke the unused token in settings.
+
+Polling protocol errors are HTTP 400 with a **string** `error`, for example
+`{"error":"authorization_pending"}`. Wait at least `interval` seconds **before the
+first poll and between polls**. Early polling returns
+`{"error":"slow_down","interval":10}` and increases this flow's interval by five
+seconds on every early poll. Use the returned interval for every subsequent poll.
+Pending requests return `authorization_pending`; denied requests return
+`access_denied`; expired, unknown and consumed codes return `expired_token`.
+Stop on success, denial or expiry. HTTP 429 uses `Retry-After`.
+
+Creation is limited by RATE_AUTH per IP, polling by RATE_GENERAL per IP, and browser
+confirmation/decisions to five requests per account and IP per rate window.
+The complete link's public verification_id binds typo attempts to one flow:
+five incorrect codes permanently invalidate it (`access_denied` to the CLI).
+Manual code entry may omit verification_id; unknown codes return uniform 404 and
+are bounded by the account/IP limit because no flow can be identified. Expired,
+already decided, locked and unknown confirmation requests return uniform 404.
 
 When the users table is empty, the first successfully authenticated identity
 becomes admin. That holds when `ADMIN_EMAILS` is unset and when the address is
@@ -84,7 +169,7 @@ Space routes require membership; room routes require the unexpired capability.
 | PATCH | `base/items/:id` | `{text:string}` → 200 `{item:Item}`. Text only. Same blank and size rules as create. `createdAt` and `expiresAt` stay; `updatedAt` becomes the edit time. Quota counts `newSize - oldSize` and always allows a shrink. Spaces: the author only (`403` for anyone else, including the space owner). Rooms: any current capability holder. Files return `400 INVALID_INPUT`. Unknown id or another space returns `404`. |
 | PATCH | `base/items/:id/labels` | `{pinned?: boolean, tags?: string[]}` → 200 `{item:Item}`. At least one field. Replaces the tag list when `tags` is sent; omitted `tags` leaves them. Does not change `createdAt`, `updatedAt`, text, or quota. Spaces: item author or space owner. Rooms: any current capability holder. A tag is 1–24 characters after trimming and stripping a leading `#`, with no whitespace or commas, at most 8 unique tags. |
 | POST | `base/items/file` | **Raw binary body**, original type in `Content-Type`, filename in `X-File-Name: encodeURIComponent(name)` → 201 `{item:Item}` |
-| GET | `base/items/:id/download` | Raw bytes, `application/octet-stream`, `Content-Disposition: attachment`, `nosniff`. No range/resume support. |
+| GET | `base/items/:id/download` | Raw bytes, `application/octet-stream`, `Content-Disposition: attachment`, `nosniff`. `Accept-Ranges: bytes`; single `Range` supports resume (206/416). |
 | GET | `base/items/:id/thumbnail` | Sanitized, re-encoded `image/webp` up to 320×320; 404 if no thumbnail |
 | GET | `base/items/:id/media` | Inline video or audio after a magic-byte allowlist. `Content-Type` is the sniffed type, never the upload header. `Accept-Ranges: bytes`; a single `Range` returns `206` or `416`. SVG, HTML, images and unknown bytes are `404`. `Content-Disposition: inline`, `nosniff`. |
 | DELETE | `base/items/:id` | 204; retract entry and stored file/thumbnail. In spaces, sender or space owner only; in rooms, every capability holder may retract. |
@@ -106,12 +191,26 @@ means the link itself has no extra deadline.
 | Method | Path | Response |
 | --- | --- | --- |
 | GET | `/s/:token` | `{item,linkExpiresAt,views,maxViews,access}`. Consumes one view. `item` is `{kind,text,filename,mime,size,hasThumbnail,createdAt,expiresAt,pinned,tags}` with no ids. `access` authorizes file, thumbnail and media requests for 10 minutes without a second view. |
-| GET | `/s/:token/file?access=` | Raw bytes, `application/octet-stream`, attachment, `nosniff`. A valid unexpired `access` does not consume another view. Without `access`, this request itself consumes one view (direct download). |
+| GET | `/s/:token/file?access=` | Raw bytes, `application/octet-stream`, attachment, `nosniff`; single Range (206/416). A valid unexpired `access` does not consume another view. Without `access`, this request consumes one view and returns a new ticket in `X-Share-Access` and a resumable URL in `Content-Location`. Reuse that ticket for all later ranges of this download. |
 | GET | `/s/:token/thumbnail?access=` | Sanitized `image/webp`, or 404. Same view rules as the file route. |
 | GET | `/s/:token/media?access=` | Same sniffed inline media and `Range` behavior as the member media route. Same view rules as the file route. |
 
 The second metadata read of a one-time link is `404`. Refreshing the page counts as another view.
-| WS | `base/ws` | Read-only event channel; exact `Origin` required, with session cookie for spaces |
+Repeated ranges with the same unexpired access ticket spend no extra views, including
+416 retries. Each new unticketed request is a new view. Tickets expire in ten minutes
+and stop working immediately on link revocation/item removal/expiry. The existing
+single-ticket-per-share policy remains: a new metadata/direct open replaces its ticket.
+
+For downloads, `Range: bytes=START-END`, `bytes=START-` and `bytes=-SUFFIX` are
+supported. A satisfiable range returns 206 with Content-Range/Content-Length;
+out-of-bounds/reversed ranges return 416 with `Content-Range: bytes */SIZE`.
+Malformed/unsupported units and multiple ranges are ignored (full 200).
+Authorization is checked before range processing. HEAD returns corresponding
+headers without the body. Download endpoints retain attachment + nosniff on 206/416.
+
+`WS base/ws` is read-only: spaces need a session cookie with exact Origin, or a
+Bearer token with `read`. Anonymous rooms still require exact Origin; a Bearer
+request to a room is also checked for scope, expiry, disable and revocation.
 
 ```ts
 interface Item {
@@ -177,6 +276,11 @@ url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const socket = new WebSocket(url); // same-origin cookie sent by browser
 ```
 
+Node CLI clients can use `new WebSocket(url, {headers: {Authorization: 'Bearer ' +
+token}})` from `ws`; Origin is optional for a valid PAT. Never send the PAT as a
+query parameter or WebSocket subprotocol. Native browser WebSocket continues to
+use cookies and the existing Origin requirement.
+
 Server → client JSON messages:
 
 ```ts
@@ -222,7 +326,9 @@ and auth-start rate limits still use JSON.
 | 400 | `INVALID_INPUT`, `INVALID_JSON`, `JSON_REQUIRED`, `EMPTY_TEXT`, `EMPTY_FILE`, `UPLOAD_TIMEOUT`, `INVALID_FILENAME`, `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR` |
 | 401 | `UNAUTHENTICATED` → login |
 | 403 | `FORBIDDEN`, `ORIGIN_REJECTED`, `USER_DISABLED`, `INVITATION_REQUIRED`, `INVITE_INVALID`, `VERIFIED_EMAIL_REQUIRED` |
+| 403 | `INSUFFICIENT_SCOPE`, `BROWSER_SESSION_REQUIRED` for PATs |
 | 404 | `NOT_FOUND`, `PROVIDER_UNAVAILABLE` |
+| 416 | Download/media range unsatisfiable; Content-Range contains `bytes */SIZE` |
 | 409 | `LAST_ADMIN`, `EMAIL_IN_USE` |
 | 413 | `BODY_TOO_LARGE`, `TEXT_TOO_LARGE`, `FILE_TOO_LARGE`, `QUOTA_EXCEEDED`, `ITEM_LIMIT` → show configured limit |
 | 415 | `INVALID_IMAGE` → unsupported/corrupt/too many pixels |
@@ -232,7 +338,9 @@ and auth-start rate limits still use JSON.
 Rate windows default to 60s; limits are enforced separately by trusted client IP
 and authenticated account. General: 240; auth: 20; invite: 10; upload/write: 30;
 room create/write: 10; room access: 30. Auth also limits the verified provider identity across IPs. Limits are per process (MVP is one instance).
-Missing Origin is rejected for writes, including command-line calls. With no
+Missing Origin is rejected for cookie/anonymous writes; valid PATs and the two
+cookie-free device endpoints follow the machine rules above. PATs have an additional
+120 requests/token/window by default (`RATE_TOKEN`). With no
 `TRUST_PROXY`, forwarding headers are ignored. When configured, CIDRs are walked
 from the actual socket through X-Forwarded-For; the first untrusted hop is client IP.
 

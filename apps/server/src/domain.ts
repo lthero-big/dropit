@@ -25,7 +25,21 @@ export interface SharePublic {
 }
 export interface Flow { stateHash: string; browserHash: string; provider: string; verifier: string; inviteHash: string | null; expiresAt: number }
 export interface Identity { provider: string; subject: string; email: string; name: string }
-export interface Session { user: User; sessionHash: string; expiresAt: number }
+export type TokenScope = 'read' | 'write';
+export interface AccessToken {
+  id: string; userId: string; name: string; scopes: TokenScope[]; createdAt: number;
+  lastUsedAt: number | null; expiresAt: number | null; revoked: number;
+}
+export interface DeviceAuthorization {
+  id: string; deviceCodeHash: string; userCodeHash: string; name: string; ipSummary: string;
+  scopes: TokenScope[]; tokenLifetimeMs: number | null; expiresAt: number;
+  interval: number; nextPollAt: number; attempts: number;
+  status: 'pending' | 'approved' | 'denied' | 'consumed'; userId: string | null;
+}
+export interface Session {
+  user: User; sessionHash: string; expiresAt: number;
+  bearer?: { id: string; scopes: TokenScope[] };
+}
 
 export function cleanFilename(input: string): string {
   // eslint-disable-next-line no-control-regex -- filenames must strip control characters
