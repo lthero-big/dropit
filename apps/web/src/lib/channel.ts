@@ -25,10 +25,12 @@ export function useChannel(base: string | null) {
   const [offset, setOffset] = useState(0)
   const [expiresAt, setExpiresAt] = useState<number | null>(null)
   const [authLost, setAuthLost] = useState(0)
+  const [devices, setDevices] = useState(0)
 
   useEffect(() => {
     if (!base) {
       setItems([])
+      setDevices(0)
       setStatus('idle')
       setExpiresAt(null)
       return
@@ -38,8 +40,9 @@ export function useChannel(base: string | null) {
     let attempt = 0
     let socket: WebSocket | null = null
     let timer = 0
-    setItems([])
-    setStatus('connecting')
+      setItems([])
+      setDevices(0)
+      setStatus('connecting')
 
     const connect = () => {
       if (stopped) return
@@ -68,7 +71,9 @@ export function useChannel(base: string | null) {
         }
         if (message.type === 'item.deleted') {
           setItems((current) => current.filter((item) => item.id !== message.id))
+          return
         }
+        if (message.type === 'presence' && Number.isInteger(message.devices) && message.devices >= 0) setDevices(message.devices)
       }
       ws.onclose = (event) => {
         if (stopped || socket !== ws) return
@@ -97,6 +102,7 @@ export function useChannel(base: string | null) {
     offset,
     expiresAt,
     authLost,
+    devices,
     upsert(item: Item) {
       setItems((current) => upsert(current, item))
     },

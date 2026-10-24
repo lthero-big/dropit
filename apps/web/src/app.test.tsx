@@ -486,6 +486,31 @@ describe('dropit web', () => {
     expect(screen.getByText('没有匹配的内容。')).toBeTruthy()
   })
 
+  it('opens the command palette with Ctrl+K and jumps to a clip', async () => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/spaces') return json({ spaces: [space] })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/')
+    await screen.findByRole('button', { name: '发送' })
+    FakeSocket.instances.at(-1)?.emit({
+      type: 'snapshot',
+      items: [item({ id: 'a', text: 'alpha secret' }), item({ id: 'b', text: 'beta note', tags: ['上线'] })],
+      serverTime: Date.now(),
+      expiresAt: null,
+    })
+    expect(await screen.findByText('alpha secret')).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
+    expect(screen.getByRole('dialog', { name: '命令面板' })).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('搜索内容'), { target: { value: '上线' } })
+    fireEvent.click(screen.getByRole('button', { name: 'beta note' }))
+    expect(document.activeElement?.id).toBe('clip-b')
+    expect(screen.queryByRole('dialog', { name: '命令面板' })).toBeNull()
+    FakeSocket.instances.at(-1)?.emit({ type: 'presence', devices: 2 })
+    expect(await screen.findByText(/2 台设备/)).toBeTruthy()
+  })
+
   it('opens another temporary room from the room page', async () => {
     let rooms = 0
     stubFetch((url, init) => {
@@ -499,6 +524,7 @@ describe('dropit web', () => {
     })
     renderAt('/rooms/existing')
     expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
+    expect((await screen.findByRole('img', { name: '房间二维码' })).getAttribute('src')).toMatch(/^data:image\/png/)
     fireEvent.click(screen.getByRole('button', { name: '新建房间' }))
     expect(await screen.findByText(/\/rooms\/room-1/)).toBeTruthy()
   })

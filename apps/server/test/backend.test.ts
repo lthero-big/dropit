@@ -471,6 +471,14 @@ test('D1/D4/C2/A2: real WS broadcasts within 1s, reconnect replaces snapshot, de
   await assert.rejects(connect(wsUrl, admin.cookie, 'https://attacker.example'), /403/);
   const device = await connect(wsUrl, admin.cookie); t.after(() => device.ws.terminate());
   assert.equal((await device.next()).type, 'snapshot');
+  assert.deepEqual(await device.next(), { type: 'presence', devices: 1 });
+  const other = await connect(wsUrl, admin.cookie); t.after(() => other.ws.terminate());
+  assert.equal((await other.next()).type, 'snapshot');
+  assert.deepEqual(await other.next(), { type: 'presence', devices: 2 });
+  assert.deepEqual(await device.next(), { type: 'presence', devices: 2 });
+  other.ws.close();
+  await once(other.ws, 'close');
+  assert.deepEqual(await device.next(), { type: 'presence', devices: 1 });
   const before = performance.now();
   const created = await f.json(`${base}/items/text`, { text: 'real time' }, admin.cookie);
   const { item } = await created.json();

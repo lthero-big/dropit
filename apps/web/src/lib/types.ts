@@ -133,5 +133,6 @@ export type ServerMessage =
   | { type: 'item.created'; item: Item }
   | { type: 'item.updated'; item: Item }
   | { type: 'item.deleted'; id: string }
+  | { type: 'presence'; devices: number }
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'stopped'
