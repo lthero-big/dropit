@@ -15,6 +15,7 @@ import { MemoryBroadcaster, type Broadcaster } from './events.js';
 import { oauthProviders, type OAuthProvider } from './oauth.js';
 import { ClipboardService } from './service.js';
 import { clientIpResolver, RateLimiter } from './rate-limit.js';
+import { limitRanges, RuntimeLimits } from './limits.js';
 
 type Env = { Variables: { session: Session | undefined; ip: string } };
 type Ctx = Context<Env>;
@@ -88,7 +89,7 @@ function ipSummary(ip: string) {
   if (isIP(ip) === 6) return `IPv6 ${ip.split(':').filter(Boolean).slice(0, 2).join(':')}:…`;
   return 'unknown';
 }
-const maxQuotaBytes = 100 * 1024 ** 3;
+const maxQuotaBytes = limitRanges.userQuotaBytes.max;
 function contentDisposition(kind: 'attachment' | 'inline', filename: string) {
   const encoded = encodeURIComponent(filename).replace(/['()*]/g, ch => '%' + ch.charCodeAt(0).toString(16));
   const fallback = kind === 'inline' ? 'media' : 'download';
@@ -99,9 +100,10 @@ function attachmentDisposition(filename: string) {
 }
 
 export function createBackend(options: BackendOptions = {}) {
-  const config = options.config ?? loadConfig();
+  const config = { ...(options.config ?? loadConfig()) };
   const now = options.now ?? Date.now;
   const repo = options.repo ?? new SqliteRepository(join(config.dataDir, 'dropit.sqlite'));
+  const limits = new RuntimeLimits(config, repo);
   const files = options.files ?? new DiskFileStorage(join(config.dataDir, 'files'));
   const events = options.events ?? new MemoryBroadcaster();
   const providers = options.providers ?? oauthProviders();
@@ -374,10 +376,26 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.get('/api/admin/limits', c => {
     service.admin(c.get('session'));
-    const { maxFileBytes, maxTextBytes, maxItems, userQuotaBytes, retentionMs, roomQuotaBytes, roomMaxFileBytes,
-      roomRetentionMs, rateWindowMs, rateGeneral, rateAuth, rateInvite, rateUpload, rateRoom, sessionMs } = config;
-    return c.json({ maxFileBytes, maxTextBytes, maxItems, userQuotaBytes, retentionMs, roomQuotaBytes, roomMaxFileBytes,
-      roomRetentionMs, rateWindowMs, rateGeneral, rateAuth, rateInvite, rateUpload, rateRoom, sessionMs });
+    return c.json(limits.describe());
+  });
+  app.patch('/api/admin/limits', async c => {
+    const auth = service.admin(c.get('session'));
+    const result = limits.update(await json(c, 4096), auth.user, now());
+    limiter.setWindow(config.rateWindowMs);
+    return c.json(result);
+  });
+  app.get('/api/admin/limits/audit', c => {
+    service.admin(c.get('session'));
+    const pageInteger = (value: string | undefined, max: number) => {
+      if (value === undefined) return undefined;
+      if (!/^[1-9]\d*$/.test(value)) throw new ApiError(400, 'INVALID_INPUT');
+      return integer(Number(value), 1, max);
+    };
+    const size = pageInteger(c.req.query('limit'), 100) ?? 50;
+    const cursor = pageInteger(c.req.query('cursor'), Number.MAX_SAFE_INTEGER);
+    const entries = repo.limitAudit(size + 1, cursor);
+    const more = entries.length > size;
+    return c.json({ entries: entries.slice(0, size), nextCursor: more ? entries[size - 1].id : null });
   });
   app.get('/api/admin/invites', c => { service.admin(c.get('session')); return c.json({ invites: repo.invites() }); });
   app.post('/api/admin/invites', async c => {

@@ -566,7 +566,7 @@ test('admin pre-provisions a user that the first verified login binds', async t 
   assert.equal((await f.json('/api/admin/users', { email: 'nope@example.com' }, claimed.cookie)).status, 403);
   assert.equal((await f.request('/api/admin/limits', {}, claimed.cookie)).status, 403);
   const limits = await (await f.request('/api/admin/limits', {}, admin.cookie)).json();
-  assert.equal(limits.userQuotaBytes, 100);
+  assert.equal(limits.userQuotaBytes.value, 100);
   assert.equal('adminEmails' in limits, false);
   assert.equal('dataDir' in limits, false);
   assert.equal((await f.request('/api/admin/users/missing/logout', { method: 'POST' }, admin.cookie)).status, 404);

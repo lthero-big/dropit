@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { validateLimits } from './limits.js';
 
 export interface Config {
   origin: string; production: boolean; port: number; dataDir: string; adminEmails: string[];
@@ -37,14 +38,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rateUpload: number('RATE_UPLOAD', 30), rateRoom: number('RATE_ROOM', 10),
     rateToken: number('RATE_TOKEN', 120),
   };
-  for (const value of [config.retentionMs, config.roomRetentionMs, config.sessionMs]) {
-    if (!Number.isSafeInteger(value)) throw new Error('Retention/session duration is too large');
-  }
-  if (config.roomRetentionMs > 86400000 || config.roomRetentionMs > config.retentionMs ||
-      config.roomMaxFileBytes >= config.maxFileBytes || config.roomQuotaBytes >= config.userQuotaBytes ||
-      config.rateAuth >= config.rateGeneral || config.rateInvite >= config.rateGeneral ||
-      config.rateUpload >= config.rateGeneral || config.rateRoom >= config.rateUpload) {
-    throw new Error('Room retention must be <=24h; room quotas and sensitive rate limits must be stricter');
-  }
+  validateLimits(config);
   return config;
 }

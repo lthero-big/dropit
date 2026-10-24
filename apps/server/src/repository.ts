@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ApiError, type AccessToken, type DeviceAuthorization, type Flow, type Identity, type Invite, type Item, type Session, type ShareLink, type SharePublic, type Space, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6 } from './migrations.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7 } from './migrations.js';
+import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
 type UserRow = User & { quotaBytes: number | null };
 type DeviceRow = Omit<DeviceAuthorization, 'scopes'> & { scopes: string };
@@ -28,6 +29,9 @@ function mapItem(row: Item): Item {
 }
 
 export interface Repository {
+  limitOverrides(): LimitOverrides;
+  saveLimitChanges(changes: LimitChange[], actor: { id: string; email: string }, now: number): void;
+  limitAudit(limit: number, cursor?: number): LimitAudit[];
   saveFlow(flow: Flow): void;
   consumeFlow(stateHash: string, browserHash: string, provider: string, now: number): Flow | undefined;
   login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number): User;
@@ -85,15 +89,36 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 6) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 6) this.db.transaction(() => {
+    if (version > 7) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 7) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
       if (version < 4) this.db.exec(migration4);
       if (version < 5) this.db.exec(migration5);
-      this.db.exec(migration6);
+      if (version < 6) this.db.exec(migration6);
+      this.db.exec(migration7);
     })();
+  }
+  limitOverrides(): LimitOverrides {
+    const rows = this.db.prepare('SELECT key,value FROM runtime_limits').all() as { key: LimitKey; value: number }[];
+    return Object.fromEntries(rows.map(row => [row.key, row.value]));
+  }
+  saveLimitChanges(changes: LimitChange[], actor: { id: string; email: string }, now: number) {
+    this.db.transaction(() => {
+      for (const change of changes) {
+        if (change.newOverride === null) this.db.prepare('DELETE FROM runtime_limits WHERE key=?').run(change.key);
+        else this.db.prepare('INSERT INTO runtime_limits (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+          .run(change.key, change.newOverride);
+        this.db.prepare(`INSERT INTO limit_audit (actorId,actorEmail,createdAt,key,oldValue,newValue,oldOverride,newOverride)
+          VALUES (@actorId,@actorEmail,@createdAt,@key,@oldValue,@newValue,@oldOverride,@newOverride)`)
+          .run({ ...change, actorId: actor.id, actorEmail: actor.email, createdAt: now });
+      }
+    })();
+  }
+  limitAudit(limit: number, cursor?: number) {
+    return this.db.prepare('SELECT * FROM limit_audit WHERE id < ? ORDER BY id DESC LIMIT ?')
+      .all(cursor ?? Number.MAX_SAFE_INTEGER, limit) as LimitAudit[];
   }
   saveFlow(flow: Flow) {
     this.db.prepare('INSERT INTO flows VALUES (@stateHash,@browserHash,@provider,@verifier,@inviteHash,@expiresAt)').run(flow);
