@@ -448,6 +448,60 @@ describe('dropit web', () => {
     expect(await screen.findByText(/\/rooms\/room-1/)).toBeTruthy()
   })
 
+  it('creates a share link and renders the public page as text', async () => {
+    const payload = '<script>alert(1)</script>'
+    stubFetch((url, init) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/spaces') return json({ spaces: [space] })
+      if (url === '/api/spaces/s1/items/a/shares' && init?.method === 'POST') {
+        return json({
+          id: 'sh1',
+          itemId: 'a',
+          expiresAt: null,
+          maxViews: 1,
+          views: 0,
+          revoked: 0,
+          createdAt: 1,
+          token: 'tok',
+          url: 'http://localhost/s/tok',
+        }, 201)
+      }
+      if (url === '/api/spaces/s1/items/a/shares') return json({ shares: [] })
+      if (url === '/api/spaces/s1/shares/sh1' && init?.method === 'DELETE') return new Response(null, { status: 204 })
+      if (url === '/api/s/tok') return json({
+        item: { kind: 'text', text: payload, filename: null, mime: null, size: 4, hasThumbnail: false, createdAt: 1, expiresAt: 9 },
+        linkExpiresAt: null,
+        views: 1,
+        maxViews: 1,
+        access: 'ticket',
+      })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/')
+    await screen.findByRole('button', { name: '发送' })
+    FakeSocket.instances.at(-1)?.emit({
+      type: 'snapshot',
+      items: [item({ id: 'a', text: 'alpha' })],
+      serverTime: Date.now(),
+      expiresAt: null,
+    })
+    fireEvent.click(await screen.findByRole('button', { name: '分享' }))
+    expect(await screen.findByText('还没有分享链接。')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '生成链接' }))
+    expect(await screen.findByLabelText('分享链接')).toHaveProperty('value', 'http://localhost/s/tok')
+    const post = calls.find((call) => call.url === '/api/spaces/s1/items/a/shares' && call.init?.method === 'POST')
+    expect(post?.init?.body).toBe(JSON.stringify({ expiresIn: '1d', maxViews: 1 }))
+    fireEvent.click(screen.getByRole('button', { name: '撤销' }))
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/spaces/s1/shares/sh1' && call.init?.method === 'DELETE')).toBe(true))
+
+    cleanup()
+    renderAt('/s/tok')
+    expect(await screen.findByText(payload)).toBeTruthy()
+    expect(screen.getByRole('heading', { name: '分享的内容' })).toBeTruthy()
+    expect(document.querySelector('script')).toBeNull()
+    expect(document.querySelector('img')).toBeNull()
+  })
+
   it('says when an invite or room is gone', async () => {
     stubFetch((url) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)

@@ -92,6 +92,38 @@ export interface AdminLimits {
   sessionMs: number
 }
 
+export interface ShareLink {
+  id: string
+  itemId: string
+  expiresAt: number | null
+  maxViews: number | null
+  views: number
+  revoked: number
+  createdAt: number
+}
+
+export interface ShareCreated extends ShareLink {
+  token: string
+  url: string
+}
+
+export interface PublicShare {
+  item: {
+    kind: 'text' | 'file'
+    text: string | null
+    filename: string | null
+    mime: string | null
+    size: number
+    hasThumbnail: boolean
+    createdAt: number
+    expiresAt: number
+  }
+  linkExpiresAt: number | null
+  views: number
+  maxViews: number | null
+  access: string
+}
+
 export type ServerMessage =
   | { type: 'snapshot'; items: Item[]; serverTime: number; expiresAt: number | null }
   | { type: 'item.created'; item: Item }

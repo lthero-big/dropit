@@ -2,8 +2,8 @@ import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ApiError, type Flow, type Identity, type Invite, type Item, type Session, type Space, type User } from './domain.js';
-import { migration1, migration2, migration3 } from './migrations.js';
+import { ApiError, type Flow, type Identity, type Invite, type Item, type Session, type ShareLink, type SharePublic, type Space, type User } from './domain.js';
+import { migration1, migration2, migration3, migration4 } from './migrations.js';
 
 type UserRow = User & { quotaBytes: number | null };
 
@@ -37,6 +37,12 @@ export interface Repository {
   addItem(item: Item, quota: number, maxItems: number): void;
   replaceText(id: string, text: string, size: number, quota: number, now: number): Item;
   deleteItem(id: string): Item | undefined;
+  createShare(share: ShareLink): void;
+  sharesForItem(itemId: string): SharePublic[];
+  shareById(id: string): (SharePublic & { spaceId: string; userId: string | null }) | undefined;
+  revokeShare(id: string, spaceId: string): void;
+  openShare(tokenHash: string, now: number, ticketHash: string, ticketExpiresAt: number): { item: Item; linkExpiresAt: number | null; maxViews: number | null; views: number } | undefined;
+  readShare(tokenHash: string, now: number, accessHash: string | null): Item | undefined;
   expire(now: number): Item[];
   garbage(): string[];
   forgetGarbage(key: string): void;
@@ -53,11 +59,12 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 3) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 3) this.db.transaction(() => {
+    if (version > 4) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 4) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
-      this.db.exec(migration3);
+      if (version < 3) this.db.exec(migration3);
+      this.db.exec(migration4);
     })();
   }
   saveFlow(flow: Flow) {
@@ -231,6 +238,50 @@ export class SqliteRepository implements Repository {
       return item;
     })();
   }
+  createShare(share: ShareLink) {
+    this.db.prepare(`INSERT INTO shares (id,tokenHash,itemId,spaceId,createdBy,expiresAt,maxViews,views,revoked,createdAt,downloadTicketHash,downloadTicketExpiresAt)
+      VALUES (@id,@tokenHash,@itemId,@spaceId,@createdBy,@expiresAt,@maxViews,@views,@revoked,@createdAt,@downloadTicketHash,@downloadTicketExpiresAt)`).run(share);
+  }
+  sharesForItem(itemId: string) {
+    return this.db.prepare('SELECT id,itemId,expiresAt,maxViews,views,revoked,createdAt FROM shares WHERE itemId=? ORDER BY createdAt DESC,id DESC').all(itemId) as SharePublic[];
+  }
+  shareById(id: string) {
+    return this.db.prepare(`SELECT s.id,s.itemId,s.spaceId,s.expiresAt,s.maxViews,s.views,s.revoked,s.createdAt,i.userId
+      FROM shares s JOIN items i ON i.id=s.itemId WHERE s.id=?`).get(id) as (SharePublic & { spaceId: string; userId: string | null }) | undefined;
+  }
+  revokeShare(id: string, spaceId: string) {
+    if (!this.db.prepare('UPDATE shares SET revoked=1 WHERE id=? AND spaceId=?').run(id, spaceId).changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  private activeShare(tokenHash: string, now: number) {
+    const share = this.db.prepare('SELECT * FROM shares WHERE tokenHash=?').get(tokenHash) as ShareLink | undefined;
+    if (!share || share.revoked || (share.expiresAt !== null && share.expiresAt <= now)) return undefined;
+    const item = this.item(share.itemId, now);
+    if (!item || item.spaceId !== share.spaceId) return undefined;
+    const space = this.space(item.spaceId);
+    if (!space || (space.expiresAt !== null && space.expiresAt <= now)) return undefined;
+    return { share, item };
+  }
+  openShare(tokenHash: string, now: number, ticketHash: string, ticketExpiresAt: number) {
+    return this.db.transaction(() => {
+      const loaded = this.activeShare(tokenHash, now);
+      if (!loaded) return undefined;
+      const updated = this.db.prepare(`UPDATE shares SET views=views+1, downloadTicketHash=?, downloadTicketExpiresAt=?
+        WHERE id=? AND revoked=0 AND (maxViews IS NULL OR views<maxViews)`).run(ticketHash, ticketExpiresAt, loaded.share.id);
+      if (updated.changes !== 1) return undefined;
+      return { item: loaded.item, linkExpiresAt: loaded.share.expiresAt, maxViews: loaded.share.maxViews, views: loaded.share.views + 1 };
+    }).immediate();
+  }
+  readShare(tokenHash: string, now: number, accessHash: string | null) {
+    return this.db.transaction(() => {
+      const loaded = this.activeShare(tokenHash, now);
+      if (!loaded) return undefined;
+      const ticketOk = Boolean(accessHash && loaded.share.downloadTicketHash === accessHash && (loaded.share.downloadTicketExpiresAt ?? 0) > now);
+      if (ticketOk) return loaded.item;
+      const updated = this.db.prepare('UPDATE shares SET views=views+1 WHERE id=? AND revoked=0 AND (maxViews IS NULL OR views<maxViews)').run(loaded.share.id);
+      if (updated.changes !== 1) return undefined;
+      return loaded.item;
+    }).immediate();
+  }
   expire(now: number) {
     return this.db.transaction(() => {
       const items = this.db.prepare('SELECT * FROM items WHERE expiresAt<=? OR spaceId IN (SELECT id FROM spaces WHERE expiresAt<=?)').all(now, now) as Item[];
@@ -239,6 +290,7 @@ export class SqliteRepository implements Repository {
       this.db.prepare('DELETE FROM sessions WHERE expiresAt<=?').run(now);
       this.db.prepare('DELETE FROM flows WHERE expiresAt<=?').run(now);
       this.db.prepare('DELETE FROM invites WHERE expiresAt<=? OR revoked=1').run(now);
+      this.db.prepare('DELETE FROM shares WHERE revoked=1 OR (expiresAt IS NOT NULL AND expiresAt<=?)').run(now);
       return items;
     })();
   }

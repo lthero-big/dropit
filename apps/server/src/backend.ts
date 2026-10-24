@@ -71,6 +71,10 @@ function personName(value: unknown): string {
   return name;
 }
 const maxQuotaBytes = 100 * 1024 ** 3;
+function attachmentDisposition(filename: string) {
+  const encoded = encodeURIComponent(filename).replace(/['()*]/g, ch => '%' + ch.charCodeAt(0).toString(16));
+  return `attachment; filename="download"; filename*=UTF-8''${encoded}`;
+}
 
 export function createBackend(options: BackendOptions = {}) {
   const config = options.config ?? loadConfig();
@@ -272,6 +276,33 @@ export function createBackend(options: BackendOptions = {}) {
     return c.json({ spaces: repo.spaces(auth.user.id).map(({ roomHash: _room, ...space }) => space) });
   });
   app.post('/api/rooms', c => { limit(c, 'room-create', config.rateRoom); return c.json(service.createRoom(), 201); });
+  const shareLimit = (c: Ctx, raw: string) => {
+    limit(c, 'share', config.rateAuth, false);
+    limit(c, `share:${hash(raw).slice(0, 32)}`, config.rateUpload, false);
+  };
+  app.get('/api/s/:token', c => {
+    const raw = c.req.param('token');
+    shareLimit(c, raw);
+    return c.json(service.openPublicShare(raw));
+  });
+  app.get('/api/s/:token/file', c => {
+    const raw = c.req.param('token');
+    shareLimit(c, raw);
+    const item = service.readPublicShare(raw, c.req.query('access'));
+    if (!item.fileKey || !item.filename) throw new ApiError(404, 'NOT_FOUND');
+    c.header('Content-Type', 'application/octet-stream');
+    c.header('Content-Length', String(item.size));
+    c.header('Content-Disposition', attachmentDisposition(item.filename));
+    return c.body(files.stream(item.fileKey));
+  });
+  app.get('/api/s/:token/thumbnail', c => {
+    const raw = c.req.param('token');
+    shareLimit(c, raw);
+    const item = service.readPublicShare(raw, c.req.query('access'));
+    if (!item.thumbnailKey) throw new ApiError(404, 'NOT_FOUND');
+    c.header('Content-Type', 'image/webp');
+    return c.body(files.stream(item.thumbnailKey));
+  });
 
   const scope = (c: Ctx) => {
     if (c.req.param('room')) {
@@ -316,6 +347,23 @@ export function createBackend(options: BackendOptions = {}) {
       const body = await json(c, config.maxTextBytes * 6 + 1024);
       return c.json({ item: service.editText(space, c.get('session'), c.req.param('id')!, string(body.text, Infinity)) });
     });
+    app.post(`${base}/items/:id/shares`, async c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      const body = await json(c, 2048);
+      const maxViews = body.maxViews === undefined || body.maxViews === null ? null : integer(body.maxViews, 1, 100);
+      return c.json(service.createShare(space, c.get('session'), c.req.param('id')!, string(body.expiresIn, 8), maxViews), 201);
+    });
+    app.get(`${base}/items/:id/shares`, c => {
+      const space = scope(c);
+      return c.json({ shares: service.listShares(space, c.get('session'), c.req.param('id')!) });
+    });
+    app.delete(`${base}/shares/:shareId`, c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      service.revokeShare(space, c.get('session'), c.req.param('shareId')!);
+      return c.body(null, 204);
+    });
     app.delete(`${base}/items/:id`, async c => {
       const space = scope(c);
       limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
@@ -327,7 +375,7 @@ export function createBackend(options: BackendOptions = {}) {
       if (!item.fileKey) throw new ApiError(404, 'NOT_FOUND');
       c.header('Content-Type', 'application/octet-stream');
       c.header('Content-Length', String(item.size));
-      c.header('Content-Disposition', `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(item.filename!).replace(/['()*]/g, ch => '%' + ch.charCodeAt(0).toString(16))}`);
+      c.header('Content-Disposition', attachmentDisposition(item.filename!));
       return c.body(files.stream(item.fileKey));
     });
     app.get(`${base}/items/:id/thumbnail`, c => {

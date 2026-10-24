@@ -6,6 +6,7 @@ import { HomePage } from '@/pages/home-page.tsx'
 import { InvitePage } from '@/pages/invite-page.tsx'
 import { LoginPage } from '@/pages/login-page.tsx'
 import { RoomPage } from '@/pages/room-page.tsx'
+import { SharePage } from '@/pages/share-page.tsx'
 
 export function App() {
   return (
@@ -16,6 +17,7 @@ export function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/invite/:token" element={<InvitePage />} />
           <Route path="/rooms/:token" element={<RoomPage />} />
+          <Route path="/s/:token" element={<SharePage />} />
           <Route path="/admin" element={<AdminPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { SharePanel } from '@/components/share-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
 import { useChannel } from '@/lib/channel.ts'
@@ -28,6 +29,7 @@ export function ClipboardBoard({
   sender,
   canEdit,
   canRetract,
+  canShare,
   onActivity,
   onAuthLost,
   onStatus,
@@ -43,6 +45,7 @@ export function ClipboardBoard({
   sender: (item: Item) => string
   canEdit: (item: Item) => boolean
   canRetract: (item: Item) => boolean
+  canShare: (item: Item) => boolean
   onActivity?: () => void
   onAuthLost?: () => void
   onStatus?: (status: ConnectionStatus) => void
@@ -55,6 +58,7 @@ export function ClipboardBoard({
   const [editing, setEditing] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
+  const [shareFor, setShareFor] = useState<string | null>(null)
   const [progress, setProgress] = useState<{ name: string; ratio: number } | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [sending, setSending] = useState(false)
@@ -413,12 +417,26 @@ export function ClipboardBoard({
                     <a href={`${base}/items/${item.id}/download`}>下载</a>
                   </Button>
                 ) : null}
+                {canShare(item) ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setShareFor((current) => (current === item.id ? null : item.id))
+                      setPending(null)
+                    }}
+                  >
+                    分享
+                  </Button>
+                ) : null}
                 {canRetract(item) ? (
                   <Button type="button" variant="outline" size="sm" onClick={() => void retract(item)}>
                     {pending === item.id ? '确认撤回' : '撤回'}
                   </Button>
                 ) : null}
               </div>
+              {shareFor === item.id && base ? <SharePanel base={base} itemId={item.id} now={now} onClose={() => setShareFor(null)} /> : null}
             </li>
           ))}
         </ul>

@@ -13,6 +13,15 @@ export interface Item {
   filename: string | null; mime: string | null; size: number; storedBytes: number;
   fileKey: string | null; thumbnailKey: string | null; createdAt: number; updatedAt: number; expiresAt: number;
 }
+export interface ShareLink {
+  id: string; tokenHash: string; itemId: string; spaceId: string; createdBy: string | null;
+  expiresAt: number | null; maxViews: number | null; views: number; revoked: number; createdAt: number;
+  downloadTicketHash: string | null; downloadTicketExpiresAt: number | null;
+}
+export interface SharePublic {
+  id: string; itemId: string; expiresAt: number | null; maxViews: number | null;
+  views: number; revoked: number; createdAt: number;
+}
 export interface Flow { stateHash: string; browserHash: string; provider: string; verifier: string; inviteHash: string | null; expiresAt: number }
 export interface Identity { provider: string; subject: string; email: string; name: string }
 export interface Session { user: User; sessionHash: string; expiresAt: number }
@@ -25,4 +34,11 @@ export function cleanFilename(input: string): string {
 export function publicItem(item: Item) {
   const { fileKey: _file, thumbnailKey, storedBytes: _bytes, ...rest } = item;
   return { ...rest, hasThumbnail: Boolean(thumbnailKey) };
+}
+export function publicShareItem(item: Item) {
+  const pub = publicItem(item);
+  return {
+    kind: pub.kind, text: pub.text, filename: pub.filename, mime: pub.mime, size: pub.size,
+    hasThumbnail: pub.hasThumbnail, createdAt: pub.createdAt, expiresAt: pub.expiresAt,
+  };
 }

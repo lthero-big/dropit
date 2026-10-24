@@ -37,3 +37,25 @@ ALTER TABLE items ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0;
 UPDATE items SET updatedAt = createdAt WHERE updatedAt = 0;
 PRAGMA user_version=3;
 `;
+
+// Share links store only the token hash. expiresAt NULL means the link itself does not expire.
+// maxViews NULL means unlimited. The download ticket authorizes file/thumbnail after a view is spent.
+export const migration4 = `
+CREATE TABLE shares (
+  id TEXT PRIMARY KEY,
+  tokenHash TEXT UNIQUE NOT NULL,
+  itemId TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  spaceId TEXT NOT NULL,
+  createdBy TEXT REFERENCES users(id),
+  expiresAt INTEGER,
+  maxViews INTEGER CHECK (maxViews IS NULL OR maxViews > 0),
+  views INTEGER NOT NULL DEFAULT 0,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  createdAt INTEGER NOT NULL,
+  downloadTicketHash TEXT,
+  downloadTicketExpiresAt INTEGER
+);
+CREATE INDEX share_item ON shares(itemId);
+CREATE INDEX share_space ON shares(spaceId);
+PRAGMA user_version=4;
+`;
