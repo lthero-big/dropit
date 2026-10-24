@@ -557,6 +557,39 @@ describe('dropit web', () => {
     expect(document.querySelector('img')).toBeNull()
   })
 
+  it('renders markdown as elements and previews images and sniffed media', async () => {
+    const source = '## 清单\n\n- [x] 完成\n\n<script>alert(1)</script>\n\n[手册](https://example.com/run) [坏](javascript:alert(1))'
+    stubFetch((url) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/spaces') return json({ spaces: [space] })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/')
+    await screen.findByRole('button', { name: '发送' })
+    FakeSocket.instances.at(-1)?.emit({
+      type: 'snapshot',
+      items: [
+        item({ id: 'md', text: source }),
+        item({ id: 'pic', text: null, kind: 'file', filename: 'shot.png', mime: 'image/png', hasThumbnail: true, size: 12 }),
+        item({ id: 'vid', text: null, kind: 'file', filename: 'clip.mp4', mime: 'application/octet-stream', hasThumbnail: false, size: 20 }),
+        item({ id: 'page', text: null, kind: 'file', filename: 'page.html', mime: 'text/html', hasThumbnail: false, size: 30 }),
+      ],
+      serverTime: Date.now(),
+      expiresAt: null,
+    })
+    expect(await screen.findByText(/<script>alert\(1\)<\/script>/)).toBeTruthy()
+    expect(document.querySelector('script')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '渲染' }))
+    expect(screen.getByRole('heading', { name: '清单' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: '手册' }).getAttribute('href')).toBe('https://example.com/run')
+    expect(screen.queryByRole('link', { name: '坏' })).toBeNull()
+    expect(document.querySelector('script')).toBeNull()
+    expect(document.querySelector('img')?.getAttribute('src')).toBe('/api/spaces/s1/items/pic/thumbnail')
+    expect(document.querySelector('video')?.getAttribute('src')).toBe('/api/spaces/s1/items/vid/media')
+    expect(document.querySelectorAll('video')).toHaveLength(1)
+    expect(screen.getByText('page.html')).toBeTruthy()
+  })
+
   it('says when an invite or room is gone', async () => {
     stubFetch((url) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)

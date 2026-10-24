@@ -1,7 +1,7 @@
 # dropit backend API (MVP)
 
 Same-origin HTTP API under `/api`; all responses are JSON except downloads,
-thumbnails, OAuth redirects and empty `204` responses. Dates are Unix milliseconds;
+thumbnails, media previews, OAuth redirects and empty `204` responses. Dates are Unix milliseconds;
 sizes are bytes. Requests use the server session cookie (`credentials: 'same-origin'`).
 There are no passwords, bearer session tokens, CORS origins or public mock logins.
 
@@ -86,6 +86,7 @@ Space routes require membership; room routes require the unexpired capability.
 | POST | `base/items/file` | **Raw binary body**, original type in `Content-Type`, filename in `X-File-Name: encodeURIComponent(name)` → 201 `{item:Item}` |
 | GET | `base/items/:id/download` | Raw bytes, `application/octet-stream`, `Content-Disposition: attachment`, `nosniff`. No range/resume support. |
 | GET | `base/items/:id/thumbnail` | Sanitized, re-encoded `image/webp` up to 320×320; 404 if no thumbnail |
+| GET | `base/items/:id/media` | Inline video or audio after a magic-byte allowlist. `Content-Type` is the sniffed type, never the upload header. `Accept-Ranges: bytes`; a single `Range` returns `206` or `416`. SVG, HTML, images and unknown bytes are `404`. `Content-Disposition: inline`, `nosniff`. |
 | DELETE | `base/items/:id` | 204; retract entry and stored file/thumbnail. In spaces, sender or space owner only; in rooms, every capability holder may retract. |
 | POST | `base/items/:id/shares` | `{expiresIn:'1h'\|'1d'\|'7d'\|'never', maxViews?: number\|null}` → 201 `{id,itemId,expiresAt,maxViews,views,revoked,createdAt,token,url}`. `maxViews` null or omitted is unlimited; otherwise 1–100 (`1` is one-time). Same manager as retract: item author or space owner; any current room capability. |
 | GET | `base/items/:id/shares` | `{shares:[Share]}`. No token. Same manager as create. |
@@ -104,9 +105,10 @@ means the link itself has no extra deadline.
 
 | Method | Path | Response |
 | --- | --- | --- |
-| GET | `/s/:token` | `{item,linkExpiresAt,views,maxViews,access}`. Consumes one view. `item` is `{kind,text,filename,mime,size,hasThumbnail,createdAt,expiresAt}` with no ids. `access` authorizes file and thumbnail requests for 10 minutes without a second view. |
+| GET | `/s/:token` | `{item,linkExpiresAt,views,maxViews,access}`. Consumes one view. `item` is `{kind,text,filename,mime,size,hasThumbnail,createdAt,expiresAt,pinned,tags}` with no ids. `access` authorizes file, thumbnail and media requests for 10 minutes without a second view. |
 | GET | `/s/:token/file?access=` | Raw bytes, `application/octet-stream`, attachment, `nosniff`. A valid unexpired `access` does not consume another view. Without `access`, this request itself consumes one view (direct download). |
 | GET | `/s/:token/thumbnail?access=` | Sanitized `image/webp`, or 404. Same view rules as the file route. |
+| GET | `/s/:token/media?access=` | Same sniffed inline media and `Range` behavior as the member media route. Same view rules as the file route. |
 
 The second metadata read of a one-time link is `404`. Refreshing the page counts as another view.
 | WS | `base/ws` | Read-only event channel; exact `Origin` required, with session cookie for spaces |
@@ -143,10 +145,15 @@ await fetch(`/api/spaces/${spaceId}/items/file`, {
 
 Images claimed as JPEG/PNG/WebP/GIF/AVIF are decoded with a 16-megapixel limit and
 re-encoded for the thumbnail; malformed or oversized raster images return 415.
-GIF preview uses the first frame. SVG/HTML and all other files are accepted for
-**download only**, never inline-previewed or run. Clipboard text must be rendered
-as a React text child / `textContent`, never HTML. Do not fetch arbitrary URLs from
-text or original file MIME. Use only the thumbnail endpoint for image previews.
+GIF preview uses the first frame. Image previews use only the thumbnail endpoint.
+SVG and HTML are accepted for **download only** and are never inline-previewed,
+even when the client sends `video/*` or a media filename. Video and audio
+previews use `/media` only after the stored bytes match an allowlist (MP4,
+QuickTime, WebM, Ogg, WAV, MP3, FLAC). The response type comes from those bytes.
+Clipboard text is plain text by default. A markdown toggle may render a fixed
+subset (headings, lists, quotes, code, emphasis, `http`/`https` links) as React
+elements. It does not parse raw HTML, images, or other URL schemes. Do not fetch
+arbitrary URLs from text or the original file MIME.
 
 User quota counts all original text/file bytes **plus thumbnail bytes** uploaded
 by that user across spaces. The limit is that user's `quotaOverride` when set,

@@ -5,7 +5,8 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import { upgradeWebSocket } from '@hono/node-server';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { loadConfig, type Config } from './config.js';
-import { ApiError, hash, token, type Session } from './domain.js';
+import { ApiError, hash, token, type Item, type Session } from './domain.js';
+import { parseByteRange, sniffMedia } from './media.js';
 import { SqliteRepository, type Repository } from './repository.js';
 import { DiskFileStorage, type FileStorage } from './files.js';
 import { MemoryBroadcaster, type Broadcaster } from './events.js';
@@ -71,9 +72,13 @@ function personName(value: unknown): string {
   return name;
 }
 const maxQuotaBytes = 100 * 1024 ** 3;
-function attachmentDisposition(filename: string) {
+function contentDisposition(kind: 'attachment' | 'inline', filename: string) {
   const encoded = encodeURIComponent(filename).replace(/['()*]/g, ch => '%' + ch.charCodeAt(0).toString(16));
-  return `attachment; filename="download"; filename*=UTF-8''${encoded}`;
+  const fallback = kind === 'inline' ? 'media' : 'download';
+  return `${kind}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+function attachmentDisposition(filename: string) {
+  return contentDisposition('attachment', filename);
 }
 
 export function createBackend(options: BackendOptions = {}) {
@@ -99,7 +104,7 @@ export function createBackend(options: BackendOptions = {}) {
     }
   };
   app.use('*', async (c, next) => {
-    c.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
+    c.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
     c.header('X-Content-Type-Options', 'nosniff');
     c.header('X-Frame-Options', 'DENY');
     c.header('Referrer-Policy', 'no-referrer');
@@ -280,6 +285,25 @@ export function createBackend(options: BackendOptions = {}) {
     limit(c, 'share', config.rateAuth, false);
     limit(c, `share:${hash(raw).slice(0, 32)}`, config.rateUpload, false);
   };
+  const sendMedia = async (c: Ctx, item: Item) => {
+    if (!item.fileKey || item.size < 1) throw new ApiError(404, 'NOT_FOUND');
+    const sniffed = sniffMedia(await files.prefix(item.fileKey, 4096));
+    if (!sniffed) throw new ApiError(404, 'NOT_FOUND');
+    const range = parseByteRange(c.req.header('range'), item.size);
+    c.header('Accept-Ranges', 'bytes');
+    c.header('Content-Type', sniffed.contentType);
+    c.header('Content-Disposition', contentDisposition('inline', item.filename ?? 'media'));
+    c.header('Cache-Control', 'private, no-store');
+    if (range === 'unsatisfiable') {
+      c.header('Content-Range', `bytes */${item.size}`);
+      return c.body(null, 416);
+    }
+    const start = range?.start ?? 0;
+    const end = range?.end ?? item.size - 1;
+    c.header('Content-Length', String(end - start + 1));
+    if (range) c.header('Content-Range', `bytes ${start}-${end}/${item.size}`);
+    return c.body(files.stream(item.fileKey, start, end), range ? 206 : 200);
+  };
   app.get('/api/s/:token', c => {
     const raw = c.req.param('token');
     shareLimit(c, raw);
@@ -302,6 +326,11 @@ export function createBackend(options: BackendOptions = {}) {
     if (!item.thumbnailKey) throw new ApiError(404, 'NOT_FOUND');
     c.header('Content-Type', 'image/webp');
     return c.body(files.stream(item.thumbnailKey));
+  });
+  app.get('/api/s/:token/media', async c => {
+    const raw = c.req.param('token');
+    shareLimit(c, raw);
+    return sendMedia(c, service.readPublicShare(raw, c.req.query('access')));
   });
 
   const scope = (c: Ctx) => {
@@ -396,6 +425,7 @@ export function createBackend(options: BackendOptions = {}) {
       c.header('Content-Type', 'image/webp');
       return c.body(files.stream(item.thumbnailKey));
     });
+    app.get(`${base}/items/:id/media`, async c => sendMedia(c, service.item(scope(c), c.req.param('id')!)));
   }
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 });

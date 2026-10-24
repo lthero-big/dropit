@@ -15,6 +15,7 @@ import { loadConfig, type Config } from '../src/config.js';
 import { hash, type Identity } from '../src/domain.js';
 import { migration1, migration2, migration3 } from '../src/migrations.js';
 import type { OAuthProvider } from '../src/oauth.js';
+import { parseByteRange, sniffMedia } from '../src/media.js';
 import { SqliteRepository } from '../src/repository.js';
 
 const origin = 'http://localhost:3000';
@@ -268,7 +269,7 @@ test('C2: cross-space list, upload, file-ID guessing, download, thumbnail and re
   const privateSpace = spaces.find((space: any) => space.ownerId !== admin.user.id);
   const base = `/api/spaces/${privateSpace.id}`;
   const uploaded = await (await f.upload(base, member.cookie, 'private data')).json();
-  for (const path of [base, `${base}/items`, `${base}/items/${uploaded.item.id}/download`, `${base}/items/${uploaded.item.id}/thumbnail`]) {
+  for (const path of [base, `${base}/items`, `${base}/items/${uploaded.item.id}/download`, `${base}/items/${uploaded.item.id}/thumbnail`, `${base}/items/${uploaded.item.id}/media`]) {
     assert.equal((await f.request(path, {}, admin.cookie)).status, 404);
   }
   assert.equal((await f.json(`${base}/items/text`, { text: 'intrusion' }, admin.cookie)).status, 404);
@@ -305,6 +306,7 @@ test('D2/G: plain text round trips; raster thumbnail, filename sanitization and 
     const { item: file } = await upload.json();
     assert.equal(file.hasThumbnail, false);
     assert.equal((await f.request(`${base}/items/${file.id}/thumbnail`, {}, admin.cookie)).status, 404);
+    assert.equal((await f.request(`${base}/items/${file.id}/media`, {}, admin.cookie)).status, 404);
     const download = await f.request(`${base}/items/${file.id}/download`, {}, admin.cookie);
     assert.match(download.headers.get('content-disposition')!, /^attachment;/);
     assert.equal(download.headers.get('content-type'), 'application/octet-stream');
@@ -743,6 +745,55 @@ test('share links enforce token, expiry, revocation, view limits and owner-only 
   assert.equal((await (await f.request(`/api/s/${roomBody.token}`)).json()).item.text, 'room secret');
   assert.equal((await f.request(`/api/rooms/${room.token}/shares/${roomBody.id}`, { method: 'DELETE' })).status, 204);
   assert.equal((await f.request(`/api/s/${roomBody.token}`)).status, 404);
+});
+
+test('media preview uses sniffed bytes and range, and HTML stays download-only', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin();
+  const base = `/api/spaces/${admin.space.id}`;
+  const mp4 = Buffer.concat([
+    Buffer.from([0, 0, 0, 20]),
+    Buffer.from('ftypisom'),
+    Buffer.alloc(4),
+    Buffer.from('isomclip-bytes!!'),
+  ]);
+  const uploaded = await (await f.upload(base, admin.cookie, mp4, 'text/html', 'clip.mp4')).json();
+  const media = await f.request(`${base}/items/${uploaded.item.id}/media`, {}, admin.cookie);
+  assert.equal(media.status, 200);
+  assert.equal(media.headers.get('content-type'), 'video/mp4');
+  assert.match(media.headers.get('content-disposition') ?? '', /^inline;/);
+  assert.equal(media.headers.get('accept-ranges'), 'bytes');
+  assert.equal(media.headers.get('x-content-type-options'), 'nosniff');
+  assert.equal(Buffer.compare(Buffer.from(await media.arrayBuffer()), mp4), 0);
+  const partial = await f.request(`${base}/items/${uploaded.item.id}/media`, { headers: { range: 'bytes=0-3' } }, admin.cookie);
+  assert.equal(partial.status, 206);
+  assert.equal(partial.headers.get('content-range'), `bytes 0-3/${mp4.length}`);
+  assert.equal(Buffer.from(await partial.arrayBuffer()).toString(), mp4.subarray(0, 4).toString());
+  assert.equal((await f.request(`${base}/items/${uploaded.item.id}/media`, { headers: { range: `bytes=${mp4.length}-` } }, admin.cookie)).status, 416);
+
+  const html = Buffer.from('<html><script>alert(1)</script></html>');
+  const evil = await (await f.upload(base, admin.cookie, html, 'video/mp4', 'evil.mp4')).json();
+  assert.equal((await f.request(`${base}/items/${evil.item.id}/media`, {}, admin.cookie)).status, 404);
+  const download = await f.request(`${base}/items/${evil.item.id}/download`, {}, admin.cookie);
+  assert.equal(download.headers.get('content-type'), 'application/octet-stream');
+  assert.match(download.headers.get('content-disposition') ?? '', /^attachment;/);
+
+  const wav = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVEfmt ')]);
+  assert.equal(sniffMedia(wav)?.contentType, 'audio/wav');
+  assert.equal(sniffMedia(Buffer.from([0x89, 0x50, 0x4e, 0x47])), null);
+  assert.equal(sniffMedia(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>')), null);
+  assert.deepEqual(parseByteRange('bytes=-4', 10), { start: 6, end: 9 });
+  assert.equal(parseByteRange('not-a-range', 10), null);
+
+  const share = await (await f.json(`${base}/items/${uploaded.item.id}/shares`, { expiresIn: '1d', maxViews: 2 }, admin.cookie)).json();
+  const opened = await (await f.request(`/api/s/${share.token}`)).json();
+  const shared = await f.request(`/api/s/${share.token}/media?access=${opened.access}`, { headers: { range: 'bytes=-4' } });
+  assert.equal(shared.status, 206);
+  assert.equal(shared.headers.get('content-type'), 'video/mp4');
+  assert.equal(Buffer.from(await shared.arrayBuffer()).toString(), mp4.subarray(mp4.length - 4).toString());
+  const again = await (await f.request(`/api/s/${share.token}`)).json();
+  assert.equal(again.views, 2);
+  assert.equal((await f.request(`${base}/items/${uploaded.item.id}/media`)).status, 401);
 });
 
 test('tags and pins sync, validate, and keep creation time', async t => {
