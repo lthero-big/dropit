@@ -184,12 +184,15 @@ type Message =
   | {type: 'snapshot'; items: Item[]; serverTime: number; expiresAt: number | null}
   | {type: 'item.created'; item: Item}
   | {type: 'item.updated'; item: Item}
-  | {type: 'item.deleted'; id: string};
+  | {type: 'item.deleted'; id: string}
+  | {type: 'presence'; devices: number};
 ```
 
-On **every** connection, replace the local list with the first `snapshot`, then
+`presence.devices` is the number of open sockets on this space or room. It is
+sent after the snapshot and again when a socket leaves. It carries no names or
+addresses. On **every** connection, replace the local list with the first `snapshot`, then
 apply created and updated events by upserting `item.id` (pinned clips stay above the others, then `createdAt`)
-and deleted events by removing `id`.
+and deleted events by removing `id`. `presence` does not change the list.
 This reconciles entries created, edited, deleted or expired while offline. Reconnect using
 exponential backoff with jitter (e.g. 0.5s, 1s, 2s … max 30s), then consume the new
 snapshot. Alternatively, `GET base/items` is an authoritative HTTP refresh. The

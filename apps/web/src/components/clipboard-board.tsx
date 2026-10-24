@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { CommandPalette } from '@/components/command-palette.tsx'
 import { SharePanel } from '@/components/share-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
@@ -360,7 +361,7 @@ export function ClipboardBoard({
         ) : null}
         <ul>
           {shown.map((item) => (
-            <li key={item.id} className="border-b border-foreground px-3 py-4 hover:shadow-[inset_0_0_0_2px_var(--primary)]">
+            <li id={`clip-${item.id}`} tabIndex={-1} key={item.id} className="border-b border-foreground px-3 py-4 hover:shadow-[inset_0_0_0_2px_var(--primary)]">
               <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
                 <span className="bg-foreground px-2 py-0.5 font-extrabold tracking-wider text-background uppercase">{sender(item)}</span>
                 <span className="text-muted-foreground">{formatWhen(item.createdAt, now)}</span>
@@ -557,10 +558,19 @@ export function ClipboardBoard({
           <h2 className="text-xs font-extrabold tracking-widest uppercase">在线</h2>
           <p className="mt-3 text-sm" role="status">
             本机 · {connectionText[channel.status]}
+            {channel.devices > 0 ? ` · ${channel.devices} 台设备` : ''}
           </p>
-          <p className="mt-2 text-xs text-muted-foreground">打开同一空间的设备会实时收到新条目。断线后会自动重连并补拉。</p>
+          <p className="mt-2 text-xs text-muted-foreground">打开同一空间的设备会实时收到新条目。断线后会自动重连并补拉。Ctrl 或 ⌘ K 可搜索当前内容。</p>
         </div>
       </aside>
+      <CommandPalette
+        items={visible}
+        onJump={(id) => {
+          const row = document.getElementById(`clip-${id}`)
+          row?.scrollIntoView({ block: 'center' })
+          row?.focus()
+        }}
+      />
     </section>
   )
 }

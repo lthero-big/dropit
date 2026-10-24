@@ -447,12 +447,14 @@ export function createBackend(options: BackendOptions = {}) {
       let opened = false;
       const release = () => {
         unsubscribe?.();
+        unsubscribe = undefined;
         if (!opened) return;
         opened = false;
         for (const [map, key] of [[socketsByIp, ip], [socketsByUser, userKey]] as const) {
           const count = (map.get(key) ?? 1) - 1;
           if (count) map.set(key, count); else map.delete(key);
         }
+        events.publish(space.id, { type: 'presence', devices: events.count(space.id) });
       };
       return upgradeWebSocket(c, {
         onOpen(_event, ws) {
@@ -469,6 +471,7 @@ export function createBackend(options: BackendOptions = {}) {
           }, authorized);
           // Authoritative replacement snapshot on EVERY connect, including reconnect.
           ws.send(JSON.stringify(service.snapshot(space)));
+          events.publish(space.id, { type: 'presence', devices: events.count(space.id) });
         },
         onMessage(_event, ws) { ws.close(1008, 'Read-only channel'); },
         onClose: release, onError: release,

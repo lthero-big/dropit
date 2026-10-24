@@ -2,6 +2,7 @@ export interface Socket { send(data: string): void; close(code?: number, reason?
 export interface Broadcaster {
   subscribe(channel: string, socket: Socket, authorized: () => boolean): () => void;
   publish(channel: string, event: unknown): void;
+  count(channel: string): number;
   revalidate(): void;
   close(): void;
 }
@@ -18,6 +19,11 @@ export class MemoryBroadcaster implements Broadcaster {
       this.connections.delete(entry);
       try { entry.socket.close(1008, 'Authorization expired'); } catch { /* already disconnected */ }
     }
+  }
+  count(channel: string) {
+    let total = 0;
+    for (const entry of this.connections) if (entry.channel === channel) total += 1;
+    return total;
   }
   publish(channel: string, event: unknown) {
     this.revalidate();

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { toDataURL } from 'qrcode'
 import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { ClipboardBoard } from '@/components/clipboard-board.tsx'
@@ -16,6 +17,7 @@ export function RoomPage() {
   const [scope, setScope] = useState<ScopeInfo | null>(null)
   const [missing, setMissing] = useState(false)
   const [connection, setConnection] = useState<ConnectionStatus>('idle')
+  const [qr, setQr] = useState<string | null>(null)
   const shareUrl = `${window.location.origin}/rooms/${token}`
 
   useEffect(() => {
@@ -35,6 +37,21 @@ export function RoomPage() {
       cancelled = true
     }
   }, [token])
+
+  useEffect(() => {
+    let cancelled = false
+    setQr(null)
+    void toDataURL(shareUrl, { margin: 1, width: 192, errorCorrectionLevel: 'M' })
+      .then((url) => {
+        if (!cancelled) setQr(url)
+      })
+      .catch(() => {
+        if (!cancelled) setQr(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [shareUrl])
 
   const onStatus = useCallback((next: ConnectionStatus) => setConnection(next), [])
   const onAuthLost = useCallback(() => setMissing(true), [])
@@ -79,6 +96,9 @@ export function RoomPage() {
             <Button type="button" variant="outline" size="sm" onClick={() => void createAnother()}>
               新建房间
             </Button>
+            {qr ? (
+              <img src={qr} alt="房间二维码" width={96} height={96} className="border border-foreground bg-white p-1" />
+            ) : null}
           </div>
           <ClipboardBoard
             base={`/api/rooms/${token}`}
