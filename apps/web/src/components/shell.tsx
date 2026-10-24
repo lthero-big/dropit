@@ -74,6 +74,11 @@ export function Shell({
             <button type="button" className="uppercase" onClick={() => void newRoom()}>
               临时房间
             </button>
+            {me ? (
+              <Link to="/settings" className={location.pathname === '/settings' ? 'border-b-2 border-primary' : ''}>
+                设置
+              </Link>
+            ) : null}
             {me?.user.role === 'admin' ? (
               <Link to="/admin" className={location.pathname === '/admin' ? 'border-b-2 border-primary' : ''}>
                 管理
@@ -96,6 +101,8 @@ export function Shell({
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => navigate('/settings')}>设置</DropdownMenuItem>
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem onSelect={() => setTheme('light')}>浅色{theme === 'light' ? ' · 当前' : ''}</DropdownMenuItem>
                   <DropdownMenuItem onSelect={() => setTheme('dark')}>深色{theme === 'dark' ? ' · 当前' : ''}</DropdownMenuItem>
                   <DropdownMenuItem onSelect={() => setTheme('system')}>跟随系统{theme === 'system' ? ' · 当前' : ''}</DropdownMenuItem>
@@ -118,22 +125,27 @@ export function Shell({
         </div>
       </header>
       <div className="mx-auto max-w-[1240px] px-4 pt-6 pb-24 md:px-8 md:pb-12">{children}</div>
-      <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-3 border-t-2 border-foreground bg-background md:hidden">
+      <nav className={`fixed inset-x-0 bottom-0 z-20 grid border-t-2 border-foreground bg-background md:hidden ${me?.user.role === 'admin' ? 'grid-cols-4' : 'grid-cols-3'}`}>
         <Link to="/" className="py-3 text-center text-xs font-extrabold tracking-widest uppercase">
           剪贴板
         </Link>
         <button type="button" className="py-3 text-xs font-extrabold tracking-widest uppercase" onClick={() => void newRoom()}>
           房间
         </button>
-        {me?.user.role === 'admin' ? (
-          <Link to="/admin" className="py-3 text-center text-xs font-extrabold tracking-widest uppercase">
-            管理
+        {me ? (
+          <Link to="/settings" className="py-3 text-center text-xs font-extrabold tracking-widest uppercase">
+            设置
           </Link>
         ) : (
           <Link to="/login" className="py-3 text-center text-xs font-extrabold tracking-widest uppercase">
             登录
           </Link>
         )}
+        {me?.user.role === 'admin' ? (
+          <Link to="/admin" className="py-3 text-center text-xs font-extrabold tracking-widest uppercase">
+            管理
+          </Link>
+        ) : null}
       </nav>
     </div>
   )

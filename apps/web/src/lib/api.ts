@@ -43,6 +43,8 @@ const labels: Record<string, string> = {
   ITEM_LIMIT: '条目数量已达上限',
   INVALID_IMAGE: '图片无法处理',
   RATE_LIMITED: '请求过于频繁',
+  INSUFFICIENT_SCOPE: '令牌权限不足',
+  BROWSER_SESSION_REQUIRED: '需要在浏览器中登录后操作',
   UPLOAD_BUSY: '上传过于频繁',
   SOCKET_LIMIT: '连接数已达上限',
   INTERNAL_ERROR: '服务暂时不可用',

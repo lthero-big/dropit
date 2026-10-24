@@ -2,10 +2,12 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router'
 import { Toaster } from '@/components/ui/sonner.tsx'
 import { SessionProvider } from '@/lib/session.tsx'
 import { AdminPage } from '@/pages/admin-page.tsx'
+import { DevicePage } from '@/pages/device-page.tsx'
 import { HomePage } from '@/pages/home-page.tsx'
 import { InvitePage } from '@/pages/invite-page.tsx'
 import { LoginPage } from '@/pages/login-page.tsx'
 import { RoomPage } from '@/pages/room-page.tsx'
+import { SettingsPage } from '@/pages/settings-page.tsx'
 import { SharePage } from '@/pages/share-page.tsx'
 
 export function App() {
@@ -19,6 +21,8 @@ export function App() {
           <Route path="/rooms/:token" element={<RoomPage />} />
           <Route path="/s/:token" element={<SharePage />} />
           <Route path="/admin" element={<AdminPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/device" element={<DevicePage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
         <Toaster position="top-center" />

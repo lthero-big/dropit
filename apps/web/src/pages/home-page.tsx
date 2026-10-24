@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router'
 import { LoginPage } from './login-page.tsx'
 import { ClipboardBoard } from '@/components/clipboard-board.tsx'
 import { Shell } from '@/components/shell.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api } from '@/lib/api.ts'
 import { spaceLabel } from '@/lib/format.ts'
+import { takeReturn } from '@/lib/machine.ts'
 import { useSession } from '@/lib/session.tsx'
 import type { ConnectionStatus, Item, SpaceSummary } from '@/lib/types.ts'
 
@@ -12,9 +14,16 @@ const spaceKey = 'dropit-space'
 
 export function HomePage() {
   const { status, me, refresh } = useSession()
+  const navigate = useNavigate()
   const [spaces, setSpaces] = useState<SpaceSummary[]>([])
   const [spaceId, setSpaceId] = useState<string | null>(null)
   const [connection, setConnection] = useState<ConnectionStatus>('idle')
+
+  useEffect(() => {
+    if (!me) return
+    const next = takeReturn()
+    if (next) navigate(next, { replace: true })
+  }, [me, navigate])
 
   useEffect(() => {
     if (!me) return

@@ -94,6 +94,25 @@ export interface AdminLimits {
   sessionMs: number
 }
 
+export interface AccessToken {
+  id: string
+  userId: string
+  name: string
+  scopes: ('read' | 'write')[]
+  createdAt: number
+  lastUsedAt: number | null
+  expiresAt: number | null
+  revoked: number
+}
+
+export interface DeviceRequest {
+  name: string
+  ipSummary: string
+  scopes: ('read' | 'write')[]
+  expiresAt: number
+  tokenExpiresInDays: number | null
+}
+
 export interface ShareLink {
   id: string
   itemId: string

@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText, loginErrorText } from '@/lib/api.ts'
+import { takeReturn } from '@/lib/machine.ts'
 import { useSession } from '@/lib/session.tsx'
 
 export function LoginPage({ invite }: { invite?: string }) {
@@ -31,7 +32,7 @@ export function LoginPage({ invite }: { invite?: string }) {
   }, [])
 
   useEffect(() => {
-    if (!invite && status === 'ready') navigate('/', { replace: true })
+    if (!invite && status === 'ready') navigate(takeReturn() ?? '/', { replace: true })
   }, [invite, navigate, status])
 
   async function createRoom() {
