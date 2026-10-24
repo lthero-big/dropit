@@ -113,7 +113,7 @@ export class ClipboardService {
     const now = this.now();
     return { id: randomUUID(), spaceId: space.id, userId: space.roomHash ? null : session!.user.id,
       kind: 'text', text: null, filename: null, mime: null, size: 0, storedBytes: 0,
-      fileKey: null, thumbnailKey: null, createdAt: now, updatedAt: now,
+      fileKey: null, thumbnailKey: null, createdAt: now, updatedAt: now, pinned: 0, tags: [],
       expiresAt: Math.min(now + this.config.retentionMs, space.expiresAt ?? Infinity) };
   }
   private commit(item: Item, room: boolean) {
@@ -138,6 +138,32 @@ export class ClipboardService {
     if (size > this.config.maxTextBytes) throw new ApiError(413, 'TEXT_TOO_LARGE');
     const quota = space.roomHash ? this.config.roomQuotaBytes : (this.repo.quotaOverride(current.userId!) ?? this.config.userQuotaBytes);
     const updated = this.repo.replaceText(id, text, size, quota, this.now());
+    const item = publicItem(updated);
+    this.events.publish(space.id, { type: 'item.updated', item });
+    return item;
+  }
+  private normalizeTags(value: unknown): string[] {
+    if (!Array.isArray(value) || value.length > 8) throw new ApiError(400, 'INVALID_INPUT');
+    const tags: string[] = [];
+    for (const entry of value) {
+      if (typeof entry !== 'string') throw new ApiError(400, 'INVALID_INPUT');
+      const tag = entry.trim().replace(/^#+/, '').trim();
+      if ([...tag].length < 1 || [...tag].length > 24 || /\s/.test(tag) || tag.includes(',') || [...tag].some(char => {
+        const code = char.charCodeAt(0);
+        return code <= 0x1f || code === 0x7f;
+      })) throw new ApiError(400, 'INVALID_INPUT');
+      if (!tags.includes(tag)) tags.push(tag);
+    }
+    return tags;
+  }
+  label(space: Space, session: Session | undefined, id: string, patch: { pinned?: boolean; tags?: unknown }) {
+    const current = this.item(space, id);
+    this.canManage(space, current.userId, session);
+    if (patch.pinned === undefined && patch.tags === undefined) throw new ApiError(400, 'INVALID_INPUT');
+    const updated = this.repo.updateLabels(id, {
+      pinned: patch.pinned === undefined ? undefined : (patch.pinned ? 1 : 0),
+      tags: patch.tags === undefined ? undefined : this.normalizeTags(patch.tags),
+    }, this.now());
     const item = publicItem(updated);
     this.events.publish(space.id, { type: 'item.updated', item });
     return item;

@@ -341,6 +341,18 @@ export function createBackend(options: BackendOptions = {}) {
       if (!c.req.raw.body) throw new ApiError(400, 'EMPTY_FILE');
       return c.json({ item: await service.upload(space, c.get('session'), c.req.raw.body, filename, mime) }, 201);
     });
+    app.patch(`${base}/items/:id/labels`, async c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      const body = await json(c, 4096);
+      const patch: { pinned?: boolean; tags?: unknown } = {};
+      if ('pinned' in body) {
+        if (typeof body.pinned !== 'boolean') throw new ApiError(400, 'INVALID_INPUT');
+        patch.pinned = body.pinned;
+      }
+      if ('tags' in body) patch.tags = body.tags;
+      return c.json({ item: service.label(space, c.get('session'), c.req.param('id')!, patch) });
+    });
     app.patch(`${base}/items/:id`, async c => {
       const space = scope(c);
       limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);

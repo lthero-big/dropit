@@ -45,6 +45,8 @@ export interface Item {
   createdAt: number
   updatedAt: number
   expiresAt: number
+  pinned: boolean
+  tags: string[]
 }
 
 export interface Invite {
@@ -117,6 +119,8 @@ export interface PublicShare {
     hasThumbnail: boolean
     createdAt: number
     expiresAt: number
+    pinned?: boolean
+    tags?: string[]
   }
   linkExpiresAt: number | null
   views: number

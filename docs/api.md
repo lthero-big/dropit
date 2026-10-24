@@ -82,6 +82,7 @@ Space routes require membership; room routes require the unexpired capability.
 | GET | `base/items` | `{type:'snapshot', items:Item[],serverTime,expiresAt}`; current nonexpired entries, newest first |
 | POST | `base/items/text` | `{text:string}` → 201 `{item:Item}`; nonblank UTF-8, max `MAX_TEXT_BYTES` |
 | PATCH | `base/items/:id` | `{text:string}` → 200 `{item:Item}`. Text only. Same blank and size rules as create. `createdAt` and `expiresAt` stay; `updatedAt` becomes the edit time. Quota counts `newSize - oldSize` and always allows a shrink. Spaces: the author only (`403` for anyone else, including the space owner). Rooms: any current capability holder. Files return `400 INVALID_INPUT`. Unknown id or another space returns `404`. |
+| PATCH | `base/items/:id/labels` | `{pinned?: boolean, tags?: string[]}` → 200 `{item:Item}`. At least one field. Replaces the tag list when `tags` is sent; omitted `tags` leaves them. Does not change `createdAt`, `updatedAt`, text, or quota. Spaces: item author or space owner. Rooms: any current capability holder. A tag is 1–24 characters after trimming and stripping a leading `#`, with no whitespace or commas, at most 8 unique tags. |
 | POST | `base/items/file` | **Raw binary body**, original type in `Content-Type`, filename in `X-File-Name: encodeURIComponent(name)` → 201 `{item:Item}` |
 | GET | `base/items/:id/download` | Raw bytes, `application/octet-stream`, `Content-Disposition: attachment`, `nosniff`. No range/resume support. |
 | GET | `base/items/:id/thumbnail` | Sanitized, re-encoded `image/webp` up to 320×320; 404 if no thumbnail |
@@ -124,6 +125,8 @@ interface Item {
   createdAt: number;
   updatedAt: number; // equals createdAt until the text is edited in place
   expiresAt: number;
+  pinned: boolean; // pinned clips sort ahead of unpinned clips; createdAt order is unchanged inside each group
+  tags: string[]; // 0–8 labels, each 1–24 characters, no whitespace
 }
 ```
 
@@ -178,7 +181,7 @@ type Message =
 ```
 
 On **every** connection, replace the local list with the first `snapshot`, then
-apply created and updated events by upserting `item.id` (order stays `createdAt`)
+apply created and updated events by upserting `item.id` (pinned clips stay above the others, then `createdAt`)
 and deleted events by removing `id`.
 This reconciles entries created, edited, deleted or expired while offline. Reconnect using
 exponential backoff with jitter (e.g. 0.5s, 1s, 2s … max 30s), then consume the new
