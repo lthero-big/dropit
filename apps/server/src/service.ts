@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { Config } from './config.js';
-import { ApiError, cleanFilename, hash, publicItem, token, type Item, type Session, type Space } from './domain.js';
+import { ApiError, cleanFilename, hash, publicItem, publicShareItem, token, type Item, type Session, type SharePublic, type Space } from './domain.js';
 import type { FileStorage } from './files.js';
 import type { Broadcaster } from './events.js';
 import type { Repository } from './repository.js';
@@ -38,6 +38,63 @@ export class ClipboardService {
       expiresAt: this.now() + this.config.roomRetentionMs, roomHash: hash(roomToken) };
     this.repo.createRoom(space);
     return { token: roomToken, expiresAt: space.expiresAt, url: `${this.config.origin}/rooms/${roomToken}` };
+  }
+  private canManage(space: Space, authorId: string | null, session: Session | undefined) {
+    if (space.roomHash) return;
+    if (!session) throw new ApiError(401, 'UNAUTHENTICATED');
+    if (authorId !== session.user.id && space.ownerId !== session.user.id) throw new ApiError(403, 'FORBIDDEN');
+  }
+  private shareExpires(expiresIn: string) {
+    const window = expiresIn === '1h' ? 3600000 : expiresIn === '1d' ? 86400000 : expiresIn === '7d' ? 604800000 : expiresIn === 'never' ? null : undefined;
+    if (window === undefined) throw new ApiError(400, 'INVALID_INPUT');
+    return window === null ? null : this.now() + window;
+  }
+  createShare(space: Space, session: Session | undefined, itemId: string, expiresIn: string, maxViews: number | null): SharePublic & { token: string; url: string } {
+    const item = this.item(space, itemId);
+    this.canManage(space, item.userId, session);
+    if (maxViews !== null && (!Number.isSafeInteger(maxViews) || maxViews < 1 || maxViews > 100)) throw new ApiError(400, 'INVALID_INPUT');
+    const raw = token();
+    const share = {
+      id: randomUUID(), tokenHash: hash(raw), itemId: item.id, spaceId: space.id, createdBy: session?.user.id ?? null,
+      expiresAt: this.shareExpires(expiresIn), maxViews, views: 0, revoked: 0, createdAt: this.now(),
+      downloadTicketHash: null, downloadTicketExpiresAt: null,
+    };
+    this.repo.createShare(share);
+    return {
+      id: share.id, itemId: share.itemId, expiresAt: share.expiresAt, maxViews: share.maxViews,
+      views: share.views, revoked: share.revoked, createdAt: share.createdAt,
+      token: raw, url: `${this.config.origin}/s/${raw}`,
+    };
+  }
+  listShares(space: Space, session: Session | undefined, itemId: string) {
+    const item = this.item(space, itemId);
+    this.canManage(space, item.userId, session);
+    return this.repo.sharesForItem(item.id);
+  }
+  revokeShare(space: Space, session: Session | undefined, shareId: string) {
+    const share = this.repo.shareById(shareId);
+    if (!share || share.spaceId !== space.id) throw new ApiError(404, 'NOT_FOUND');
+    this.canManage(space, share.userId, session);
+    this.repo.revokeShare(shareId, space.id);
+  }
+  private shareToken(raw: string) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(raw)) throw new ApiError(404, 'NOT_FOUND');
+    return hash(raw);
+  }
+  openPublicShare(raw: string) {
+    const access = token();
+    const opened = this.repo.openShare(this.shareToken(raw), this.now(), hash(access), this.now() + 600000);
+    if (!opened) throw new ApiError(404, 'NOT_FOUND');
+    return {
+      item: publicShareItem(opened.item), linkExpiresAt: opened.linkExpiresAt,
+      views: opened.views, maxViews: opened.maxViews, access,
+    };
+  }
+  readPublicShare(raw: string, access: string | undefined) {
+    const accessHash = access && access.length <= 128 ? hash(access) : null;
+    const item = this.repo.readShare(this.shareToken(raw), this.now(), accessHash);
+    if (!item) throw new ApiError(404, 'NOT_FOUND');
+    return item;
   }
   createInvite(session: Session | undefined, spaceId: string, maxUses: number, hours: number) {
     const auth = this.admin(session);

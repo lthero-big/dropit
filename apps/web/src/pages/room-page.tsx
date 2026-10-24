@@ -92,6 +92,7 @@ export function RoomPage() {
             sender={() => '访客'}
             canEdit={(item) => item.kind === 'text'}
             canRetract={() => true}
+            canShare={() => true}
             onAuthLost={onAuthLost}
             onStatus={onStatus}
           />

@@ -86,6 +86,28 @@ Space routes require membership; room routes require the unexpired capability.
 | GET | `base/items/:id/download` | Raw bytes, `application/octet-stream`, `Content-Disposition: attachment`, `nosniff`. No range/resume support. |
 | GET | `base/items/:id/thumbnail` | Sanitized, re-encoded `image/webp` up to 320×320; 404 if no thumbnail |
 | DELETE | `base/items/:id` | 204; retract entry and stored file/thumbnail. In spaces, sender or space owner only; in rooms, every capability holder may retract. |
+| POST | `base/items/:id/shares` | `{expiresIn:'1h'\|'1d'\|'7d'\|'never', maxViews?: number\|null}` → 201 `{id,itemId,expiresAt,maxViews,views,revoked,createdAt,token,url}`. `maxViews` null or omitted is unlimited; otherwise 1–100 (`1` is one-time). Same manager as retract: item author or space owner; any current room capability. |
+| GET | `base/items/:id/shares` | `{shares:[Share]}`. No token. Same manager as create. |
+| DELETE | `base/shares/:shareId` | 204; immediate revocation. Same manager as create. |
+
+`Share = {id,itemId,expiresAt:number|null,maxViews:number|null,views,revoked:0|1,createdAt}`.
+The raw token is returned only at creation (`url` is `{APP_ORIGIN}/s/{token}`). Only its SHA-256
+is stored. Unknown, expired, revoked, exhausted and malformed tokens are all `404 NOT_FOUND`.
+There is no list, search or enumeration endpoint for tokens.
+
+## Public share links
+
+No session cookie. `GET` only. Rate-limited per IP and per token. A link never outlives its
+clip: item retention, room expiry and retraction all make the link `404`. `expiresIn:'never'`
+means the link itself has no extra deadline.
+
+| Method | Path | Response |
+| --- | --- | --- |
+| GET | `/s/:token` | `{item,linkExpiresAt,views,maxViews,access}`. Consumes one view. `item` is `{kind,text,filename,mime,size,hasThumbnail,createdAt,expiresAt}` with no ids. `access` authorizes file and thumbnail requests for 10 minutes without a second view. |
+| GET | `/s/:token/file?access=` | Raw bytes, `application/octet-stream`, attachment, `nosniff`. A valid unexpired `access` does not consume another view. Without `access`, this request itself consumes one view (direct download). |
+| GET | `/s/:token/thumbnail?access=` | Sanitized `image/webp`, or 404. Same view rules as the file route. |
+
+The second metadata read of a one-time link is `404`. Refreshing the page counts as another view.
 | WS | `base/ws` | Read-only event channel; exact `Origin` required, with session cookie for spaces |
 
 ```ts

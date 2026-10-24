@@ -13,7 +13,7 @@ import sharp from 'sharp';
 import { createBackend } from '../src/backend.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { hash, type Identity } from '../src/domain.js';
-import { migration1 } from '../src/migrations.js';
+import { migration1, migration2, migration3 } from '../src/migrations.js';
 import type { OAuthProvider } from '../src/oauth.js';
 import { SqliteRepository } from '../src/repository.js';
 
@@ -639,6 +639,136 @@ test('text edits keep the item, sync, and enforce author and quota', async t => 
   const roomEdit = await f.json(`/api/rooms/${room.token}/items/${roomItem.item.id}`, { text: 'room edited' }, '', 'PATCH');
   assert.equal(roomEdit.status, 200);
   assert.equal((await roomEdit.json()).item.text, 'room edited');
+});
+
+test('share links enforce token, expiry, revocation, view limits and owner-only management', async t => {
+  const f = await fixture({ rateAuth: 1000 }); t.after(() => f.dispose());
+  const admin = await f.admin();
+  const invite = await f.invite(admin.cookie, admin.space.id, 2);
+  const member = await f.login('member', invite.token);
+  const other = await f.login('other', invite.token);
+  const base = `/api/spaces/${admin.space.id}`;
+  const created = await (await f.json(`${base}/items/text`, { text: 'secret clip' }, member.cookie)).json();
+  const itemId = created.item.id as string;
+  assert.equal((await f.request(`${base}/items/${itemId}/shares`)).status, 401);
+  assert.equal((await f.json(`${base}/items/${itemId}/shares`, { expiresIn: '1d', maxViews: 1 }, other.cookie)).status, 403);
+  assert.equal((await f.request(`${base}/items/${itemId}/shares`, {}, other.cookie)).status, 403);
+  assert.equal((await f.json(`${base}/items/${itemId}/shares`, { expiresIn: '2h' }, member.cookie)).status, 400);
+  assert.equal((await f.json(`${base}/items/${itemId}/shares`, { expiresIn: '1h', maxViews: 0 }, member.cookie)).status, 400);
+  assert.equal((await f.json(`${base}/items/missing/shares`, { expiresIn: '1h' }, member.cookie)).status, 404);
+
+  const createdShare = await f.json(`${base}/items/${itemId}/shares`, { expiresIn: '1h', maxViews: 2 }, member.cookie);
+  assert.equal(createdShare.status, 201);
+  const share = await createdShare.json();
+  assert.equal(Buffer.from(share.token, 'base64url').length, 32);
+  assert.equal(share.url, `${origin}/s/${share.token}`);
+  assert.equal(share.maxViews, 2);
+  const listed = await (await f.request(`${base}/items/${itemId}/shares`, {}, member.cookie)).json();
+  assert.equal(listed.shares.length, 1);
+  assert.equal('token' in listed.shares[0], false);
+  assert.equal(JSON.stringify(listed).includes(share.token), false);
+  const ownerList = await (await f.request(`${base}/items/${itemId}/shares`, {}, admin.cookie)).json();
+  assert.equal(ownerList.shares.length, 1);
+
+  const first = await f.request(`/api/s/${share.token}`);
+  assert.equal(first.status, 200);
+  assert.equal(first.headers.get('cache-control'), 'no-store');
+  const firstBody = await first.json();
+  assert.equal(firstBody.item.text, 'secret clip');
+  assert.equal(firstBody.item.userId, undefined);
+  assert.equal(firstBody.item.id, undefined);
+  assert.equal(firstBody.views, 1);
+  assert.equal((await (await f.request(`/api/s/${share.token}`)).json()).views, 2);
+  const exhausted = await f.request(`/api/s/${share.token}`);
+  const unknown = await f.request(`/api/s/${'a'.repeat(43)}`);
+  const malformed = await f.request('/api/s/short');
+  assert.equal(exhausted.status, 404);
+  assert.equal(unknown.status, 404);
+  assert.equal(malformed.status, 404);
+  const exhaustedBody = await exhausted.json();
+  assert.deepEqual(exhaustedBody, await unknown.json());
+  assert.deepEqual(exhaustedBody, { error: { code: 'NOT_FOUND' } });
+
+  const hour = await (await f.json(`${base}/items/${itemId}/shares`, { expiresIn: '1h' }, member.cookie)).json();
+  f.advance(3600001);
+  assert.equal((await f.request(`/api/s/${hour.token}`)).status, 404);
+  const day = await (await f.json(`${base}/items/${itemId}/shares`, { expiresIn: '1d', maxViews: null }, admin.cookie)).json();
+  assert.equal((await f.request(`/api/s/${day.token}`)).status, 200);
+  assert.equal((await f.request(`${base}/shares/${day.id}`, { method: 'DELETE' }, other.cookie)).status, 403);
+  assert.equal((await f.request(`${base}/shares/${day.id}`, { method: 'DELETE' }, admin.cookie)).status, 204);
+  const revoked = await f.request(`/api/s/${day.token}`);
+  assert.equal(revoked.status, 404);
+  assert.deepEqual(await revoked.json(), { error: { code: 'NOT_FOUND' } });
+  await f.service.cleanup();
+  assert.equal((await (await f.request(`${base}/items/${itemId}/shares`, {}, admin.cookie)).json()).shares.some((row: { id: string }) => row.id === day.id), false);
+
+  const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: 'red' } }).png().toBuffer();
+  const uploaded = await (await f.upload(base, member.cookie, png, 'image/png', 'shot.png')).json();
+  const fileShare = await (await f.json(`${base}/items/${uploaded.item.id}/shares`, { expiresIn: '7d', maxViews: 1 }, member.cookie)).json();
+  const opened = await (await f.request(`/api/s/${fileShare.token}`)).json();
+  assert.equal(opened.item.filename, 'shot.png');
+  assert.equal(opened.item.hasThumbnail, true);
+  assert.equal(opened.item.text, null);
+  const download = await f.request(`/api/s/${fileShare.token}/file?access=${opened.access}`);
+  assert.equal(download.status, 200);
+  assert.equal(download.headers.get('content-type'), 'application/octet-stream');
+  assert.match(download.headers.get('content-disposition') ?? '', /attachment/);
+  assert.equal(Buffer.compare(Buffer.from(await download.arrayBuffer()), png), 0);
+  const thumb = await f.request(`/api/s/${fileShare.token}/thumbnail?access=${opened.access}`);
+  assert.equal(thumb.status, 200);
+  assert.equal(thumb.headers.get('content-type'), 'image/webp');
+  assert.equal((await f.request(`/api/s/${fileShare.token}`)).status, 404);
+  f.advance(600001);
+  assert.equal((await f.request(`/api/s/${fileShare.token}/file?access=${opened.access}`)).status, 404);
+  assert.equal((await f.request(`/api/s/${fileShare.token}/file`)).status, 404);
+
+  const directShare = await (await f.json(`${base}/items/${uploaded.item.id}/shares`, { expiresIn: 'never', maxViews: 1 }, member.cookie)).json();
+  const direct = await f.request(`/api/s/${directShare.token}/file`);
+  assert.equal(direct.status, 200);
+  assert.equal(Buffer.compare(Buffer.from(await direct.arrayBuffer()), png), 0);
+  assert.equal((await f.request(`/api/s/${directShare.token}/file`)).status, 404);
+  assert.equal((await f.request(`/api/s/${directShare.token}`)).status, 404);
+
+  const lasting = await (await f.json(`${base}/items/${itemId}/shares`, { expiresIn: 'never' }, member.cookie)).json();
+  assert.equal((await f.request(`/api/s/${lasting.token}`)).status, 200);
+  assert.equal((await f.request(`${base}/items/${itemId}`, { method: 'DELETE' }, member.cookie)).status, 204);
+  assert.equal((await f.request(`/api/s/${lasting.token}`)).status, 404);
+  assert.equal((await f.request(`${base}/items/${itemId}/shares`, {}, member.cookie)).status, 404);
+
+  const room = await (await f.request('/api/rooms', { method: 'POST' })).json();
+  const roomItem = await (await f.json(`/api/rooms/${room.token}/items/text`, { text: 'room secret' })).json();
+  const roomShare = await f.json(`/api/rooms/${room.token}/items/${roomItem.item.id}/shares`, { expiresIn: '1d', maxViews: 5 });
+  assert.equal(roomShare.status, 201);
+  const roomBody = await roomShare.json();
+  assert.equal((await (await f.request(`/api/s/${roomBody.token}`)).json()).item.text, 'room secret');
+  assert.equal((await f.request(`/api/rooms/${room.token}/shares/${roomBody.id}`, { method: 'DELETE' })).status, 204);
+  assert.equal((await f.request(`/api/s/${roomBody.token}`)).status, 404);
+});
+
+test('schema v3 migrates share links without dropping items', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dropit-mig4-'));
+  const path = join(directory, 'dropit.sqlite');
+  const db = new Database(path);
+  db.exec(migration1);
+  db.exec(migration2);
+  db.exec(migration3);
+  db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt) VALUES (?,?,?,?,?,?)').run('u', 'old@example.com', 'Old', 'user', 0, 1);
+  db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,?,?)').run('s', 'Private space', 'u', null, null);
+  db.prepare(`INSERT INTO items (id,spaceId,userId,kind,text,filename,mime,size,storedBytes,fileKey,thumbnailKey,createdAt,expiresAt,updatedAt)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('i', 's', 'u', 'text', 'kept', null, null, 4, 4, null, null, 50, 9_999_999_999_999, 50);
+  db.close();
+  const repo = new SqliteRepository(path);
+  t.after(async () => {
+    repo.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  assert.equal(repo.item('i', Date.now())?.text, 'kept');
+  repo.createShare({
+    id: 'share', tokenHash: 'hash', itemId: 'i', spaceId: 's', createdBy: 'u', expiresAt: null,
+    maxViews: 1, views: 0, revoked: 0, createdAt: 50, downloadTicketHash: null, downloadTicketExpiresAt: null,
+  });
+  assert.equal(repo.sharesForItem('i')[0]?.maxViews, 1);
+  assert.equal(repo.shareById('share')?.userId, 'u');
 });
 
 test('schema v1 migrates without dropping users', async t => {
