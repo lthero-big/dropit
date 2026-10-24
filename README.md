@@ -36,7 +36,11 @@ pnpm build
 
 只通过环境变量提供 `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`、`GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`。未配置的 provider 不开放登录。无密码入口，测试用 mock 不会作为生产登录接口开放。
 
-`ADMIN_EMAILS` 为空时，首个成功登录者是管理员；配置后，仅匹配 provider 已验证邮箱的人可首次建号成为管理员。其他新用户须通过有效邀请完成 OAuth，或由管理员按邮箱预创建（待首次已验证 OAuth 登录时绑定，不另建账号）。不同 provider 的身份不按邮箱自动合并；预创建只绑定第一个匹配该邮箱的身份。会话为服务器保存的随机令牌，数据库仅存 SHA-256；不需要占位 `SESSION_SECRET`。
+`ADMIN_EMAILS` 为空时，首个成功登录者是管理员；配置后，仅匹配 provider 已验证邮箱的人可首次建号成为管理员。其他新用户须通过有效邀请完成 OAuth，或由管理员按邮箱预创建（待首次已验证 OAuth 登录时绑定，不另建账号）。普通邮箱不会按邮箱自动合并不同 provider；预创建只绑定第一个匹配该邮箱的身份。列在 `ADMIN_EMAILS` 里的邮箱例外：GitHub 和 Google 只要给出同一个已验证邮箱，就绑定到同一个管理员账号，后登录的 provider 不会再另建用户。每次成功登录都会按当前环境把该邮箱设回管理员（环境优先于后台里的降权）。停用后不能靠换一个 provider 绕过。
+
+`.env.example` 和 Compose 把 `ADMIN_EMAILS` 默认写成 `ltherowlh@gmail.com`。这只是示例默认值。进程环境里的值始终优先：改成别的邮箱就用别的邮箱；显式留空则仍是「第一个成功登录的人成为管理员」。服务器代码不把这个地址写死。
+
+会话为服务器保存的随机令牌，数据库仅存 SHA-256；不需要占位 `SESSION_SECRET`。
 
 ## Docker（本机）
 
@@ -63,7 +67,7 @@ docker build -t dropit .
 docker run --rm -p 192.168.1.152:8787:8787 \
   -e NODE_ENV=development \
   -e APP_ORIGIN=http://192.168.1.152:8787 \
-  -e ADMIN_EMAILS \
+  -e ADMIN_EMAILS=ltherowlh@gmail.com \
   -e GITHUB_CLIENT_ID \
   -e GITHUB_CLIENT_SECRET \
   -e GOOGLE_CLIENT_ID \
@@ -78,7 +82,7 @@ docker run --rm -p 192.168.1.152:8787:8787 \
 - `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`（两个都有才开放 GitHub）
 - `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`（两个都有才开放 Google）
 - `APP_ORIGIN`（浏览器实际 origin）
-- `ADMIN_EMAILS`（对外之前先写上已验证的管理员邮箱；留空时第一个成功登录的人成为管理员）
+- `ADMIN_EMAILS`（示例默认是 `ltherowlh@gmail.com`，可用环境变量覆盖；留空时第一个成功登录的人成为管理员）
 
 ## 存储与维护
 

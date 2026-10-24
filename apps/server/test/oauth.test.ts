@@ -53,6 +53,10 @@ test('Configuration rejects unsafe origin, invalid limits and weak room policy',
     { ROOM_RETENTION_HOURS: '25' }, { ROOM_MAX_FILE_BYTES: String(25 * 1024 ** 2) },
     { RATE_AUTH: '240' },
   ]) assert.throws(() => loadConfig(env));
+  assert.deepEqual(loadConfig({}).adminEmails, []);
+  assert.deepEqual(loadConfig({ ADMIN_EMAILS: '' }).adminEmails, []);
+  assert.deepEqual(loadConfig({ ADMIN_EMAILS: 'ltherowlh@gmail.com' }).adminEmails, ['ltherowlh@gmail.com']);
+  assert.deepEqual(loadConfig({ ADMIN_EMAILS: 'other@example.com' }).adminEmails, ['other@example.com']);
   assert.equal(loadConfig({ ADMIN_EMAILS: ' Owner@Example.COM, ' }).adminEmails[0], 'owner@example.com');
 });
 

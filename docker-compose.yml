@@ -17,7 +17,9 @@ services:
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      # Example default. A non-empty ADMIN_EMAILS in the environment replaces it;
+      # an explicit empty value keeps "first login becomes admin".
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-ltherowlh@gmail.com}
       MAX_FILE_BYTES: ${MAX_FILE_BYTES:-26214400}
       USER_QUOTA_BYTES: ${USER_QUOTA_BYTES:-1073741824}
       RETENTION_HOURS: ${RETENTION_HOURS:-168}

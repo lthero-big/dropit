@@ -511,6 +511,69 @@ test('admin pre-provisions a user that the first verified login binds', async t 
   assert.equal((await f.login('guest')).response.status, 302);
 });
 
+test('configured admin email signs in with GitHub or Google as one admin account', async t => {
+  const email = 'ltherowlh@gmail.com';
+  const f = await fixture({ adminEmails: [email] }); t.after(() => f.dispose());
+  const github = await f.login('gh-subject', undefined, email);
+  assert.equal(github.response.status, 302);
+  const me = await (await f.request('/api/me', {}, github.cookie)).json();
+  assert.equal(me.user.email, email);
+  assert.equal(me.user.role, 'admin');
+  const linked = f.repo.login(
+    { provider: 'google', subject: 'google-subject', email, name: 'Owner' },
+    null, [email], hash('google-session'), f.config.sessionMs, f.config.sessionMs,
+  );
+  assert.equal(linked.id, me.user.id);
+  assert.equal(linked.role, 'admin');
+  assert.equal(f.repo.users().length, 1);
+  assert.equal(f.repo.session(hash('google-session'), 0)?.user.role, 'admin');
+
+  const googleFirst = await fixture({ adminEmails: [email] }, 'google'); t.after(() => googleFirst.dispose());
+  const google = await googleFirst.login('google-subject', undefined, email);
+  assert.equal(google.response.status, 302);
+  const googleMe = await (await googleFirst.request('/api/me', {}, google.cookie)).json();
+  assert.equal(googleMe.user.role, 'admin');
+  const linkedGithub = googleFirst.repo.login(
+    { provider: 'github', subject: 'gh-subject', email, name: 'Owner' },
+    null, [email], hash('github-session'), googleFirst.config.sessionMs, 0,
+  );
+  assert.equal(linkedGithub.id, googleMe.user.id);
+  assert.equal(googleFirst.repo.users().length, 1);
+
+  const stranger = await f.login('stranger', undefined, 'other@example.com');
+  assert.equal(oauthError(stranger.response), 'INVITATION_REQUIRED');
+  assert.equal(f.repo.users().length, 1);
+
+  const demoted = await fixture(); t.after(() => demoted.dispose());
+  const admin = await demoted.admin();
+  const invite = await demoted.invite(admin.cookie, admin.space.id);
+  const member = await demoted.login('member', invite.token, 'member@example.com');
+  assert.equal(member.response.status, 302);
+  const promoted = demoted.repo.login(
+    { provider: 'github', subject: 'member', email: 'member@example.com', name: 'member' },
+    null, ['member@example.com'], hash('promoted-session'), demoted.config.sessionMs, 0,
+  );
+  assert.equal(promoted.role, 'admin');
+  assert.equal(demoted.repo.users().filter(user => user.email === 'member@example.com').length, 1);
+
+  const disabled = await fixture({ adminEmails: ['owner@example.com', 'boss@example.com'] }); t.after(() => disabled.dispose());
+  const owner = await disabled.login('owner-subject', undefined, 'owner@example.com');
+  const boss = await disabled.login('boss-subject', undefined, 'boss@example.com');
+  assert.equal(owner.response.status, 302);
+  assert.equal(boss.response.status, 302);
+  const ownerMe = await (await disabled.request('/api/me', {}, owner.cookie)).json();
+  assert.equal((await disabled.json(`/api/admin/users/${ownerMe.user.id}`, { disabled: true }, boss.cookie, 'PATCH')).status, 204);
+  assert.equal(oauthError((await disabled.login('owner-subject', undefined, 'owner@example.com')).response), 'USER_DISABLED');
+  assert.throws(
+    () => disabled.repo.login(
+      { provider: 'google', subject: 'owner-google', email: 'owner@example.com', name: 'Owner' },
+      null, disabled.config.adminEmails, hash('blocked'), disabled.config.sessionMs, 0,
+    ),
+    (error: unknown) => error instanceof Error && error.message === 'USER_DISABLED',
+  );
+  assert.equal(disabled.repo.users().length, 2);
+});
+
 test('ADMIN_EMAILS pre-provision is stored as admin and claimed by that mailbox', async t => {
   const f = await fixture({ adminEmails: ['owner@example.com', 'boss@example.com'] }); t.after(() => f.dispose());
   const owner = await f.login('owner');

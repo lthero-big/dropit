@@ -34,9 +34,16 @@ Starting a new flow replaces the browser's previous flow cookie.
 If `ADMIN_EMAILS` is empty, the first successfully authenticated identity becomes
 admin. If configured, only a provider-verified matching email may bootstrap the
 installation; other new identities require an invite. Matching configured emails
-also become admins when created. Provider identities remain separate; we do not
-silently link GitHub and Google accounts by email. No provider access/refresh token
-is stored. Configure `ADMIN_EMAILS` before exposing an installation.
+also become admins when created, and again on every later verified login (the
+process environment wins over a role change in the admin UI). Provider identities
+remain separate for ordinary mailboxes; we do not silently link GitHub and Google
+accounts by email. A mailbox listed in `ADMIN_EMAILS` is the exception: the first
+verified provider creates or claims the account, and a later verified login from
+the other provider binds to that same user instead of creating a second one. A
+disabled match stays disabled. No provider access/refresh token is stored.
+`.env.example` and Compose document `ltherowlh@gmail.com` as the default value;
+the server reads only the process environment and does not hardcode that address.
+Configure `ADMIN_EMAILS` before exposing an installation.
 
 ## Administration
 
@@ -45,7 +52,7 @@ All paths here require an enabled admin, otherwise 401/403.
 | Method | Path | Body / response |
 | --- | --- | --- |
 | GET | `/admin/users` | `{users: [User & {usedBytes, quotaBytes, quotaOverride}]}`. `quotaBytes` is the effective quota. `quotaOverride` is the stored override, or `null` when the installation default applies. |
-| POST | `/admin/users` | `{email, name?: string, role?: 'admin' or 'user', quotaBytes?: number}` → 201, `User & {usedBytes, quotaBytes, quotaOverride}`. Pre-creates a pending account and its private space. No password and no invite token. The first later OAuth login whose **verified** email matches (case-insensitive) binds that identity, clears `pending`, and does not create a second user or space. A different provider subject with the same email is not linked and still needs an invite or admin bootstrap. Email must not already belong to any user (`409 EMAIL_IN_USE`). `ADMIN_EMAILS` matches are stored as `admin`. `quotaBytes` when omitted is the installation default (`quotaOverride: null`); when set, 1 byte through 100 GiB. |
+| POST | `/admin/users` | `{email, name?: string, role?: 'admin' or 'user', quotaBytes?: number}` → 201, `User & {usedBytes, quotaBytes, quotaOverride}`. Pre-creates a pending account and its private space. No password and no invite token. The first later OAuth login whose **verified** email matches (case-insensitive) binds that identity, clears `pending`, and does not create a second user or space. A different provider subject with the same email is not linked and still needs an invite or admin bootstrap, unless the email is listed in `ADMIN_EMAILS` (that mailbox may bind GitHub and Google to the one account). Email must not already belong to any user (`409 EMAIL_IN_USE`). `ADMIN_EMAILS` matches are stored as `admin`. `quotaBytes` when omitted is the installation default (`quotaOverride: null`); when set, 1 byte through 100 GiB. |
 | PATCH | `/admin/users/:id` | At least one of `{disabled?: boolean, role?: 'admin'\|'user', name?: string, quotaBytes?: number\|null}` → 204. `quotaBytes: null` clears the override. Disabling immediately revokes every session/socket. Enabling requires a new login. Role and quota apply to the next request on existing sessions. The last enabled admin cannot be disabled or demoted (`409 LAST_ADMIN`). Email cannot be changed. |
 | POST | `/admin/users/:id/logout` | 204. Deletes every session for that user and closes their sockets. The account stays enabled; they can sign in again. Unknown id: `404`. |
 | GET | `/admin/limits` | Read-only installation limits from the environment: `{maxFileBytes, maxTextBytes, maxItems, userQuotaBytes, retentionMs, roomQuotaBytes, roomMaxFileBytes, roomRetentionMs, rateWindowMs, rateGeneral, rateAuth, rateInvite, rateUpload, rateRoom, sessionMs}`. There is no write API; change the environment and restart. |

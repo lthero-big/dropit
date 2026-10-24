@@ -88,6 +88,19 @@ export class SqliteRepository implements Repository {
           row = { ...pending, pending: 0 };
         }
       }
+      // Configured admin mailboxes may use GitHub or Google. The second verified
+      // provider binds to the existing account instead of creating another user.
+      // Other mailboxes stay unmerged across providers.
+      if (!row && admins.includes(identity.email.toLowerCase())) {
+        const matches = this.db.prepare('SELECT * FROM users WHERE lower(email)=lower(?) ORDER BY createdAt,id').all(identity.email) as UserRow[];
+        const existing = matches.find(user => user.disabled === 0);
+        if (matches.length > 0 && !existing) throw new ApiError(403, 'USER_DISABLED');
+        if (existing) {
+          this.db.prepare('UPDATE users SET pending=0 WHERE id=?').run(existing.id);
+          this.db.prepare('INSERT INTO identities (provider,subject,userId) VALUES (?,?,?)').run(identity.provider, identity.subject, existing.id);
+          row = { ...existing, pending: 0 };
+        }
+      }
       if (!row) {
         const first = (this.db.prepare('SELECT count(*) AS n FROM users').get() as { n: number }).n === 0;
         const admin = admins.includes(identity.email.toLowerCase()) || (first && admins.length === 0);
@@ -98,6 +111,11 @@ export class SqliteRepository implements Repository {
         const spaceId = randomUUID();
         this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
         this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
+      }
+      // The process environment is the source of truth: a listed mailbox is admin on each login.
+      if (admins.includes(identity.email.toLowerCase()) && row.role !== 'admin') {
+        this.db.prepare("UPDATE users SET role='admin' WHERE id=?").run(row.id);
+        row = { ...row, role: 'admin' };
       }
       if (invite) {
         // Membership already held: login is idempotent and does not spend another use.
