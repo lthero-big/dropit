@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { CopyIcon, DownloadIcon, EllipsisIcon, PencilIcon, PinIcon, PinOffIcon, Share2Icon, TagIcon, Undo2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 import { CommandPalette } from '@/components/command-palette.tsx'
+import { ExpandCapsule } from '@/components/expand-capsule.tsx'
 import { SharePanel } from '@/components/share-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
@@ -12,6 +14,40 @@ import type { ConnectionStatus, Item } from '@/lib/types.ts'
 
 function filesFromList(list: FileList | File[] | null | undefined): File[] {
   return Array.from(list ?? [])
+}
+
+const iconButtonClass =
+  'inline-flex size-10 shrink-0 items-center justify-center border-2 border-foreground bg-background text-foreground hover:bg-foreground hover:text-background'
+const capsuleIconClass =
+  'inline-flex size-10 shrink-0 items-center justify-center bg-transparent text-foreground hover:bg-foreground hover:text-background'
+const touchTarget = { minWidth: 40, minHeight: 40 }
+
+function IconAction({
+  label,
+  onClick,
+  children,
+  confirm = false,
+  expanded,
+}: {
+  label: string
+  onClick: () => void
+  children: ReactNode
+  confirm?: boolean
+  expanded?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-expanded={expanded}
+      onClick={onClick}
+      className={confirm ? `${iconButtonClass} border-primary bg-primary text-primary-foreground hover:bg-primary/80` : iconButtonClass}
+      style={touchTarget}
+    >
+      {children}
+    </button>
+  )
 }
 
 function extension(name: string): string {
@@ -417,73 +453,91 @@ export function ClipboardBoard({
                   <p className="text-xs text-muted-foreground">{formatBytes(item.size)}</p>
                 </div>
               )}
-              <div className="mt-3 flex flex-wrap gap-2">
+              <div className="mt-3 flex flex-wrap items-center gap-2">
                 {item.kind === 'text' ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
+                  <IconAction
+                    label="复制"
                     onClick={() => {
                       void copyText(item.text ?? '').then(() => toast.success('已复制'))
                     }}
                   >
-                    复制
-                  </Button>
-                ) : null}
-                {canEdit(item) && editing !== item.id ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setEditing(item.id)
-                      setEditDraft(item.text ?? '')
-                      setPending(null)
-                    }}
-                  >
-                    编辑
-                  </Button>
-                ) : null}
-                {item.kind === 'file' ? (
-                  <Button type="button" variant="outline" size="sm" asChild>
-                    <a href={`${base}/items/${item.id}/download`}>下载</a>
-                  </Button>
+                    <CopyIcon className="size-5" aria-hidden="true" />
+                  </IconAction>
                 ) : null}
                 {canShare(item) ? (
-                  <Button type="button" variant="outline" size="sm" onClick={() => void saveLabels(item, { pinned: !item.pinned })}>
-                    {item.pinned ? '取消置顶' : '置顶'}
-                  </Button>
-                ) : null}
-                {canShare(item) ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setTagFor((current) => (current === item.id ? null : item.id))
-                      setTagDraft('')
-                    }}
-                  >
-                    标签
-                  </Button>
-                ) : null}
-                {canShare(item) ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
+                  <IconAction
+                    label="分享"
+                    expanded={shareFor === item.id}
                     onClick={() => {
                       setShareFor((current) => (current === item.id ? null : item.id))
                       setPending(null)
                     }}
                   >
-                    分享
-                  </Button>
+                    <Share2Icon className="size-5" aria-hidden="true" />
+                  </IconAction>
                 ) : null}
                 {canRetract(item) ? (
-                  <Button type="button" variant="outline" size="sm" onClick={() => void retract(item)}>
-                    {pending === item.id ? '确认撤回' : '撤回'}
-                  </Button>
+                  <IconAction label={pending === item.id ? '确认撤回' : '撤回'} confirm={pending === item.id} onClick={() => void retract(item)}>
+                    <Undo2Icon className="size-5" aria-hidden="true" />
+                  </IconAction>
+                ) : null}
+                {(canEdit(item) && editing !== item.id) || item.kind === 'file' || canShare(item) ? (
+                  <ExpandCapsule label="更多" icon={<EllipsisIcon className="size-4" aria-hidden="true" />}>
+                    {canEdit(item) && editing !== item.id ? (
+                      <button
+                        type="button"
+                        title="编辑"
+                        aria-label="编辑"
+                        className={capsuleIconClass}
+                        style={touchTarget}
+                        onClick={() => {
+                          setEditing(item.id)
+                          setEditDraft(item.text ?? '')
+                          setPending(null)
+                        }}
+                      >
+                        <PencilIcon className="size-5" aria-hidden="true" />
+                      </button>
+                    ) : null}
+                    {item.kind === 'file' ? (
+                      <a
+                        href={`${base}/items/${item.id}/download`}
+                        title="下载"
+                        aria-label="下载"
+                        className={capsuleIconClass}
+                        style={touchTarget}
+                      >
+                        <DownloadIcon className="size-5" aria-hidden="true" />
+                      </a>
+                    ) : null}
+                    {canShare(item) ? (
+                      <button
+                        type="button"
+                        title={item.pinned ? '取消置顶' : '置顶'}
+                        aria-label={item.pinned ? '取消置顶' : '置顶'}
+                        className={capsuleIconClass}
+                        style={touchTarget}
+                        onClick={() => void saveLabels(item, { pinned: !item.pinned })}
+                      >
+                        {item.pinned ? <PinOffIcon className="size-5" aria-hidden="true" /> : <PinIcon className="size-5" aria-hidden="true" />}
+                      </button>
+                    ) : null}
+                    {canShare(item) ? (
+                      <button
+                        type="button"
+                        title="标签"
+                        aria-label="标签"
+                        className={capsuleIconClass}
+                        style={touchTarget}
+                        onClick={() => {
+                          setTagFor((current) => (current === item.id ? null : item.id))
+                          setTagDraft('')
+                        }}
+                      >
+                        <TagIcon className="size-5" aria-hidden="true" />
+                      </button>
+                    ) : null}
+                  </ExpandCapsule>
                 ) : null}
               </div>
               {(item.tags ?? []).length > 0 ? (

@@ -228,7 +228,7 @@ try {
     navigator.clipboard.writeText = async (text) => { window.__copied = text; };
   })()`);
   const copyClicked = await evaluate(`(() => {
-    const button = [...document.querySelectorAll('button')].find((node) => node.textContent.trim() === '复制');
+    const button = [...document.querySelectorAll('button')].find((node) => node.getAttribute('aria-label') === '复制' || node.textContent.trim() === '复制');
     if (!button) return false;
     button.click();
     return true;
