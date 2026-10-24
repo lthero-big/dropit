@@ -33,6 +33,7 @@ at `APP_ORIGIN` (typically terminated by a trusted reverse proxy).
 | `RATE_INVITE` | 10 | Invite requests/IP and account/window; smaller than RATE_GENERAL |
 | `RATE_UPLOAD` | 30 | Upload/write requests/IP and account/window; also room access limit |
 | `RATE_ROOM` | 10 | Room creation/write requests/IP and account/window; smaller than RATE_UPLOAD |
+| `RATE_TOKEN` | 120 | Additional requests per PAT/window, alongside IP/account and write limits |
 
 Numeric settings are positive integers. Raising room limits above private-space
 limits or retention above 24 hours is rejected. Session/OAuth/room/invite secrets

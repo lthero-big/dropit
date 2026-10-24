@@ -6,7 +6,7 @@ export interface Config {
   roomQuotaBytes: number; roomMaxFileBytes: number; roomRetentionMs: number;
   sessionMs: number; cleanupMs: number; maxTextBytes: number; maxItems: number;
   rateWindowMs: number; rateGeneral: number; rateAuth: number; rateInvite: number;
-  rateUpload: number; rateRoom: number;
+  rateUpload: number; rateRoom: number; rateToken: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -35,6 +35,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rateWindowMs: number('RATE_WINDOW_MS', 60000), rateGeneral: number('RATE_GENERAL', 240),
     rateAuth: number('RATE_AUTH', 20), rateInvite: number('RATE_INVITE', 10),
     rateUpload: number('RATE_UPLOAD', 30), rateRoom: number('RATE_ROOM', 10),
+    rateToken: number('RATE_TOKEN', 120),
   };
   for (const value of [config.retentionMs, config.roomRetentionMs, config.sessionMs]) {
     if (!Number.isSafeInteger(value)) throw new Error('Retention/session duration is too large');

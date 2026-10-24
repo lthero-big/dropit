@@ -2,10 +2,13 @@ import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ApiError, type Flow, type Identity, type Invite, type Item, type Session, type ShareLink, type SharePublic, type Space, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5 } from './migrations.js';
+import { ApiError, type AccessToken, type DeviceAuthorization, type Flow, type Identity, type Invite, type Item, type Session, type ShareLink, type SharePublic, type Space, type User } from './domain.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6 } from './migrations.js';
 
 type UserRow = User & { quotaBytes: number | null };
+type DeviceRow = Omit<DeviceAuthorization, 'scopes'> & { scopes: string };
+type TokenRow = Omit<AccessToken, 'scopes'> & { scopes: string };
+type DevicePoll = { error: 'expired_token' | 'access_denied' | 'slow_down' | 'authorization_pending'; interval?: number } | { token: AccessToken };
 
 function toUser(row: UserRow): User {
   return { id: row.id, email: row.email, name: row.name, role: row.role, disabled: row.disabled, pending: row.pending, createdAt: row.createdAt };
@@ -30,6 +33,15 @@ export interface Repository {
   login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number): User;
   session(sessionHash: string, now: number): Session | undefined;
   logout(sessionHash: string): void;
+  createAccessToken(record: AccessToken, tokenHash: string): void;
+  accessTokens(userId?: string): AccessToken[];
+  tokenSession(tokenHash: string, now: number, touch?: boolean): Session | undefined;
+  renameAccessToken(id: string, userId: string, name: string): void;
+  revokeAccessToken(id: string, userId?: string): void;
+  createDevice(record: DeviceAuthorization): void;
+  deviceForUserCode(userCodeHash: string, verificationId: string | undefined, now: number): DeviceAuthorization | undefined;
+  decideDevice(id: string, userId: string, approve: boolean, now: number): void;
+  pollDevice(deviceCodeHash: string, now: number, tokenId: string, tokenHash: string): DevicePoll;
   users(): (User & { usedBytes: number; quotaBytes: number | null })[];
   provisionUser(input: { email: string; name: string; role: 'admin' | 'user'; quotaBytes: number | null; now: number }): User;
   updateUser(id: string, patch: { disabled?: boolean; role?: 'admin' | 'user'; name?: string; quotaBytes?: number | null }): void;
@@ -73,13 +85,14 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 5) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 5) this.db.transaction(() => {
+    if (version > 6) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 6) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
       if (version < 4) this.db.exec(migration4);
-      this.db.exec(migration5);
+      if (version < 5) this.db.exec(migration5);
+      this.db.exec(migration6);
     })();
   }
   saveFlow(flow: Flow) {
@@ -144,6 +157,84 @@ export class SqliteRepository implements Repository {
     return { user: toUser(row), expiresAt: row.expiresAt, sessionHash };
   }
   logout(sessionHash: string) { this.db.prepare('DELETE FROM sessions WHERE sessionHash=?').run(sessionHash); }
+  createAccessToken(record: AccessToken, tokenHash: string) {
+    this.db.prepare(`INSERT INTO access_tokens (id,tokenHash,userId,name,scopes,createdAt,lastUsedAt,expiresAt,revoked)
+      VALUES (@id,@tokenHash,@userId,@name,@scopes,@createdAt,@lastUsedAt,@expiresAt,@revoked)`)
+      .run({ ...record, scopes: JSON.stringify(record.scopes), tokenHash });
+  }
+  accessTokens(userId?: string) {
+    const columns = 'id,userId,name,scopes,createdAt,lastUsedAt,expiresAt,revoked';
+    const rows = userId === undefined ? this.db.prepare(`SELECT ${columns} FROM access_tokens ORDER BY createdAt DESC,id DESC`).all() :
+      this.db.prepare(`SELECT ${columns} FROM access_tokens WHERE userId=? ORDER BY createdAt DESC,id DESC`).all(userId);
+    return (rows as TokenRow[]).map(row => ({ ...row, scopes: JSON.parse(row.scopes) as AccessToken['scopes'] }));
+  }
+  tokenSession(tokenHash: string, now: number, touch = true): Session | undefined {
+    const row = this.db.prepare(`SELECT u.*, t.id AS tokenId, t.scopes, t.expiresAt FROM access_tokens t
+      JOIN users u ON u.id=t.userId WHERE t.tokenHash=? AND t.revoked=0 AND u.disabled=0 AND u.pending=0
+      AND (t.expiresAt IS NULL OR t.expiresAt>?)`).get(tokenHash, now) as
+      (UserRow & { tokenId: string; scopes: string; expiresAt: number | null }) | undefined;
+    if (!row) return undefined;
+    if (touch) this.db.prepare('UPDATE access_tokens SET lastUsedAt=? WHERE id=?').run(now, row.tokenId);
+    return { user: toUser(row), sessionHash: '', expiresAt: row.expiresAt ?? Infinity,
+      bearer: { id: row.tokenId, scopes: JSON.parse(row.scopes) as AccessToken['scopes'] } };
+  }
+  renameAccessToken(id: string, userId: string, name: string) {
+    if (!this.db.prepare('UPDATE access_tokens SET name=? WHERE id=? AND userId=?').run(name, id, userId).changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  revokeAccessToken(id: string, userId?: string) {
+    const result = userId === undefined ? this.db.prepare('UPDATE access_tokens SET revoked=1 WHERE id=?').run(id) :
+      this.db.prepare('UPDATE access_tokens SET revoked=1 WHERE id=? AND userId=?').run(id, userId);
+    if (!result.changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  createDevice(record: DeviceAuthorization) {
+    this.db.prepare(`INSERT INTO device_authorizations
+      (id,deviceCodeHash,userCodeHash,name,ipSummary,scopes,tokenLifetimeMs,expiresAt,interval,nextPollAt,attempts,status,userId)
+      VALUES (@id,@deviceCodeHash,@userCodeHash,@name,@ipSummary,@scopes,@tokenLifetimeMs,@expiresAt,@interval,@nextPollAt,@attempts,@status,@userId)`)
+      .run({ ...record, scopes: JSON.stringify(record.scopes) });
+  }
+  deviceForUserCode(userCodeHash: string, verificationId: string | undefined, now: number) {
+    return this.db.transaction(() => {
+      const row = verificationId ? this.db.prepare('SELECT * FROM device_authorizations WHERE id=?').get(verificationId) :
+        this.db.prepare('SELECT * FROM device_authorizations WHERE userCodeHash=?').get(userCodeHash);
+      const device = row as DeviceRow | undefined;
+      if (!device || device.expiresAt <= now || device.status !== 'pending') return undefined;
+      if (device.userCodeHash !== userCodeHash) {
+        this.db.prepare(`UPDATE device_authorizations SET attempts=attempts+1,
+          status=CASE WHEN attempts+1>=5 THEN 'denied' ELSE status END WHERE id=?`).run(device.id);
+        return undefined;
+      }
+      return { ...device, scopes: JSON.parse(device.scopes) as DeviceAuthorization['scopes'] };
+    }).immediate();
+  }
+  decideDevice(id: string, userId: string, approve: boolean, now: number) {
+    if (!this.db.prepare(`UPDATE device_authorizations SET status=?,userId=? WHERE id=? AND status='pending' AND expiresAt>?`)
+      .run(approve ? 'approved' : 'denied', userId, id, now).changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  pollDevice(deviceCodeHash: string, now: number, tokenId: string, tokenHash: string): DevicePoll {
+    return this.db.transaction((): DevicePoll => {
+      const device = this.db.prepare('SELECT * FROM device_authorizations WHERE deviceCodeHash=?').get(deviceCodeHash) as DeviceRow | undefined;
+      if (!device || device.expiresAt <= now || device.status === 'consumed') return { error: 'expired_token' };
+      if (device.status === 'denied') return { error: 'access_denied' };
+      if (now < device.nextPollAt) {
+        const interval = device.interval + 5;
+        this.db.prepare('UPDATE device_authorizations SET interval=?,nextPollAt=? WHERE id=?').run(interval, now + interval * 1000, device.id);
+        return { error: 'slow_down', interval };
+      }
+      this.db.prepare('UPDATE device_authorizations SET nextPollAt=? WHERE id=?').run(now + device.interval * 1000, device.id);
+      if (device.status === 'pending') return { error: 'authorization_pending' };
+      const user = this.db.prepare('SELECT disabled,pending FROM users WHERE id=?').get(device.userId) as Pick<User, 'disabled' | 'pending'> | undefined;
+      if (!user || user.disabled || user.pending) {
+        this.db.prepare("UPDATE device_authorizations SET status='denied' WHERE id=?").run(device.id);
+        return { error: 'access_denied' };
+      }
+      const record: AccessToken = { id: tokenId, userId: device.userId!, name: device.name,
+        scopes: JSON.parse(device.scopes) as AccessToken['scopes'], createdAt: now, lastUsedAt: null,
+        expiresAt: device.tokenLifetimeMs === null ? null : now + device.tokenLifetimeMs, revoked: 0 };
+      this.createAccessToken(record, tokenHash);
+      this.db.prepare("UPDATE device_authorizations SET status='consumed' WHERE id=?").run(device.id);
+      return { token: record };
+    }).immediate();
+  }
   users() {
     return this.db.prepare(`SELECT u.id,u.email,u.name,u.role,u.disabled,u.createdAt,u.pending,u.quotaBytes,
       coalesce((SELECT sum(storedBytes) FROM items WHERE userId=u.id),0) AS usedBytes
@@ -176,7 +267,11 @@ export class SqliteRepository implements Repository {
       this.db.prepare('UPDATE users SET disabled=?, role=?, name=?, quotaBytes=? WHERE id=?').run(
         Number(nextDisabled), nextRole, patch.name ?? user.name,
         patch.quotaBytes === undefined ? user.quotaBytes : patch.quotaBytes, id);
-      if (nextDisabled && user.disabled === 0) this.db.prepare('DELETE FROM sessions WHERE userId=?').run(id);
+      if (nextDisabled && user.disabled === 0) {
+        this.db.prepare('DELETE FROM sessions WHERE userId=?').run(id);
+        this.db.prepare('UPDATE access_tokens SET revoked=1 WHERE userId=?').run(id);
+        this.db.prepare("UPDATE device_authorizations SET status='denied' WHERE userId=? AND status='approved'").run(id);
+      }
     }).immediate();
   }
   revokeSessions(id: string) {
@@ -326,6 +421,7 @@ export class SqliteRepository implements Repository {
       this.db.prepare('DELETE FROM spaces WHERE expiresAt<=?').run(now);
       this.db.prepare('DELETE FROM sessions WHERE expiresAt<=?').run(now);
       this.db.prepare('DELETE FROM flows WHERE expiresAt<=?').run(now);
+      this.db.prepare('DELETE FROM device_authorizations WHERE expiresAt<=?').run(now);
       this.db.prepare('DELETE FROM invites WHERE expiresAt<=? OR revoked=1').run(now);
       this.db.prepare('DELETE FROM shares WHERE revoked=1 OR (expiresAt IS NOT NULL AND expiresAt<=?)').run(now);
       return items;

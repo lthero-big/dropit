@@ -66,3 +66,21 @@ ALTER TABLE items ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
 PRAGMA user_version=5;
 `;
+
+export const migration6 = `
+CREATE TABLE access_tokens (
+ id TEXT PRIMARY KEY, tokenHash TEXT UNIQUE NOT NULL,
+ userId TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, scopes TEXT NOT NULL,
+ createdAt INTEGER NOT NULL, lastUsedAt INTEGER, expiresAt INTEGER, revoked INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX access_token_user ON access_tokens(userId);
+CREATE TABLE device_authorizations (
+ id TEXT PRIMARY KEY, deviceCodeHash TEXT UNIQUE NOT NULL, userCodeHash TEXT UNIQUE NOT NULL,
+ name TEXT NOT NULL, ipSummary TEXT NOT NULL, scopes TEXT NOT NULL, tokenLifetimeMs INTEGER,
+ expiresAt INTEGER NOT NULL, interval INTEGER NOT NULL, nextPollAt INTEGER NOT NULL,
+ attempts INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('pending','approved','denied','consumed')),
+ userId TEXT REFERENCES users(id)
+);
+CREATE INDEX device_expiry ON device_authorizations(expiresAt);
+PRAGMA user_version=6;
+`;

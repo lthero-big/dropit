@@ -192,8 +192,7 @@ test('two concurrent first sign-ins create exactly one admin', async t => {
   const setup = new SqliteRepository(path);
   setup.close();
   const race = (subject: string) => new Promise<{ ok: boolean; role?: string; code?: string }>((resolve, reject) => {
-    const worker = new Worker(new URL('./first-user-race.worker.ts', import.meta.url), {
-      execArgv: ['--import', 'tsx'],
+    const worker = new Worker(new URL('./first-user-race.bootstrap.mjs', import.meta.url), {
       workerData: { path, subject, email: `${subject}@example.com`, admins: [], sessionHash: hash(subject) },
     });
     let settled = false;

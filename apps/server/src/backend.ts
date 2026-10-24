@@ -1,11 +1,13 @@
 import { join } from 'node:path';
+import { randomInt, randomUUID } from 'node:crypto';
+import { isIP } from 'node:net';
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { upgradeWebSocket } from '@hono/node-server';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { loadConfig, type Config } from './config.js';
-import { ApiError, hash, token, type Item, type Session } from './domain.js';
+import { ApiError, hash, token, type AccessToken, type Item, type Session, type TokenScope } from './domain.js';
 import { parseByteRange, sniffMedia } from './media.js';
 import { SqliteRepository, type Repository } from './repository.js';
 import { DiskFileStorage, type FileStorage } from './files.js';
@@ -71,6 +73,21 @@ function personName(value: unknown): string {
   if (!name) throw new ApiError(400, 'INVALID_INPUT');
   return name;
 }
+function tokenOptions(body: Record<string, unknown>) {
+  const name = personName(body.name);
+  const scopes = body.scopes === undefined ? ['read', 'write'] : body.scopes;
+  if (!Array.isArray(scopes) || !scopes.length || scopes.length > 2 ||
+      scopes.some(scope => scope !== 'read' && scope !== 'write') || new Set(scopes).size !== scopes.length) throw new ApiError(400, 'INVALID_INPUT');
+  const days = body.expiresInDays === null ? null : integer(body.expiresInDays ?? 90, 1, 3650);
+  return { name, scopes: scopes as TokenScope[], lifetimeMs: days === null ? null : days * 86400000 };
+}
+const userCodeAlphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const userCodeHash = (value: unknown) => hash(string(value, 32).toUpperCase().replace(/[-\s]/g, ''));
+function ipSummary(ip: string) {
+  if (isIP(ip) === 4) return `${ip.split('.').slice(0, 3).join('.')}.0/24`;
+  if (isIP(ip) === 6) return `IPv6 ${ip.split(':').filter(Boolean).slice(0, 2).join(':')}:…`;
+  return 'unknown';
+}
 const maxQuotaBytes = 100 * 1024 ** 3;
 function contentDisposition(kind: 'attachment' | 'inline', filename: string) {
   const encoded = encodeURIComponent(filename).replace(/['()*]/g, ch => '%' + ch.charCodeAt(0).toString(16));
@@ -95,13 +112,14 @@ export function createBackend(options: BackendOptions = {}) {
   const sessionCookie = config.production ? '__Host-dropit_session' : 'dropit_session';
   const flowCookie = config.production ? '__Secure-dropit_oauth' : 'dropit_oauth';
   const cookie = { httpOnly: true, secure: config.production, sameSite: 'Lax' as const, path: '/' };
+  const consume = (c: Ctx, key: string, count: number) => {
+    const retry = limiter.consume(key, count, now());
+    if (retry) { c.header('Retry-After', String(retry)); throw new ApiError(429, 'RATE_LIMITED'); }
+  };
   const limit = (c: Ctx, group: string, count: number, account = true) => {
     const keys = [`${group}:ip:${c.get('ip')}`];
     if (account && c.get('session')) keys.push(`${group}:user:${c.get('session')!.user.id}`);
-    for (const key of keys) {
-      const retry = limiter.consume(key, count, now());
-      if (retry) { c.header('Retry-After', String(retry)); throw new ApiError(429, 'RATE_LIMITED'); }
-    }
+    for (const key of keys) consume(c, key, count);
   };
   app.use('*', async (c, next) => {
     c.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
@@ -121,10 +139,25 @@ export function createBackend(options: BackendOptions = {}) {
     try { ip = resolveIp(remote, c.req.header('x-forwarded-for')); }
     catch { ip = remote; }
     c.set('ip', ip);
+    limit(c, 'general', config.rateGeneral, false);
     const rawSession = getCookie(c, sessionCookie);
-    c.set('session', rawSession ? repo.session(hash(rawSession), now()) : undefined);
-    limit(c, 'general', config.rateGeneral);
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && c.req.header('origin') !== config.origin) throw new ApiError(403, 'ORIGIN_REJECTED');
+    const authorization = c.req.header('authorization');
+    if (authorization !== undefined) {
+      // Any Authorization header selects machine authentication. Never fall back to cookies.
+      const match = /^Bearer ([A-Za-z0-9_-]{43})$/i.exec(authorization);
+      const auth = match ? repo.tokenSession(hash(match[1]), now()) : undefined;
+      if (!auth) { c.header('WWW-Authenticate', 'Bearer'); throw new ApiError(401, 'UNAUTHENTICATED'); }
+      c.set('session', auth);
+      consume(c, `token:${auth.bearer!.id}`, config.rateToken);
+    } else c.set('session', rawSession ? repo.session(hash(rawSession), now()) : undefined);
+    const auth = c.get('session');
+    if (auth) consume(c, `general:user:${auth.user.id}`, config.rateGeneral);
+    const safe = ['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
+    const bearer = c.get('session')?.bearer;
+    if (bearer && !bearer.scopes.includes(safe ? 'read' : 'write')) throw new ApiError(403, 'INSUFFICIENT_SCOPE');
+    const publicDevice = c.req.method === 'POST' && ['/api/auth/device/authorize', '/api/auth/device/token'].includes(c.req.path) &&
+      !rawSession && (!c.req.header('origin') || c.req.header('origin') === config.origin);
+    if (!safe && !bearer && !publicDevice && c.req.header('origin') !== config.origin) throw new ApiError(403, 'ORIGIN_REJECTED');
     await next();
   });
   app.onError((error, c) => {
@@ -139,6 +172,86 @@ export function createBackend(options: BackendOptions = {}) {
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND' } }, 404));
   app.get('/healthz', c => c.json({ status: 'ok' }));
   app.get('/api/auth/providers', c => c.json({ providers: Object.keys(providers) }));
+  const browserSession = (c: Ctx) => {
+    const auth = service.requireSession(c.get('session'));
+    if (auth.bearer) throw new ApiError(403, 'BROWSER_SESSION_REQUIRED');
+    return auth;
+  };
+  app.post('/api/tokens', async c => {
+    const auth = browserSession(c);
+    limit(c, 'token-create', config.rateAuth);
+    const input = tokenOptions(await json(c, 2048));
+    const raw = token();
+    const record: AccessToken = { id: randomUUID(), userId: auth.user.id, name: input.name, scopes: input.scopes,
+      createdAt: now(), lastUsedAt: null, expiresAt: input.lifetimeMs === null ? null : now() + input.lifetimeMs, revoked: 0 };
+    repo.createAccessToken(record, hash(raw));
+    return c.json({ ...record, token: raw }, 201);
+  });
+  app.get('/api/tokens', c => c.json({ tokens: repo.accessTokens(service.requireSession(c.get('session')).user.id) }));
+  app.patch('/api/tokens/:id', async c => {
+    const auth = browserSession(c);
+    const body = await json(c, 2048);
+    repo.renameAccessToken(c.req.param('id'), auth.user.id, personName(body.name));
+    return c.body(null, 204);
+  });
+  app.delete('/api/tokens/:id', c => {
+    repo.revokeAccessToken(c.req.param('id'), service.requireSession(c.get('session')).user.id);
+    events.revalidate();
+    return c.body(null, 204);
+  });
+  app.get('/api/admin/tokens', c => {
+    service.admin(c.get('session'));
+    return c.json({ tokens: repo.accessTokens(c.req.query('userId')) });
+  });
+  app.delete('/api/admin/tokens/:id', c => {
+    service.admin(c.get('session'));
+    repo.revokeAccessToken(c.req.param('id'));
+    events.revalidate();
+    return c.body(null, 204);
+  });
+  app.post('/api/auth/device/authorize', async c => {
+    limit(c, 'device-authorize', config.rateAuth, false);
+    const input = tokenOptions(await json(c, 2048));
+    const deviceCode = token();
+    const chars = Array.from({ length: 8 }, () => userCodeAlphabet[randomInt(userCodeAlphabet.length)]).join('');
+    const userCode = `${chars.slice(0, 4)}-${chars.slice(4)}`;
+    const id = randomUUID();
+    repo.createDevice({ id, deviceCodeHash: hash(deviceCode), userCodeHash: userCodeHash(userCode),
+      name: input.name, ipSummary: ipSummary(c.get('ip')), scopes: input.scopes, tokenLifetimeMs: input.lifetimeMs,
+      expiresAt: now() + 600000, interval: 5, nextPollAt: now() + 5000, attempts: 0, status: 'pending', userId: null });
+    const verificationUri = `${config.origin}/device`;
+    return c.json({ device_code: deviceCode, user_code: userCode, verification_uri: verificationUri,
+      verification_id: id, verification_uri_complete: `${verificationUri}?${new URLSearchParams({ user_code: userCode, verification_id: id })}`,
+      expires_in: 600, interval: 5 });
+  });
+  app.post('/api/auth/device/token', async c => {
+    limit(c, 'device-poll', config.rateGeneral, false);
+    const body = await json(c, 2048);
+    const deviceCode = string(body.device_code, 128);
+    const raw = token();
+    const result = repo.pollDevice(hash(deviceCode), now(), randomUUID(), hash(raw));
+    if ('error' in result) return c.json(result, 400);
+    return c.json({ access_token: raw, token_type: 'Bearer', scope: result.token.scopes.join(' '),
+      expires_in: result.token.expiresAt === null ? null : Math.floor((result.token.expiresAt - now()) / 1000), token: result.token });
+  });
+  const requestedDevice = (c: Ctx, body: Record<string, unknown>) => {
+    browserSession(c);
+    limit(c, 'device-confirm', 5);
+    const verificationId = body.verification_id === undefined ? undefined : string(body.verification_id, 64);
+    const device = repo.deviceForUserCode(userCodeHash(body.user_code), verificationId, now());
+    if (!device) throw new ApiError(404, 'NOT_FOUND');
+    return device;
+  };
+  app.get('/api/auth/device', c => {
+    const device = requestedDevice(c, c.req.query());
+    return c.json({ name: device.name, ipSummary: device.ipSummary, scopes: device.scopes,
+      expiresAt: device.expiresAt, tokenExpiresInDays: device.tokenLifetimeMs === null ? null : device.tokenLifetimeMs / 86400000 });
+  });
+  for (const decision of ['approve', 'deny']) app.post(`/api/auth/device/${decision}`, async c => {
+    const device = requestedDevice(c, await json(c, 2048));
+    repo.decideDevice(device.id, c.get('session')!.user.id, decision === 'approve', now());
+    return c.body(null, 204);
+  });
   const oauthFailure = (c: Ctx, error: unknown) => {
     const code = error instanceof ApiError && oauthBrowserErrors.has(error.code) ? error.code : 'INTERNAL_ERROR';
     return c.redirect(`${config.origin}/login?error=${code}`);
@@ -196,9 +309,10 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.post('/api/auth/logout', c => {
     const auth = service.requireSession(c.get('session'));
-    repo.logout(auth.sessionHash);
+    if (auth.bearer) repo.revokeAccessToken(auth.bearer.id, auth.user.id);
+    else repo.logout(auth.sessionHash);
     events.revalidate();
-    deleteCookie(c, sessionCookie, cookie);
+    if (!auth.bearer) deleteCookie(c, sessionCookie, cookie);
     return c.body(null, 204);
   });
   app.get('/api/invites/:token', c => {
@@ -304,6 +418,22 @@ export function createBackend(options: BackendOptions = {}) {
     if (range) c.header('Content-Range', `bytes ${start}-${end}/${item.size}`);
     return c.body(files.stream(item.fileKey, start, end), range ? 206 : 200);
   };
+  const sendDownload = (c: Ctx, item: Item) => {
+    if (!item.fileKey || !item.filename) throw new ApiError(404, 'NOT_FOUND');
+    const range = parseByteRange(c.req.header('range'), item.size);
+    c.header('Accept-Ranges', 'bytes');
+    c.header('Content-Type', 'application/octet-stream');
+    c.header('Content-Disposition', attachmentDisposition(item.filename));
+    if (range === 'unsatisfiable') {
+      c.header('Content-Range', `bytes */${item.size}`);
+      return c.body(null, 416);
+    }
+    const start = range?.start ?? 0;
+    const end = range?.end ?? item.size - 1;
+    c.header('Content-Length', String(end - start + 1));
+    if (range) c.header('Content-Range', `bytes ${start}-${end}/${item.size}`);
+    return c.body(files.stream(item.fileKey, start, end), range ? 206 : 200);
+  };
   app.get('/api/s/:token', c => {
     const raw = c.req.param('token');
     shareLimit(c, raw);
@@ -312,12 +442,14 @@ export function createBackend(options: BackendOptions = {}) {
   app.get('/api/s/:token/file', c => {
     const raw = c.req.param('token');
     shareLimit(c, raw);
-    const item = service.readPublicShare(raw, c.req.query('access'));
-    if (!item.fileKey || !item.filename) throw new ApiError(404, 'NOT_FOUND');
-    c.header('Content-Type', 'application/octet-stream');
-    c.header('Content-Length', String(item.size));
-    c.header('Content-Disposition', attachmentDisposition(item.filename));
-    return c.body(files.stream(item.fileKey));
+    let access = c.req.query('access');
+    if (!access) {
+      // A direct download spends one view and returns a ticket for subsequent ranges.
+      access = service.openPublicShare(raw).access;
+      c.header('X-Share-Access', access);
+      c.header('Content-Location', `/api/s/${raw}/file?${new URLSearchParams({ access })}`);
+    }
+    return sendDownload(c, service.readPublicShare(raw, access));
   });
   app.get('/api/s/:token/thumbnail', c => {
     const raw = c.req.param('token');
@@ -413,11 +545,7 @@ export function createBackend(options: BackendOptions = {}) {
     });
     app.get(`${base}/items/:id/download`, c => {
       const item = service.item(scope(c), c.req.param('id')!);
-      if (!item.fileKey) throw new ApiError(404, 'NOT_FOUND');
-      c.header('Content-Type', 'application/octet-stream');
-      c.header('Content-Length', String(item.size));
-      c.header('Content-Disposition', attachmentDisposition(item.filename!));
-      return c.body(files.stream(item.fileKey));
+      return sendDownload(c, item);
     });
     app.get(`${base}/items/:id/thumbnail`, c => {
       const item = service.item(scope(c), c.req.param('id')!);
@@ -433,15 +561,17 @@ export function createBackend(options: BackendOptions = {}) {
   const socketsByUser = new Map<string, number>();
   for (const base of ['/api/spaces/:space', '/api/rooms/:room']) {
     app.get(`${base}/ws`, c => {
-      if (c.req.header('origin') !== config.origin) throw new ApiError(403, 'ORIGIN_REJECTED');
+      if (!c.get('session')?.bearer && c.req.header('origin') !== config.origin) throw new ApiError(403, 'ORIGIN_REJECTED');
       const space = scope(c);
       const auth = c.get('session');
       const ip = c.get('ip');
       const userKey = auth?.user.id ?? `room:${ip}`;
+      const bearerHash = auth?.bearer ? hash(c.req.header('authorization')!.slice(7)) : undefined;
       if ((socketsByIp.get(ip) ?? 0) >= 8 || (socketsByUser.get(userKey) ?? 0) >= 8 || wss.clients.size >= 256) throw new ApiError(429, 'SOCKET_LIMIT');
       const authorized = () => {
+        if (bearerHash && !repo.tokenSession(bearerHash, now(), false)) return false;
         if (space.roomHash) return Boolean(repo.room(space.roomHash, now()));
-        return Boolean(auth && repo.session(auth.sessionHash, now()) && repo.isMember(space.id, auth.user.id));
+        return Boolean(auth && (bearerHash || repo.session(auth.sessionHash, now())) && repo.isMember(space.id, auth.user.id));
       };
       let unsubscribe: (() => void) | undefined;
       let opened = false;
