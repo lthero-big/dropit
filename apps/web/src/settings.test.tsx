@@ -129,7 +129,7 @@ describe('settings and device confirmation', () => {
     })
     renderAt('/settings')
     expect(await screen.findByRole('heading', { name: '设置' })).toBeTruthy()
-    expect(screen.getByText('laptop')).toBeTruthy()
+    expect(await screen.findByText('laptop')).toBeTruthy()
     expect(screen.getByText('读取、写入')).toBeTruthy()
     expect(screen.getByText('从未使用')).toBeTruthy()
     expect(screen.getByText('永不')).toBeTruthy()
