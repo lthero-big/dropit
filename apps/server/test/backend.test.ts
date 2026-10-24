@@ -745,6 +745,73 @@ test('share links enforce token, expiry, revocation, view limits and owner-only 
   assert.equal((await f.request(`/api/s/${roomBody.token}`)).status, 404);
 });
 
+test('tags and pins sync, validate, and keep creation time', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin();
+  const invite = await f.invite(admin.cookie, admin.space.id, 2);
+  const member = await f.login('member', invite.token);
+  const other = await f.login('other', invite.token);
+  const base = `/api/spaces/${admin.space.id}`;
+  const received: string[] = [];
+  f.events.subscribe(admin.space.id, { send(data) { received.push(data); }, close() {} }, () => true);
+  const older = await (await f.json(`${base}/items/text`, { text: 'older' }, member.cookie)).json();
+  assert.equal(older.item.pinned, false);
+  assert.deepEqual(older.item.tags, []);
+  f.advance(1000);
+  const newer = await (await f.json(`${base}/items/text`, { text: 'newer' }, member.cookie)).json();
+  assert.equal(newer.item.text, 'newer');
+  let snapshot = await (await f.request(`${base}/items`, {}, member.cookie)).json();
+  assert.deepEqual(snapshot.items.map((item: { text: string }) => item.text), ['newer', 'older']);
+
+  const tagged = await f.json(`${base}/items/${older.item.id}/labels`, { tags: [' #上线 ', '上线', '运维'] }, member.cookie, 'PATCH');
+  assert.equal(tagged.status, 200);
+  const taggedBody = await tagged.json();
+  assert.deepEqual(taggedBody.item.tags, ['上线', '运维']);
+  assert.equal(taggedBody.item.pinned, false);
+  assert.equal(taggedBody.item.createdAt, older.item.createdAt);
+  assert.equal(taggedBody.item.updatedAt, older.item.updatedAt);
+  assert.equal(taggedBody.item.text, 'older');
+
+  const pinned = await f.json(`${base}/items/${older.item.id}/labels`, { pinned: true }, member.cookie, 'PATCH');
+  assert.equal(pinned.status, 200);
+  const pinnedBody = await pinned.json();
+  assert.equal(pinnedBody.item.pinned, true);
+  assert.deepEqual(pinnedBody.item.tags, ['上线', '运维']);
+  const event = JSON.parse(received.at(-1)!);
+  assert.equal(event.type, 'item.updated');
+  assert.equal(event.item.id, older.item.id);
+  assert.equal(event.item.pinned, true);
+  assert.deepEqual(event.item.tags, ['上线', '运维']);
+  snapshot = await (await f.request(`${base}/items`, {}, member.cookie)).json();
+  assert.deepEqual(snapshot.items.map((item: { text: string }) => item.text), ['older', 'newer']);
+
+  const removed = await f.json(`${base}/items/${older.item.id}/labels`, { tags: ['运维'] }, member.cookie, 'PATCH');
+  assert.deepEqual((await removed.json()).item.tags, ['运维']);
+  assert.equal((await f.json(`${base}/items/${older.item.id}/labels`, { tags: ['has space'] }, member.cookie, 'PATCH')).status, 400);
+  assert.equal((await f.json(`${base}/items/${older.item.id}/labels`, { tags: ['x'.repeat(25)] }, member.cookie, 'PATCH')).status, 400);
+  assert.equal((await f.json(`${base}/items/${older.item.id}/labels`, { tags: ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 't7', 't8'] }, member.cookie, 'PATCH')).status, 400);
+  assert.equal((await f.json(`${base}/items/${older.item.id}/labels`, {}, member.cookie, 'PATCH')).status, 400);
+  assert.equal((await f.json(`${base}/items/${older.item.id}/labels`, { pinned: 'yes' }, member.cookie, 'PATCH')).status, 400);
+  assert.equal((await (await f.request(`${base}/items`, {}, member.cookie)).json()).items.find((item: { id: string }) => item.id === older.item.id).tags.length, 1);
+  assert.equal((await f.json(`${base}/items/${older.item.id}/labels`, { tags: [] }, other.cookie, 'PATCH')).status, 403);
+  assert.equal((await f.json(`${base}/items/${older.item.id}/labels`, { pinned: false }, admin.cookie, 'PATCH')).status, 200);
+
+  const uploaded = await (await f.upload(base, member.cookie, 'file-body', 'application/octet-stream', 'notes.txt')).json();
+  const fileLabels = await f.json(`${base}/items/${uploaded.item.id}/labels`, { tags: ['附件'], pinned: true }, member.cookie, 'PATCH');
+  assert.equal(fileLabels.status, 200);
+  assert.equal((await fileLabels.json()).item.pinned, true);
+
+  const room = await (await f.request('/api/rooms', { method: 'POST' })).json();
+  const roomItem = await (await f.json(`/api/rooms/${room.token}/items/text`, { text: 'room' })).json();
+  const roomLabels = await f.json(`/api/rooms/${room.token}/items/${roomItem.item.id}/labels`, { pinned: true, tags: ['#房间'] }, '', 'PATCH');
+  assert.equal(roomLabels.status, 200);
+  const roomBody = await roomLabels.json();
+  assert.equal(roomBody.item.pinned, true);
+  assert.deepEqual(roomBody.item.tags, ['房间']);
+  const roomList = await (await f.request(`/api/rooms/${room.token}/items`)).json();
+  assert.equal(roomList.items[0].pinned, true);
+});
+
 test('schema v3 migrates share links without dropping items', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'dropit-mig4-'));
   const path = join(directory, 'dropit.sqlite');
@@ -795,6 +862,8 @@ test('schema v1 migrates without dropping users', async t => {
   assert.equal(migrated?.text, 'old text');
   assert.equal(migrated?.createdAt, 50);
   assert.equal(migrated?.updatedAt, 50);
+  assert.equal(migrated?.pinned, 0);
+  assert.deepEqual(migrated?.tags, []);
 });
 
 test('A2: production cookie has Secure and __Host prefix', async t => {

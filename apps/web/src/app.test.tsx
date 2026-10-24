@@ -70,6 +70,8 @@ function item(partial: Partial<Item> & Pick<Item, 'id' | 'text'>): Item {
     hasThumbnail: false,
     createdAt: 1_700_000_000_000,
     expiresAt: Date.now() + 3_600_000,
+    pinned: false,
+    tags: [],
     ...partial,
     updatedAt: partial.updatedAt ?? partial.createdAt ?? 1_700_000_000_000,
   }
@@ -407,6 +409,59 @@ describe('dropit web', () => {
       expiresAt: Date.now() + 60_000,
     })
     expect(await screen.findByRole('button', { name: '编辑' })).toBeTruthy()
+  })
+
+  it('pins clips, filters by tag, and applies a remote label update', async () => {
+    stubFetch((url, init) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/spaces') return json({ spaces: [space] })
+      if (url === '/api/spaces/s1/items/old/labels' && init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body)) as { pinned?: boolean; tags?: string[] }
+        return json({
+          item: item({
+            id: 'old',
+            text: 'older note',
+            createdAt: 100,
+            pinned: body.pinned ?? true,
+            tags: body.tags ?? ['上线'],
+          }),
+        })
+      }
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/')
+    await screen.findByRole('button', { name: '发送' })
+    const socket = FakeSocket.instances.at(-1)
+    socket?.emit({
+      type: 'snapshot',
+      items: [
+        item({ id: 'new', text: 'newer note', createdAt: 200, tags: [] }),
+        item({ id: 'old', text: 'older note', createdAt: 100, pinned: true, tags: ['上线'] }),
+      ],
+      serverTime: Date.now(),
+      expiresAt: null,
+    })
+    expect(await screen.findByText('older note')).toBeTruthy()
+    const body = document.body.textContent ?? ''
+    expect(body.indexOf('older note')).toBeLessThan(body.indexOf('newer note'))
+    fireEvent.click(screen.getByRole('button', { name: '#上线' }))
+    expect(screen.queryByText('newer note')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /清除标签/ }))
+    expect(screen.getByText('newer note')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('搜索'), { target: { value: '上线' } })
+    expect(screen.queryByText('newer note')).toBeNull()
+    fireEvent.change(screen.getByLabelText('搜索'), { target: { value: '' } })
+    fireEvent.click(screen.getAllByRole('button', { name: '标签' })[0]!)
+    fireEvent.change(screen.getByLabelText('新标签'), { target: { value: '#运维' } })
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/spaces/s1/items/old/labels')).toBe(true))
+    const patch = calls.find((call) => call.url === '/api/spaces/s1/items/old/labels')
+    expect(patch?.init?.body).toBe(JSON.stringify({ tags: ['上线', '运维'] }))
+    socket?.emit({
+      type: 'item.updated',
+      item: item({ id: 'new', text: 'newer note', createdAt: 200, pinned: true, tags: ['上线'] }),
+    })
+    await waitFor(() => expect(screen.getAllByText('置顶')).toHaveLength(2))
   })
 
   it('filters clipboard text on the current snapshot', async () => {

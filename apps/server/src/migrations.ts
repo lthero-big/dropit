@@ -59,3 +59,10 @@ CREATE INDEX share_item ON shares(itemId);
 CREATE INDEX share_space ON shares(spaceId);
 PRAGMA user_version=4;
 `;
+
+// pinned and tags are clip metadata. tags is a JSON array. Existing rows stay unpinned with no tags.
+export const migration5 = `
+ALTER TABLE items ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE items ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+PRAGMA user_version=5;
+`;

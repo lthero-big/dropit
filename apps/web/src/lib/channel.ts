@@ -8,10 +8,14 @@ export const channelClock = {
   },
 }
 
+export function compareItems(a: Item, b: Item): number {
+  return Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.createdAt - a.createdAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
+}
+
 function upsert(items: Item[], item: Item): Item[] {
   const next = items.filter((entry) => entry.id !== item.id)
   next.push(item)
-  next.sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
+  next.sort(compareItems)
   return next
 }
 
@@ -51,7 +55,7 @@ export function useChannel(base: string | null) {
           return
         }
         if (message.type === 'snapshot') {
-          setItems(message.items)
+          setItems([...message.items].sort(compareItems))
           setOffset(message.serverTime - Date.now())
           setExpiresAt(message.expiresAt)
           setStatus('live')

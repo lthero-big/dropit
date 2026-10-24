@@ -59,6 +59,9 @@ export function ClipboardBoard({
   const [editDraft, setEditDraft] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
   const [shareFor, setShareFor] = useState<string | null>(null)
+  const [tagFor, setTagFor] = useState<string | null>(null)
+  const [tagDraft, setTagDraft] = useState('')
+  const [activeTag, setActiveTag] = useState<string | null>(null)
   const [progress, setProgress] = useState<{ name: string; ratio: number } | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [sending, setSending] = useState(false)
@@ -67,9 +70,12 @@ export function ClipboardBoard({
   const sendFilesRef = useRef<(files: File[]) => Promise<void>>(async () => {})
   const visible = channel.items.filter((item) => item.expiresAt > now)
   const needle = query.trim().toLowerCase()
-  const shown = needle
-    ? visible.filter((item) => `${item.text ?? ''}\n${item.filename ?? ''}`.toLowerCase().includes(needle))
-    : visible
+  const shown = visible.filter((item) => {
+    if (activeTag && !(item.tags ?? []).includes(activeTag)) return false
+    if (!needle) return true
+    const haystack = `${item.text ?? ''}\n${item.filename ?? ''}\n${(item.tags ?? []).join('\n')}`
+    return haystack.toLowerCase().includes(needle)
+  })
   const roomUsed = usedBytes ?? channel.items.reduce((sum, item) => sum + item.size, 0)
 
   useEffect(() => {
@@ -212,6 +218,21 @@ export function ClipboardBoard({
     }
   }
 
+  async function saveLabels(item: Item, patch: { pinned?: boolean; tags?: string[] }) {
+    if (!base) return
+    try {
+      const result = await api<{ item: Item }>(`${base}/items/${item.id}/labels`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      })
+      channel.upsert(result.item)
+    } catch (error) {
+      toast.error(errorText(error))
+      if (error instanceof ApiError && error.status === 401) onAuthLost?.()
+    }
+  }
+
   async function retract(item: Item) {
     if (!base) return
     if (pending !== item.id) {
@@ -304,7 +325,7 @@ export function ClipboardBoard({
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索文本或文件名"
+            placeholder="搜索文本、文件名或标签"
             aria-label="搜索"
             className="w-full bg-transparent px-3 py-2 text-sm outline-none"
           />
@@ -327,6 +348,11 @@ export function ClipboardBoard({
         {channel.status !== 'connecting' && visible.length === 0 ? (
           <p className="border-t border-foreground py-8 text-sm text-muted-foreground">还没有内容。发送文本或文件，其他设备会实时收到。</p>
         ) : null}
+        {activeTag ? (
+          <button type="button" className="mt-3 border border-foreground px-2 py-1 text-xs font-extrabold" onClick={() => setActiveTag(null)}>
+            #{activeTag} · 清除标签
+          </button>
+        ) : null}
         {visible.length > 0 && shown.length === 0 ? (
           <p className="border-t border-foreground py-8 text-sm text-muted-foreground">没有匹配的内容。</p>
         ) : null}
@@ -336,6 +362,7 @@ export function ClipboardBoard({
               <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
                 <span className="bg-foreground px-2 py-0.5 font-extrabold tracking-wider text-background uppercase">{sender(item)}</span>
                 <span className="text-muted-foreground">{formatWhen(item.createdAt, now)}</span>
+                {item.pinned ? <span className="font-extrabold text-primary">置顶</span> : null}
                 {item.updatedAt > item.createdAt ? <span className="text-muted-foreground">已编辑</span> : null}
                 <span className="text-muted-foreground">剩余 {formatRemain(item.expiresAt - now)}</span>
               </div>
@@ -418,6 +445,24 @@ export function ClipboardBoard({
                   </Button>
                 ) : null}
                 {canShare(item) ? (
+                  <Button type="button" variant="outline" size="sm" onClick={() => void saveLabels(item, { pinned: !item.pinned })}>
+                    {item.pinned ? '取消置顶' : '置顶'}
+                  </Button>
+                ) : null}
+                {canShare(item) ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setTagFor((current) => (current === item.id ? null : item.id))
+                      setTagDraft('')
+                    }}
+                  >
+                    标签
+                  </Button>
+                ) : null}
+                {canShare(item) ? (
                   <Button
                     type="button"
                     variant="outline"
@@ -436,6 +481,57 @@ export function ClipboardBoard({
                   </Button>
                 ) : null}
               </div>
+              {(item.tags ?? []).length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {(item.tags ?? []).map((name) => (
+                    <button
+                      key={name}
+                      type="button"
+                      className={`border px-1.5 py-0.5 text-xs ${activeTag === name ? 'border-primary bg-primary text-primary-foreground' : 'border-foreground'}`}
+                      onClick={() => setActiveTag((current) => (current === name ? null : name))}
+                    >
+                      #{name}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {tagFor === item.id ? (
+                <form
+                  className="mt-2 flex flex-wrap items-center gap-2"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    const next = tagDraft.trim().replace(/^#+/, '')
+                    if (!next) return
+                    void saveLabels(item, { tags: [...(item.tags ?? []), next] })
+                    setTagDraft('')
+                  }}
+                >
+                  <label className="sr-only" htmlFor={`tag-${item.id}`}>
+                    新标签
+                  </label>
+                  <input
+                    id={`tag-${item.id}`}
+                    value={tagDraft}
+                    onChange={(event) => setTagDraft(event.target.value)}
+                    placeholder="输入标签后回车"
+                    className="border border-foreground bg-transparent px-2 py-1 text-xs"
+                  />
+                  <Button type="submit" size="sm">
+                    添加
+                  </Button>
+                  {(item.tags ?? []).map((name) => (
+                    <Button
+                      key={name}
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void saveLabels(item, { tags: (item.tags ?? []).filter((tag) => tag !== name) })}
+                    >
+                      移除 #{name}
+                    </Button>
+                  ))}
+                </form>
+              ) : null}
               {shareFor === item.id && base ? <SharePanel base={base} itemId={item.id} now={now} onClose={() => setShareFor(null)} /> : null}
             </li>
           ))}

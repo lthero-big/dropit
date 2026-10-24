@@ -12,6 +12,7 @@ export interface Item {
   id: string; spaceId: string; userId: string | null; kind: 'text' | 'file'; text: string | null;
   filename: string | null; mime: string | null; size: number; storedBytes: number;
   fileKey: string | null; thumbnailKey: string | null; createdAt: number; updatedAt: number; expiresAt: number;
+  pinned: number; tags: string[];
 }
 export interface ShareLink {
   id: string; tokenHash: string; itemId: string; spaceId: string; createdBy: string | null;
@@ -32,13 +33,14 @@ export function cleanFilename(input: string): string {
     .replace(/^\.+/, '').trim().slice(0, 180) || 'download';
 }
 export function publicItem(item: Item) {
-  const { fileKey: _file, thumbnailKey, storedBytes: _bytes, ...rest } = item;
-  return { ...rest, hasThumbnail: Boolean(thumbnailKey) };
+  const { fileKey: _file, thumbnailKey, storedBytes: _bytes, pinned, ...rest } = item;
+  return { ...rest, pinned: Boolean(pinned), hasThumbnail: Boolean(thumbnailKey) };
 }
 export function publicShareItem(item: Item) {
   const pub = publicItem(item);
   return {
     kind: pub.kind, text: pub.text, filename: pub.filename, mime: pub.mime, size: pub.size,
     hasThumbnail: pub.hasThumbnail, createdAt: pub.createdAt, expiresAt: pub.expiresAt,
+    pinned: pub.pinned, tags: pub.tags,
   };
 }

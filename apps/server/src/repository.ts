@@ -3,12 +3,25 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ApiError, type Flow, type Identity, type Invite, type Item, type Session, type ShareLink, type SharePublic, type Space, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4 } from './migrations.js';
+import { migration1, migration2, migration3, migration4, migration5 } from './migrations.js';
 
 type UserRow = User & { quotaBytes: number | null };
 
 function toUser(row: UserRow): User {
   return { id: row.id, email: row.email, name: row.name, role: row.role, disabled: row.disabled, pending: row.pending, createdAt: row.createdAt };
+}
+
+function mapItem(row: Item): Item {
+  const stored = row as Item & { tags: string | string[] | null; pinned: number | null };
+  let tags: string[] = [];
+  if (Array.isArray(stored.tags)) tags = stored.tags.filter((tag): tag is string => typeof tag === 'string');
+  else if (typeof stored.tags === 'string' && stored.tags) {
+    try {
+      const parsed: unknown = JSON.parse(stored.tags);
+      if (Array.isArray(parsed)) tags = parsed.filter((tag): tag is string => typeof tag === 'string');
+    } catch { tags = []; }
+  }
+  return { ...row, pinned: stored.pinned ? 1 : 0, tags };
 }
 
 export interface Repository {
@@ -37,6 +50,7 @@ export interface Repository {
   addItem(item: Item, quota: number, maxItems: number): void;
   replaceText(id: string, text: string, size: number, quota: number, now: number): Item;
   deleteItem(id: string): Item | undefined;
+  updateLabels(id: string, patch: { pinned?: 0 | 1; tags?: string[] }, now: number): Item;
   createShare(share: ShareLink): void;
   sharesForItem(itemId: string): SharePublic[];
   shareById(id: string): (SharePublic & { spaceId: string; userId: string | null }) | undefined;
@@ -59,12 +73,13 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 4) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 4) this.db.transaction(() => {
+    if (version > 5) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 5) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
-      this.db.exec(migration4);
+      if (version < 4) this.db.exec(migration4);
+      this.db.exec(migration5);
     })();
   }
   saveFlow(flow: Flow) {
@@ -188,8 +203,13 @@ export class SqliteRepository implements Repository {
     if (!this.db.prepare('UPDATE invites SET revoked=1 WHERE id=?').run(id).changes) throw new ApiError(404, 'NOT_FOUND');
   }
   usage(userId: string) { return (this.db.prepare('SELECT coalesce(sum(storedBytes),0) AS n FROM items WHERE userId=?').get(userId) as { n: number }).n; }
-  items(spaceId: string, now: number) { return this.db.prepare('SELECT * FROM items WHERE spaceId=? AND expiresAt>? ORDER BY createdAt DESC,id DESC').all(spaceId, now) as Item[]; }
-  item(id: string, now: number) { return this.db.prepare('SELECT * FROM items WHERE id=? AND expiresAt>?').get(id, now) as Item | undefined; }
+  items(spaceId: string, now: number) {
+    return (this.db.prepare('SELECT * FROM items WHERE spaceId=? AND expiresAt>? ORDER BY pinned DESC, createdAt DESC, id DESC').all(spaceId, now) as Item[]).map(mapItem);
+  }
+  item(id: string, now: number) {
+    const row = this.db.prepare('SELECT * FROM items WHERE id=? AND expiresAt>?').get(id, now) as Item | undefined;
+    return row ? mapItem(row) : undefined;
+  }
   addItem(item: Item, quota: number, maxItems: number) {
     this.db.transaction(() => {
       const space = this.space(item.spaceId);
@@ -210,7 +230,7 @@ export class SqliteRepository implements Repository {
   }
   replaceText(id: string, text: string, size: number, quota: number, now: number) {
     return this.db.transaction(() => {
-      const current = this.db.prepare('SELECT * FROM items WHERE id=? AND expiresAt>?').get(id, now) as Item | undefined;
+      const current = this.item(id, now);
       if (!current || current.kind !== 'text') throw new ApiError(404, 'NOT_FOUND');
       const space = this.space(current.spaceId);
       if (!space || (space.expiresAt !== null && space.expiresAt <= now)) throw new ApiError(404, 'NOT_FOUND');
@@ -230,13 +250,30 @@ export class SqliteRepository implements Repository {
   }
   deleteItem(id: string) {
     return this.db.transaction(() => {
-      const item = this.db.prepare('SELECT * FROM items WHERE id=?').get(id) as Item | undefined;
+      const row = this.db.prepare('SELECT * FROM items WHERE id=?').get(id) as Item | undefined;
+      const item = row ? mapItem(row) : undefined;
       if (item) {
         for (const key of [item.fileKey, item.thumbnailKey]) if (key) this.db.prepare('INSERT OR IGNORE INTO garbage VALUES (?)').run(key);
         this.db.prepare('DELETE FROM items WHERE id=?').run(id);
       }
       return item;
     })();
+  }
+  updateLabels(id: string, patch: { pinned?: 0 | 1; tags?: string[] }, now: number) {
+    return this.db.transaction(() => {
+      const current = this.item(id, now);
+      if (!current) throw new ApiError(404, 'NOT_FOUND');
+      const space = this.space(current.spaceId);
+      if (!space || (space.expiresAt !== null && space.expiresAt <= now)) throw new ApiError(404, 'NOT_FOUND');
+      if (current.userId) {
+        const user = this.db.prepare('SELECT disabled FROM users WHERE id=?').get(current.userId) as { disabled: number } | undefined;
+        if (!user || user.disabled || !this.isMember(current.spaceId, current.userId)) throw new ApiError(403, 'FORBIDDEN');
+      }
+      const pinned = patch.pinned ?? current.pinned;
+      const tags = patch.tags ?? current.tags;
+      this.db.prepare('UPDATE items SET pinned=?, tags=? WHERE id=?').run(pinned, JSON.stringify(tags), id);
+      return { ...current, pinned, tags };
+    }).immediate();
   }
   createShare(share: ShareLink) {
     this.db.prepare(`INSERT INTO shares (id,tokenHash,itemId,spaceId,createdBy,expiresAt,maxViews,views,revoked,createdAt,downloadTicketHash,downloadTicketExpiresAt)
@@ -284,7 +321,7 @@ export class SqliteRepository implements Repository {
   }
   expire(now: number) {
     return this.db.transaction(() => {
-      const items = this.db.prepare('SELECT * FROM items WHERE expiresAt<=? OR spaceId IN (SELECT id FROM spaces WHERE expiresAt<=?)').all(now, now) as Item[];
+      const items = (this.db.prepare('SELECT * FROM items WHERE expiresAt<=? OR spaceId IN (SELECT id FROM spaces WHERE expiresAt<=?)').all(now, now) as Item[]).map(mapItem);
       for (const item of items) this.deleteItem(item.id);
       this.db.prepare('DELETE FROM spaces WHERE expiresAt<=?').run(now);
       this.db.prepare('DELETE FROM sessions WHERE expiresAt<=?').run(now);
