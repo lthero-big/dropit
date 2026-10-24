@@ -77,7 +77,6 @@ export class SqliteRepository implements Repository {
         .get(identity.provider, identity.subject) as UserRow | undefined;
       if (row?.disabled) throw new ApiError(403, 'USER_DISABLED');
       const invite = inviteHash ? this.invite(inviteHash, now) : undefined;
-      if (inviteHash && !invite) throw new ApiError(403, 'INVITE_INVALID');
       if (!row) {
         const pending = this.db.prepare('SELECT * FROM users WHERE pending=1 AND lower(email)=lower(?)').get(identity.email) as UserRow | undefined;
         // A disabled pre-provisioned account must not be bypassed by creating a second user.
@@ -89,16 +88,21 @@ export class SqliteRepository implements Repository {
         }
       }
       if (!row) {
+        // BEGIN IMMEDIATE holds the reserved lock across this count and the insert,
+        // so two concurrent sign-ins cannot both observe an empty users table.
         const first = (this.db.prepare('SELECT count(*) AS n FROM users').get() as { n: number }).n === 0;
-        const admin = admins.includes(identity.email.toLowerCase()) || (first && admins.length === 0);
-        if (!admin && !invite) throw new ApiError(403, 'INVITATION_REQUIRED');
+        // A missing or stale invite must not block the empty-database bootstrap.
+        if (inviteHash && !invite && !first) throw new ApiError(403, 'INVITE_INVALID');
+        const listed = admins.includes(identity.email.toLowerCase());
+        if (!first && !listed && !invite) throw new ApiError(403, 'INVITATION_REQUIRED');
+        const admin = first || listed;
         row = { id: randomUUID(), email: identity.email, name: identity.name, role: admin ? 'admin' : 'user', disabled: 0, pending: 0, createdAt: now, quotaBytes: null };
         this.db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt,pending,quotaBytes) VALUES (@id,@email,@name,@role,@disabled,@createdAt,@pending,@quotaBytes)').run(row);
         this.db.prepare('INSERT INTO identities (provider,subject,userId) VALUES (?,?,?)').run(identity.provider, identity.subject, row.id);
         const spaceId = randomUUID();
         this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
         this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
-      }
+      } else if (inviteHash && !invite) throw new ApiError(403, 'INVITE_INVALID');
       if (invite) {
         // Membership already held: login is idempotent and does not spend another use.
         if (!this.isMember(invite.spaceId, row.id)) {

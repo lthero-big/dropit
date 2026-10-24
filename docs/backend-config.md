@@ -13,7 +13,7 @@ at `APP_ORIGIN` (typically terminated by a trusted reverse proxy).
 | `HOST` | `0.0.0.0` | Listen address (example uses loopback for local development) |
 | `DATA_DIR` | repository `data/` | Persistent SQLite and file directory; image sets `/data` |
 | `STATIC_DIR` | `apps/web/dist` | Built frontend directory; image sets `/app/public` |
-| `ADMIN_EMAILS` | empty | Comma-separated verified emails; if empty, first login becomes admin |
+| `ADMIN_EMAILS` | empty | Optional comma-separated verified emails that are also created as admins. The first sign-in on an empty users table is admin whether or not this is set |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | unset | Enables GitHub login only when both are set |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | unset | Enables Google login only when both are set |
 | `TRUST_PROXY` | empty | Comma-separated trusted proxy CIDRs/IPs (`loopback` allowed); never blindly trust every address |

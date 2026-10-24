@@ -15,7 +15,7 @@ Missing/expired/revoked session returns `401 UNAUTHENTICATED`.
 | Method | Path | Response / request |
 | --- | --- | --- |
 | GET | `/auth/providers` | `{providers: ['github','google']}`; only configured providers appear |
-| GET | `/auth/:provider?invite=:token` | Navigate the browser here; 302 to OAuth provider, sets flow-binding cookie. Optional invite is bound to this flow. An invalid invite redirects to `{APP_ORIGIN}/login?error=INVITE_INVALID` and does not start a flow. Unknown provider names stay JSON `404`. Auth-start rate limits stay JSON `429` with `Retry-After`. |
+| GET | `/auth/:provider?invite=:token` | Navigate the browser here; 302 to OAuth provider, sets flow-binding cookie. Optional invite is bound to this flow when it is still valid. Once any user exists, an invalid invite redirects to `{APP_ORIGIN}/login?error=INVITE_INVALID` and does not start a flow. While the users table is empty, an invalid invite is ignored and the flow starts without it, so the first sign-up can still proceed. Unknown provider names stay JSON `404`. Auth-start rate limits stay JSON `429` with `Retry-After`. |
 | GET | `/auth/:provider/callback` | OAuth-only callback; state, browser cookie and PKCE required; sets session and redirects to `{APP_ORIGIN}/`. Browser-visible failures redirect to `{APP_ORIGIN}/login?error=CODE`. The code is one of `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR`, `INVITE_INVALID`, `INVITATION_REQUIRED`, `USER_DISABLED`, `VERIFIED_EMAIL_REQUIRED`, `RATE_LIMITED`, `INTERNAL_ERROR`. Provider error text is not copied into the URL. |
 | POST | `/auth/logout` | 204; immediately revokes this session, closes its sockets and clears cookie |
 | GET | `/me` | `{user, usedBytes, quotaBytes, maxFileBytes, maxTextBytes, retentionMs}` |
@@ -31,12 +31,16 @@ without an invite. A consumed/expired token is never accepted, even if the user
 previously joined through it. OAuth state is single-use and valid for 10 minutes.
 Starting a new flow replaces the browser's previous flow cookie.
 
-If `ADMIN_EMAILS` is empty, the first successfully authenticated identity becomes
-admin. If configured, only a provider-verified matching email may bootstrap the
-installation; other new identities require an invite. Matching configured emails
-also become admins when created. Provider identities remain separate; we do not
-silently link GitHub and Google accounts by email. No provider access/refresh token
-is stored. Configure `ADMIN_EMAILS` before exposing an installation.
+When the users table is empty, the first successfully authenticated identity
+becomes admin. That holds when `ADMIN_EMAILS` is unset and when the address is
+not on the list. A missing, expired, or unknown invite does not block this
+sign-up. The empty-table check and the insert run in one `BEGIN IMMEDIATE`
+transaction, so two concurrent first logins create exactly one admin. The other
+login is `INVITATION_REQUIRED`. `ADMIN_EMAILS` is optional and additive: a later
+new identity whose provider-verified email matches is also created as admin.
+Every other new identity requires an invite. Provider identities remain
+separate; we do not silently link GitHub and Google accounts by email. No
+provider access/refresh token is stored.
 
 ## Administration
 

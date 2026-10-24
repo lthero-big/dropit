@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import type { Server } from 'node:http';
+import { Worker } from 'node:worker_threads';
 import Database from 'better-sqlite3';
 import { serve } from '@hono/node-server';
 import WebSocket from 'ws';
@@ -145,10 +146,70 @@ test('A3/B3: bootstrap admin, invite-only signup, verified ADMIN_EMAILS and inde
   const spaces = await (await f.request('/api/spaces', {}, user.cookie)).json();
   assert.equal(spaces.spaces.length, 2);
   const configured = await fixture({ adminEmails: ['owner@example.com'] }, 'google'); t.after(() => configured.dispose());
-  assert.equal(oauthError((await configured.login('stranger')).response), 'INVITATION_REQUIRED');
+  const first = await configured.login('stranger');
+  assert.equal(first.response.status, 302);
+  assert.equal((await (await configured.request('/api/me', {}, first.cookie)).json()).user.role, 'admin');
+  assert.equal(oauthError((await configured.login('other')).response), 'INVITATION_REQUIRED');
   const owner = await configured.login('owner');
   assert.equal(owner.response.status, 302);
   assert.equal((await (await configured.request('/api/me', {}, owner.cookie)).json()).user.role, 'admin');
+});
+
+test('first sign-in is admin with ADMIN_EMAILS unset or set, and a bad invite does not block an empty database', async t => {
+  const open = await fixture(); t.after(() => open.dispose());
+  const started = await open.request('/api/auth/github?invite=not-a-real-token');
+  assert.equal(started.status, 302);
+  assert.equal(new URL(started.headers.get('location')!).origin, 'https://mock.example');
+  const done = await open.finish({
+    state: new URL(started.headers.get('location')!).searchParams.get('state')!,
+    browser: cookieValue(started, 'dropit_oauth'),
+    response: started,
+  }, 'first');
+  assert.equal(done.status, 302);
+  assert.equal(new URL(done.headers.get('location')!).pathname, '/');
+  const cookie = cookieValue(done, 'dropit_session');
+  assert.equal((await (await open.request('/api/me', {}, cookie)).json()).user.role, 'admin');
+  assert.equal(oauthError((await open.login('second')).response), 'INVITATION_REQUIRED');
+  assert.equal(open.repo.users().length, 1);
+
+  const listed = await fixture({ adminEmails: ['later@example.com'] }); t.after(() => listed.dispose());
+  const bootstrap = listed.repo.login(
+    { provider: 'github', subject: 'bootstrap', email: 'bootstrap@example.com', name: 'bootstrap' },
+    hash('missing-invite'), [], hash('bootstrap-session'), Date.now() + 60_000, Date.now());
+  assert.equal(bootstrap.role, 'admin');
+  assert.equal(oauthError((await listed.login('second')).response), 'INVITATION_REQUIRED');
+  const later = await listed.login('later', undefined, 'later@example.com');
+  assert.equal(later.response.status, 302);
+  assert.equal((await (await listed.request('/api/me', {}, later.cookie)).json()).user.role, 'admin');
+  assert.equal(listed.repo.users().filter(user => user.role === 'admin').length, 2);
+});
+
+test('two concurrent first sign-ins create exactly one admin', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dropit-race-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'dropit.sqlite');
+  const setup = new SqliteRepository(path);
+  setup.close();
+  const race = (subject: string) => new Promise<{ ok: boolean; role?: string; code?: string }>((resolve, reject) => {
+    const worker = new Worker(new URL('./first-user-race.worker.ts', import.meta.url), {
+      execArgv: ['--import', 'tsx'],
+      workerData: { path, subject, email: `${subject}@example.com`, admins: [], sessionHash: hash(subject) },
+    });
+    let settled = false;
+    worker.on('message', (message) => { settled = true; resolve(message); });
+    worker.on('error', reject);
+    worker.on('exit', (code) => { if (!settled) reject(new Error(`race worker exited ${code}`)); });
+  });
+  const results = await Promise.all([race('one'), race('two')]);
+  assert.equal(results.filter(result => result.ok).length, 1);
+  assert.equal(results.find(result => result.ok)?.role, 'admin');
+  assert.equal(results.find(result => !result.ok)?.code, 'INVITATION_REQUIRED');
+  const check = new SqliteRepository(path);
+  try {
+    const users = check.users();
+    assert.equal(users.length, 1);
+    assert.equal(users[0].role, 'admin');
+  } finally { check.close(); }
 });
 
 test('B1: concurrent one-use invite consumption creates only one account; invalid, revoked, expired invites fail', async t => {

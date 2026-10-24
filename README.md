@@ -36,7 +36,7 @@ pnpm build
 
 只通过环境变量提供 `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`、`GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`。未配置的 provider 不开放登录。无密码入口，测试用 mock 不会作为生产登录接口开放。
 
-`ADMIN_EMAILS` 为空时，首个成功登录者是管理员；配置后，仅匹配 provider 已验证邮箱的人可首次建号成为管理员。其他新用户须通过有效邀请完成 OAuth，或由管理员按邮箱预创建（待首次已验证 OAuth 登录时绑定，不另建账号）。不同 provider 的身份不按邮箱自动合并；预创建只绑定第一个匹配该邮箱的身份。会话为服务器保存的随机令牌，数据库仅存 SHA-256；不需要占位 `SESSION_SECRET`。
+用户表里还没有任何人时，第一个成功登录的身份成为管理员。这一步在 SQLite `BEGIN IMMEDIATE` 事务里完成人数检查和建号，两个同时到达的首次登录只会有一个成为管理员。不需要事先配置 `ADMIN_EMAILS`。该变量可选、可叠加：之后新建且 provider 已验证邮箱命中列表的账号同样是管理员。其余新用户须通过有效邀请完成 OAuth，或由管理员按邮箱预创建（待首次已验证 OAuth 登录时绑定，不另建账号）。过期或无效的邀请不会拦住这第一个账号。不同 provider 的身份不按邮箱自动合并；预创建只绑定第一个匹配该邮箱的身份。会话为服务器保存的随机令牌，数据库仅存 SHA-256；不需要占位 `SESSION_SECRET`。
 
 ## Docker（本机）
 
@@ -78,7 +78,7 @@ docker run --rm -p 192.168.1.152:8787:8787 \
 - `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`（两个都有才开放 GitHub）
 - `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`（两个都有才开放 Google）
 - `APP_ORIGIN`（浏览器实际 origin）
-- `ADMIN_EMAILS`（对外之前先写上已验证的管理员邮箱；留空时第一个成功登录的人成为管理员）
+- `ADMIN_EMAILS`（可选。留空即可：第一个成功登录的人成为管理员。填入已验证邮箱后，这些邮箱之后注册也会成为管理员）
 
 ## 存储与维护
 
