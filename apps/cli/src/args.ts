@@ -198,7 +198,7 @@ export const usageText = `dropit — 云剪贴板命令行
 可用 DROPIT_CONFIG 指定配置文件路径。令牌不会打印到终端。
 退出码：0 成功，2 用法错误，其他非 0 为失败。错误写到 stderr。
 没有 TTY 时不会询问输入。send 在没有参数时从 stdin 读取。
-get 不加 -o 时把内容写到 stdout。-c 对已有文件使用 Range 续传。
+get 不加 -o 时把内容写到 stdout。-c 对已有文件使用 Range 续传，符号链接会被拒绝。
 watch 断线后按指数退避重连，并用新的 snapshot 对账。
 --exec 不经过 shell；条目正文从 stdin 传入，元数据放在 DROPIT_ITEM_* 环境变量里。
 `;
