@@ -140,12 +140,16 @@ export function createBackend(options: BackendOptions = {}) {
     const provider = Object.hasOwn(providers, providerName) ? providers[providerName] : undefined;
     if (!provider) throw new ApiError(404, 'PROVIDER_UNAVAILABLE');
     const invite = c.req.query('invite');
-    if (invite && !repo.invite(hash(invite), now())) return c.redirect(`${config.origin}/login?error=INVITE_INVALID`);
+    const inviteHash = invite ? hash(invite) : null;
+    const liveInvite = inviteHash ? repo.invite(inviteHash, now()) : undefined;
+    // Invite-first applies after the installation has an account. An unknown
+    // token must not stop the first sign-up while the users table is empty.
+    if (inviteHash && !liveInvite && repo.users().length > 0) return c.redirect(`${config.origin}/login?error=INVITE_INVALID`);
     const state = token();
     const browser = token();
     const verifier = token();
     repo.saveFlow({ stateHash: hash(state), browserHash: hash(browser), provider: providerName, verifier,
-      inviteHash: invite ? hash(invite) : null, expiresAt: now() + 600000 });
+      inviteHash: liveInvite ? inviteHash : null, expiresAt: now() + 600000 });
     setCookie(c, flowCookie, browser, { ...cookie, path: '/api/auth', maxAge: 600 });
     return c.redirect(provider.authorizationUrl(state, hash(verifier), `${config.origin}/api/auth/${providerName}/callback`));
   });
