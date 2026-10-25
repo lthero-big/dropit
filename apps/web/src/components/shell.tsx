@@ -70,7 +70,8 @@ export function Shell({
           ? 'dark'
           : 'light'
         : theme
-    setTheme(resolved === 'dark' ? 'light' : 'dark')
+    const next = resolved === 'dark' ? 'light' : 'dark'
+    setTheme(next === 'dark' ? 'dark' : next)
   }
 
   async function newRoom() {
