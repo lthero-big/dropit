@@ -76,22 +76,46 @@ export interface AdminUser extends User {
   quotaOverride: number | null
 }
 
-export interface AdminLimits {
-  maxFileBytes: number
-  maxTextBytes: number
-  maxItems: number
-  userQuotaBytes: number
-  retentionMs: number
-  roomQuotaBytes: number
-  roomMaxFileBytes: number
-  roomRetentionMs: number
-  rateWindowMs: number
-  rateGeneral: number
-  rateAuth: number
-  rateInvite: number
-  rateUpload: number
-  rateRoom: number
-  sessionMs: number
+export const LIMIT_KEYS = [
+  'maxFileBytes',
+  'maxTextBytes',
+  'maxItems',
+  'userQuotaBytes',
+  'retentionMs',
+  'roomQuotaBytes',
+  'roomMaxFileBytes',
+  'roomRetentionMs',
+  'rateWindowMs',
+  'rateGeneral',
+  'rateAuth',
+  'rateInvite',
+  'rateUpload',
+  'rateRoom',
+  'sessionMs',
+] as const
+
+export type LimitKey = (typeof LIMIT_KEYS)[number]
+
+export interface LimitField {
+  value: number
+  default: number
+  overridden: boolean
+  min: number
+  max: number
+}
+
+export type AdminLimits = Record<LimitKey, LimitField>
+
+export interface LimitAuditEntry {
+  id: number
+  actorId: string
+  actorEmail: string
+  createdAt: number
+  key: LimitKey
+  oldValue: number
+  newValue: number
+  oldOverride: number | null
+  newOverride: number | null
 }
 
 export interface AccessToken {
