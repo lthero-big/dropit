@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
+import { LimitsEditor } from '@/components/limits-editor.tsx'
 import { PageTitle, Shell } from '@/components/shell.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText } from '@/lib/api.ts'
@@ -38,12 +39,6 @@ function mbToBytes(value: string): number {
   const mb = Number(value)
   if (mb < 1 || mb > quotaCapMb) throw new Error('invalid')
   return mb * 1024 * 1024
-}
-
-function formatHours(ms: number): string {
-  const hours = Math.round(ms / 3_600_000)
-  if (hours >= 24 && hours % 24 === 0) return `${hours / 24} 天`
-  return `${hours} 小时`
 }
 
 export function AdminPage() {
@@ -335,38 +330,8 @@ export function AdminPage() {
           <p className="py-4 text-xs text-muted-foreground">调低配额不会删除已有内容。超过配额后无法继续上传，直到用量降下来。</p>
         </div>
       ) : null}
-      {tab === 'limits' && limits ? (
-        <div>
-          <p className="mb-4 border-l-4 border-primary bg-secondary px-3 py-2 text-sm">
-            这些限制来自环境变量，只读。修改后需要重启进程才生效。
-          </p>
-          <ul className="border-t-2 border-foreground text-sm">
-            <LimitRow label="单文件上限" value={formatBytes(limits.maxFileBytes)} />
-            <LimitRow label="文本上限" value={formatBytes(limits.maxTextBytes)} />
-            <LimitRow label="默认用户配额" value={formatBytes(limits.userQuotaBytes)} />
-            <LimitRow label="内容保留" value={formatHours(limits.retentionMs)} />
-            <LimitRow label="每空间条目上限" value={String(limits.maxItems)} />
-            <LimitRow label="房间保留" value={formatHours(limits.roomRetentionMs)} />
-            <LimitRow label="房间配额" value={formatBytes(limits.roomQuotaBytes)} />
-            <LimitRow label="房间单文件" value={formatBytes(limits.roomMaxFileBytes)} />
-            <LimitRow label="会话时长" value={formatHours(limits.sessionMs)} />
-            <LimitRow label="登录限流" value={`${limits.rateAuth} 次 / ${Math.round(limits.rateWindowMs / 1000)} 秒`} />
-            <LimitRow label="邀请限流" value={`${limits.rateInvite} 次 / ${Math.round(limits.rateWindowMs / 1000)} 秒`} />
-            <LimitRow label="上传限流" value={`${limits.rateUpload} 次 / ${Math.round(limits.rateWindowMs / 1000)} 秒`} />
-            <LimitRow label="房间写入限流" value={`${limits.rateRoom} 次 / ${Math.round(limits.rateWindowMs / 1000)} 秒`} />
-          </ul>
-        </div>
-      ) : null}
+      {tab === 'limits' && limits ? <LimitsEditor limits={limits} onChange={setLimits} /> : null}
     </Shell>
-  )
-}
-
-function LimitRow({ label, value }: { label: string; value: string }) {
-  return (
-    <li className="flex items-center justify-between gap-4 border-b border-foreground py-3">
-      <span>{label}</span>
-      <b>{value}</b>
-    </li>
   )
 }
 

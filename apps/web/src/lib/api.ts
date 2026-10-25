@@ -16,6 +16,7 @@ export class ApiError extends Error {
 
 const labels: Record<string, string> = {
   INVALID_INPUT: '输入无效',
+  INVALID_LIMITS: '限制值不在允许范围，或与其他限制冲突',
   INVALID_JSON: '请求格式无效',
   JSON_REQUIRED: '请求格式无效',
   EMPTY_TEXT: '文本不能为空',

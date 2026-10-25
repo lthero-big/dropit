@@ -41,22 +41,26 @@ const me = {
 
 const space = { id: 's1', name: 'Private space', ownerId: 'u1', expiresAt: null }
 
+function limitField(value: number, max = 1_000_000_000) {
+  return { value, default: value, overridden: false, min: 1, max }
+}
+
 const limits = {
-  maxFileBytes: 500,
-  maxTextBytes: 1000,
-  maxItems: 1000,
-  userQuotaBytes: 1000,
-  retentionMs: 86_400_000,
-  roomQuotaBytes: 200,
-  roomMaxFileBytes: 100,
-  roomRetentionMs: 3_600_000,
-  rateWindowMs: 60_000,
-  rateGeneral: 240,
-  rateAuth: 20,
-  rateInvite: 10,
-  rateUpload: 30,
-  rateRoom: 10,
-  sessionMs: 86_400_000,
+  maxFileBytes: limitField(500, 1024 ** 3),
+  maxTextBytes: limitField(1000, 1024 ** 2),
+  maxItems: limitField(1000, 100_000),
+  userQuotaBytes: limitField(1000, 100 * 1024 ** 3),
+  retentionMs: limitField(86_400_000, 365 * 86_400_000),
+  roomQuotaBytes: limitField(200, 100 * 1024 ** 3),
+  roomMaxFileBytes: limitField(100, 1024 ** 3),
+  roomRetentionMs: limitField(3_600_000, 86_400_000),
+  rateWindowMs: limitField(60_000, 3_600_000),
+  rateGeneral: limitField(240, 1_000_000),
+  rateAuth: limitField(20, 1_000_000),
+  rateInvite: limitField(10, 1_000_000),
+  rateUpload: limitField(30, 1_000_000),
+  rateRoom: limitField(10, 1_000_000),
+  sessionMs: limitField(86_400_000, 365 * 86_400_000),
 }
 
 function item(partial: Partial<Item> & Pick<Item, 'id' | 'text'>): Item {
@@ -327,6 +331,7 @@ describe('dropit web', () => {
       if (url === '/api/me') return json(me)
       if (url === '/api/spaces') return json({ spaces: [space] })
       if (url === '/api/admin/limits') return json(limits)
+      if (url.startsWith('/api/admin/limits/audit')) return json({ entries: [], nextCursor: null })
       if (url === '/api/admin/users') return json({ users: [] })
       if (url === '/api/admin/invites' && init?.method === 'POST') return json({ url: 'http://localhost/invite/once' }, 201)
       if (url === '/api/admin/invites') {
@@ -350,7 +355,9 @@ describe('dropit web', () => {
     const post = calls.find((call) => call.url === '/api/admin/invites' && call.init?.method === 'POST')
     expect(post?.init?.body).toBe(JSON.stringify({ spaceId: 's1', maxUses: 5, expiresInHours: 168 }))
     fireEvent.click(screen.getByRole('tab', { name: '限制' }))
-    expect(await screen.findByText(/这些限制来自环境变量/)).toBeTruthy()
+    expect(await screen.findByText(/覆盖值保存在数据库，重启后保留；只读项仍需改环境变量/)).toBeTruthy()
+    expect(screen.queryByText(/这些限制来自环境变量/)).toBeNull()
+    expect(screen.getByLabelText('单文件上限')).toBeTruthy()
   })
 
   it('edits the author text in place and applies item.updated', async () => {
