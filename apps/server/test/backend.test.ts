@@ -268,7 +268,7 @@ test('C2: cross-space list, upload, file-ID guessing, download, thumbnail and re
   const privateSpace = spaces.find((space: any) => space.ownerId !== admin.user.id);
   const base = `/api/spaces/${privateSpace.id}`;
   const uploaded = await (await f.upload(base, member.cookie, 'private data')).json();
-  for (const path of [base, `${base}/items`, `${base}/items/${uploaded.item.id}/download`, `${base}/items/${uploaded.item.id}/thumbnail`, `${base}/items/${uploaded.item.id}/media`]) {
+  for (const path of [base, `${base}/items`, `${base}/items/${uploaded.item.id}/download`, `${base}/items/${uploaded.item.id}/thumbnail`, `${base}/items/${uploaded.item.id}/preview`, `${base}/items/${uploaded.item.id}/media`]) {
     assert.equal((await f.request(path, {}, admin.cookie)).status, 404);
   }
   assert.equal((await f.json(`${base}/items/text`, { text: 'intrusion' }, admin.cookie)).status, 404);
@@ -868,6 +868,251 @@ test('tags and pins sync, validate, and keep creation time', async t => {
   assert.deepEqual(roomBody.item.tags, ['房间']);
   const roomList = await (await f.request(`/api/rooms/${room.token}/items`)).json();
   assert.equal(roomList.items[0].pinned, true);
+});
+
+test('AC-S1/S3: raster previews preserve aspect, never enlarge, strip metadata and leave Item/quota unchanged', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  for (const format of ['jpeg', 'png', 'webp', 'gif', 'avif'] as const) {
+    const bytes = await sharp({ create: { width: 48, height: 24, channels: 3, background: 'blue' } }).toFormat(format).toBuffer();
+    const upload = await f.upload(base, admin.cookie, bytes, `image/${format}`);
+    assert.equal(upload.status, 201);
+    const { item } = await upload.json();
+    const quota = f.repo.usage(admin.user.id);
+    const files = await readdir(join(f.directory, 'files'));
+    const preview = await f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie);
+    assert.equal(preview.status, 200);
+    assert.equal(preview.headers.get('content-type'), 'image/webp');
+    assert.equal(preview.headers.get('content-disposition'), 'inline');
+    assert.equal(preview.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(preview.headers.get('cache-control'), 'private, max-age=60');
+    const metadata = await sharp(Buffer.from(await preview.arrayBuffer())).metadata();
+    assert.equal(metadata.format, 'webp');
+    assert.equal(metadata.width, 48);
+    assert.equal(metadata.height, 24);
+    assert.equal(f.repo.usage(admin.user.id), quota);
+    assert.deepEqual(await readdir(join(f.directory, 'files')), files);
+    const snapshot = await (await f.request(`${base}/items`, {}, admin.cookie)).json();
+    assert.deepEqual(snapshot.items.find((entry: { id: string }) => entry.id === item.id), item);
+  }
+  const large = await sharp({ create: { width: 3000, height: 1500, channels: 3, background: 'red' } })
+    .withMetadata({ orientation: 6 }).jpeg().toBuffer();
+  assert((await sharp(large).metadata()).exif);
+  const { item } = await (await f.upload(base, admin.cookie, large, 'image/jpeg')).json();
+  const preview = await f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie);
+  const metadata = await sharp(Buffer.from(await preview.arrayBuffer())).metadata();
+  assert.equal(metadata.width, 1024);
+  assert.equal(metadata.height, 2048);
+  for (const field of ['exif', 'icc', 'iptc', 'xmp', 'orientation'] as const) assert.equal(metadata[field], undefined);
+  f.advance(f.config.retentionMs - 2500);
+  assert.equal((await f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie)).headers.get('cache-control'), 'private, max-age=2');
+});
+
+test('AC-S1: animated GIF preview contains only the first frame', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const pixels = Buffer.alloc(32 * 32 * 3);
+  for (let pixel = 0; pixel < 32 * 32; pixel++) pixels[pixel * 3 + (pixel < 32 * 16 ? 0 : 2)] = 255;
+  const gif = await sharp(pixels, { raw: { width: 32, height: 32, channels: 3, pageHeight: 16 } }).gif({ delay: [100, 100] }).toBuffer();
+  assert.equal((await sharp(gif, { animated: true }).metadata()).pages, 2);
+  const { item } = await (await f.upload(base, admin.cookie, gif, 'image/gif')).json();
+  const preview = await f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie);
+  assert.equal(preview.status, 200);
+  const output = Buffer.from(await preview.arrayBuffer());
+  const metadata = await sharp(output, { animated: true }).metadata();
+  assert.equal(metadata.width, 32);
+  assert.equal(metadata.height, 16);
+  assert((metadata.pages ?? 1) === 1);
+  const { data } = await sharp(output).raw().toBuffer({ resolveWithObject: true });
+  assert(data[0] > 240 && data[2] < 15, 'first frame must be red, not the blue second frame');
+});
+
+test('AC-S4: preview requires membership or the correct unexpired room capability', async t => {
+  const f = await fixture({ roomRetentionMs: 1000 }); t.after(() => f.dispose());
+  const admin = await f.admin();
+  const invite = await f.invite(admin.cookie, admin.space.id);
+  const member = await f.login('member', invite.token);
+  const { spaces } = await (await f.request('/api/spaces', {}, member.cookie)).json();
+  const privateSpace = spaces.find((space: { ownerId: string }) => space.ownerId !== admin.user.id);
+  const base = `/api/spaces/${privateSpace.id}`;
+  const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: 'blue' } }).png().toBuffer();
+  const { item } = await (await f.upload(base, member.cookie, png, 'image/png')).json();
+  assert.equal((await f.request(`${base}/items/${item.id}/preview`, {}, member.cookie)).status, 200);
+  assert.equal((await f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie)).status, 404);
+  assert.equal((await f.request(`${base}/items/${item.id}/preview`)).status, 401);
+  assert.equal((await f.request(`/api/spaces/${admin.space.id}/items/${item.id}/preview`, {}, admin.cookie)).status, 404);
+  const room = await (await f.request('/api/rooms', { method: 'POST' })).json();
+  const other = await (await f.request('/api/rooms', { method: 'POST' })).json();
+  const roomBase = `/api/rooms/${room.token}`;
+  const uploaded = await (await f.upload(roomBase, '', png, 'image/png')).json();
+  assert.equal((await f.request(`${roomBase}/items/${uploaded.item.id}/preview`)).status, 200);
+  assert.equal((await f.request(`/api/rooms/${other.token}/items/${uploaded.item.id}/preview`)).status, 404);
+  f.advance(1001);
+  assert.equal((await f.request(`${roomBase}/items/${uploaded.item.id}/preview`)).status, 404);
+});
+
+test('AC-S4: share previews reuse access and enforce views, ticket expiry, link expiry and revocation', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: 'blue' } }).png().toBuffer();
+  const { item } = await (await f.upload(base, admin.cookie, png, 'image/png')).json();
+  const share = async (expiresIn = 'never', maxViews: number | null = 1) =>
+    (await f.json(`${base}/items/${item.id}/shares`, { expiresIn, maxViews }, admin.cookie)).json();
+  const once = await share();
+  const opened = await (await f.request(`/api/s/${once.token}`)).json();
+  for (let request = 0; request < 2; request++) {
+    const preview = await f.request(`/api/s/${once.token}/preview?access=${opened.access}`);
+    assert.equal(preview.status, 200);
+    assert.equal(preview.headers.get('cache-control'), 'no-store');
+    assert.equal(preview.headers.get('content-type'), 'image/webp');
+    assert.equal(preview.headers.get('content-disposition'), 'inline');
+    assert.equal(preview.headers.get('x-content-type-options'), 'nosniff');
+  }
+  assert.equal(f.repo.sharesForItem(item.id).find(row => row.id === once.id)?.views, 1);
+  assert.equal((await f.request(`/api/s/${once.token}/preview`)).status, 404);
+  assert.equal((await f.request(`/api/s/${once.token}/preview?access=wrong`)).status, 404);
+  f.advance(600001);
+  assert.equal((await f.request(`/api/s/${once.token}/preview?access=${opened.access}`)).status, 404);
+  const direct = await share();
+  assert.equal((await f.request(`/api/s/${direct.token}/preview`)).status, 200);
+  assert.equal((await f.request(`/api/s/${direct.token}/preview`)).status, 404);
+  const revoked = await share();
+  const revokedAccess = (await (await f.request(`/api/s/${revoked.token}`)).json()).access;
+  assert.equal((await f.request(`${base}/shares/${revoked.id}`, { method: 'DELETE' }, admin.cookie)).status, 204);
+  assert.equal((await f.request(`/api/s/${revoked.token}/preview?access=${revokedAccess}`)).status, 404);
+  const expiring = await share('1h', null);
+  f.advance(3600000 - 1);
+  const expiringAccess = (await (await f.request(`/api/s/${expiring.token}`)).json()).access;
+  f.advance(2);
+  assert.equal((await f.request(`/api/s/${expiring.token}/preview?access=${expiringAccess}`)).status, 404);
+  const lasting = await share('never', null);
+  const lastingAccess = (await (await f.request(`/api/s/${lasting.token}`)).json()).access;
+  await f.request(`${base}/items/${item.id}`, { method: 'DELETE' }, admin.cookie);
+  const removed = await f.request(`/api/s/${lasting.token}/preview?access=${lastingAccess}`);
+  assert.equal(removed.status, 404);
+  assert.deepEqual(await removed.json(), { error: { code: 'NOT_FOUND' } });
+  assert.deepEqual(await readdir(join(f.directory, 'files')), []);
+});
+
+test('AC-S4: preview rejects SVG, HTML, nonimages, corruption and excessive decoded pixels', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>';
+  for (const [bytes, mime] of [[svg, 'image/svg+xml'], ['<script>alert(1)</script>', 'text/html'], ['not an image', 'application/octet-stream']]) {
+    const { item } = await (await f.upload(base, admin.cookie, bytes, mime)).json();
+    const preview = await f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie);
+    assert.equal(preview.status, 404);
+    assert.equal(preview.headers.get('content-disposition'), null);
+    assert.deepEqual(await preview.json(), { error: { code: 'NOT_FOUND' } });
+  }
+  const text = await (await f.json(`${base}/items/text`, { text: 'text' }, admin.cookie)).json();
+  assert.equal((await f.request(`${base}/items/${text.item.id}/preview`, {}, admin.cookie)).status, 404);
+  for (const bytes of [svg, '<html>fake</html>', 'broken PNG']) {
+    const response = await f.upload(base, admin.cookie, bytes, 'image/png');
+    assert.equal(response.status, 415);
+    assert.deepEqual(await response.json(), { error: { code: 'INVALID_IMAGE' } });
+  }
+  const oversized = await sharp({ create: { width: 4097, height: 4097, channels: 3, background: 'red' } }).png().toBuffer();
+  assert.equal((await f.upload(base, admin.cookie, oversized, 'image/png')).status, 415);
+  const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: 'blue' } }).png().toBuffer();
+  const { item } = await (await f.upload(base, admin.cookie, png, 'image/png')).json();
+  const bytes = f.files.bytes.bind(f.files);
+  for (const invalid of [Buffer.from(svg), Buffer.from('corrupt /private/path'), oversized]) {
+    f.files.bytes = async () => invalid;
+    const preview = await f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie);
+    assert.equal(preview.status, 415);
+    assert.deepEqual(await preview.json(), { error: { code: 'INVALID_IMAGE' } });
+    assert.equal(preview.headers.get('content-disposition'), null);
+  }
+  f.files.bytes = bytes;
+  assert.equal((await f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie)).status, 200);
+});
+
+test('AC-S2/S4: on-demand previews leave no cache after retraction/expiry/cleanup, including in-flight generation', { timeout: 10000 }, async t => {
+  const f = await fixture({ retentionMs: 1000 }); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: 'blue' } }).png().toBuffer();
+  const { item } = await (await f.upload(base, admin.cookie, png, 'image/png')).json();
+  assert.equal((await f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie)).status, 200);
+  const read = f.files.bytes.bind(f.files);
+  let started!: () => void; let release!: () => void;
+  const reading = new Promise<void>(resolve => { started = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.files.bytes = async key => { const result = await read(key); started(); await blocked; return result; };
+  const pending = f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie);
+  await reading;
+  try {
+    assert.equal((await f.request(`${base}/items/${item.id}`, { method: 'DELETE' }, admin.cookie)).status, 204);
+  } finally { release(); }
+  assert.equal((await pending).status, 404);
+  f.files.bytes = read;
+  assert.equal((await f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie)).status, 404);
+  assert.deepEqual(await readdir(join(f.directory, 'files')), []);
+  const second = await (await f.upload(base, admin.cookie, png, 'image/png')).json();
+  assert.equal((await f.request(`${base}/items/${second.item.id}/preview`, {}, admin.cookie)).status, 200);
+  assert.equal((await readdir(join(f.directory, 'files'))).length, 2);
+  f.advance(1001);
+  assert.equal((await f.request(`${base}/items/${second.item.id}/preview`, {}, admin.cookie)).status, 404);
+  await f.service.cleanup();
+  assert.deepEqual(await readdir(join(f.directory, 'files')), []);
+  assert.equal(f.repo.usage(admin.user.id), 0);
+});
+
+test('AC-S2/S4: all preview routes share a two-generation cap and release slots after failures', { timeout: 10000 }, async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: 'blue' } }).png().toBuffer();
+  const { item } = await (await f.upload(base, admin.cookie, png, 'image/png')).json();
+  const share = await (await f.json(`${base}/items/${item.id}/shares`, { expiresIn: 'never' }, admin.cookie)).json();
+  const room = await (await f.request('/api/rooms', { method: 'POST' })).json();
+  const roomItem = await (await f.upload(`/api/rooms/${room.token}`, '', png, 'image/png')).json();
+  const read = f.files.bytes.bind(f.files);
+  let reads = 0; let started!: () => void; let release!: () => void;
+  const reading = new Promise<void>(resolve => { started = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const brokenKey = f.repo.item(item.id, Date.now())!.fileKey;
+  f.files.bytes = async key => {
+    if (++reads === 2) started();
+    await blocked;
+    return key === brokenKey ? Buffer.from('broken') : read(key);
+  };
+  const member = f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie);
+  const anonymous = f.request(`/api/rooms/${room.token}/items/${roomItem.item.id}/preview`);
+  await reading;
+  try {
+    const busy = await f.request(`/api/s/${share.token}/preview`);
+    assert.equal(busy.status, 429);
+    assert.equal(busy.headers.get('retry-after'), '1');
+    assert.deepEqual(await busy.json(), { error: { code: 'PREVIEW_BUSY' } });
+    assert.equal(reads, 2);
+  } finally { release(); }
+  assert.equal((await member).status, 415);
+  assert.equal((await anonymous).status, 200);
+  f.files.bytes = read;
+  const responses = await Promise.all([
+    f.request(`${base}/items/${item.id}/preview`, {}, admin.cookie),
+    f.request(`/api/s/${share.token}/preview`),
+  ]);
+  assert.deepEqual(responses.map(response => response.status), [200, 200]);
+});
+
+test('AC-S1: preview inherits the thumbnail share and room rate limits', async t => {
+  const f = await fixture({ rateUpload: 2, rateAuth: 1000 }); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: 'blue' } }).png().toBuffer();
+  const { item } = await (await f.upload(base, admin.cookie, png, 'image/png')).json();
+  const share = await (await f.json(`${base}/items/${item.id}/shares`, { expiresIn: 'never' }, admin.cookie)).json();
+  assert.equal((await f.request(`/api/s/${share.token}/thumbnail`)).status, 200);
+  assert.equal((await f.request(`/api/s/${share.token}/preview`)).status, 200);
+  const limited = await f.request(`/api/s/${share.token}/preview`);
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get('retry-after'), '60');
+  assert.deepEqual(await limited.json(), { error: { code: 'RATE_LIMITED' } });
+  const room = await (await f.request('/api/rooms', { method: 'POST' })).json();
+  const roomBase = `/api/rooms/${room.token}`;
+  const roomItem = await (await f.upload(roomBase, '', png, 'image/png')).json();
+  assert.equal((await f.request(`${roomBase}/items/${roomItem.item.id}/preview`)).status, 200);
+  assert.equal((await f.request(`${roomBase}/items/${roomItem.item.id}/preview`)).status, 429);
 });
 
 test('schema v3 migrates share links without dropping items', async t => {

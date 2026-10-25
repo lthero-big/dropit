@@ -8,6 +8,7 @@ import type { Repository } from './repository.js';
 
 export class ClipboardService {
   private activeUploads = 0;
+  private activePreviews = 0;
   private cleaning: Promise<void> | undefined;
   constructor(readonly config: Config, readonly repo: Repository, readonly files: FileStorage,
     readonly events: Broadcaster, readonly now: () => number = Date.now) {}
@@ -168,6 +169,26 @@ export class ClipboardService {
     this.events.publish(space.id, { type: 'item.updated', item });
     return item;
   }
+  private async raster(fileKey: string, edge: number) {
+    try {
+      const image = sharp(await this.files.bytes(fileKey), { limitInputPixels: 16 * 1024 ** 2, animated: false });
+      const metadata = await image.metadata();
+      if (!['jpeg', 'png', 'webp', 'gif', 'avif', 'heif'].includes(metadata.format ?? '')) throw new Error('Not a raster');
+      return await image.rotate().resize(edge, edge, { fit: 'inside', withoutEnlargement: true }).webp({ quality: 75 }).toBuffer();
+    } catch { throw new ApiError(415, 'INVALID_IMAGE'); }
+  }
+  async preview(item: Item) {
+    // Only files that passed raster validation at upload can be previewed.
+    if (!item.fileKey || !item.thumbnailKey) throw new ApiError(404, 'NOT_FOUND');
+    if (this.activePreviews >= 2) throw new ApiError(429, 'PREVIEW_BUSY');
+    ++this.activePreviews;
+    try {
+      // Generate on demand: no stored derivative, quota charge or cleanup key.
+      const result = await this.raster(item.fileKey, 2048);
+      if (!this.repo.item(item.id, this.now())) throw new ApiError(404, 'NOT_FOUND');
+      return result;
+    } finally { --this.activePreviews; }
+  }
   async upload(space: Space, session: Session | undefined, body: ReadableStream<Uint8Array>, filename: string, mime: string) {
     if (this.activeUploads >= 4) throw new ApiError(429, 'UPLOAD_BUSY');
     ++this.activeUploads;
@@ -179,13 +200,7 @@ export class ClipboardService {
       fileKey = saved.key;
       let thumbnailSize = 0;
       if (['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'].includes(mime)) {
-        let thumbnail: Buffer;
-        try {
-          const image = sharp(await this.files.bytes(fileKey), { limitInputPixels: 16 * 1024 ** 2, animated: false });
-          const metadata = await image.metadata();
-          if (!['jpeg', 'png', 'webp', 'gif', 'avif', 'heif'].includes(metadata.format ?? '')) throw new Error('Not a raster');
-          thumbnail = await image.rotate().resize(320, 320, { fit: 'inside', withoutEnlargement: true }).webp({ quality: 75 }).toBuffer();
-        } catch { throw new ApiError(415, 'INVALID_IMAGE'); }
+        const thumbnail = await this.raster(fileKey, 320);
         const savedThumb = await this.files.write(new Blob([new Uint8Array(thumbnail)]).stream(), 1024 ** 2);
         thumbnailKey = savedThumb.key;
         thumbnailSize = savedThumb.size;
