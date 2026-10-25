@@ -28,7 +28,7 @@ export const UNIT_LABEL: Record<LimitUnit, string> = {
   count: '',
 }
 
-const BYTE_KEYS = new Set<LimitKey>(['maxFileBytes', 'maxTextBytes', 'userQuotaBytes', 'roomQuotaBytes', 'roomMaxFileBytes'])
+const BYTE_KEYS = new Set<LimitKey>(['maxFileBytes', 'maxTextBytes', 'userQuotaBytes', 'roomQuotaBytes', 'roomMaxFileBytes', 'uploadChunkBytes'])
 const LONG_TIME_KEYS = new Set<LimitKey>(['retentionMs', 'roomRetentionMs', 'sessionMs'])
 
 export interface LimitSpec {
@@ -54,18 +54,26 @@ export const LIMIT_SPECS: LimitSpec[] = [
   { key: 'rateInvite', label: '邀请限流', group: '限流' },
   { key: 'rateUpload', label: '上传限流', group: '限流' },
   { key: 'rateRoom', label: '房间写入限流', group: '限流' },
+  { key: 'uploadChunkBytes', label: '上传分片大小', group: '容量', hint: '只影响新上传；已有上传保持创建时的分片大小。' },
+  { key: 'uploadChunkTimeoutMs', label: '单片上传超时', group: '时间' },
+  { key: 'rateChunk', label: '分片请求限流', group: '限流', hint: '独立于普通上传限流。' },
+  { key: 'uploadChunksPerSession', label: '每次上传并行分片', group: '限流' },
+  { key: 'uploadChunksPerUser', label: '每用户并行分片', group: '限流' },
+  { key: 'uploadChunksGlobal', label: '全局并行分片', group: '限流' },
+  { key: 'uploadSessionsPerUser', label: '每用户未完成上传', group: '限流' },
+  { key: 'uploadSessionsGlobal', label: '全局未完成上传', group: '限流' },
 ]
 
 export function unitsFor(key: LimitKey): LimitUnit[] {
   if (BYTE_KEYS.has(key)) return ['MB', 'GB']
-  if (key === 'rateWindowMs') return ['second', 'minute', 'hour']
+  if (key === 'rateWindowMs' || key === 'uploadChunkTimeoutMs') return ['second', 'minute', 'hour']
   if (LONG_TIME_KEYS.has(key)) return ['hour', 'day']
   return ['count']
 }
 
 export function defaultUnit(key: LimitKey, value: number): LimitUnit {
   if (BYTE_KEYS.has(key)) return value >= GIB && value % GIB === 0 ? 'GB' : 'MB'
-  if (key === 'rateWindowMs') {
+  if (key === 'rateWindowMs' || key === 'uploadChunkTimeoutMs') {
     if (value >= HOUR && value % HOUR === 0) return 'hour'
     if (value >= 60_000 && value % 60_000 === 0) return 'minute'
     return 'second'
@@ -113,7 +121,7 @@ export function formatDuration(ms: number): string {
 
 export function formatLimit(key: string, value: number): string {
   if (BYTE_KEYS.has(key as LimitKey)) return formatBytes(value)
-  if (LONG_TIME_KEYS.has(key as LimitKey) || key === 'rateWindowMs') return formatDuration(value)
+  if (LONG_TIME_KEYS.has(key as LimitKey) || (key === 'rateWindowMs' || key === 'uploadChunkTimeoutMs')) return formatDuration(value)
   if (key === 'maxItems') return `${value} 条`
   return `${value} 次`
 }

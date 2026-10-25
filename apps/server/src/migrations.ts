@@ -96,3 +96,25 @@ CREATE TABLE limit_audit (
 );
 PRAGMA user_version=7;
 `;
+
+// Unfinished uploads reserve both bytes and an item slot. Chunk keys use the same
+// durable garbage queue as items, so deletion is retried after crashes/I/O errors.
+export const migration8 = `
+CREATE TABLE uploads (
+ id TEXT PRIMARY KEY, spaceId TEXT NOT NULL REFERENCES spaces(id), userId TEXT REFERENCES users(id),
+ principal TEXT NOT NULL, filename TEXT NOT NULL, mime TEXT NOT NULL,
+ size INTEGER NOT NULL CHECK(size>0), chunkSize INTEGER NOT NULL CHECK(chunkSize>0),
+ createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL
+);
+CREATE INDEX upload_user ON uploads(userId);
+CREATE INDEX upload_space ON uploads(spaceId);
+CREATE INDEX upload_principal ON uploads(principal);
+CREATE INDEX upload_expiry ON uploads(expiresAt);
+CREATE TABLE upload_chunks (
+ uploadId TEXT NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
+ "index" INTEGER NOT NULL CHECK("index">=0), key TEXT UNIQUE NOT NULL,
+ size INTEGER NOT NULL CHECK(size>0), sha256 TEXT NOT NULL,
+ PRIMARY KEY(uploadId,"index")
+);
+PRAGMA user_version=8;
+`;

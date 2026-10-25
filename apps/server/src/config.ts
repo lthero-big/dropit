@@ -8,6 +8,9 @@ export interface Config {
   sessionMs: number; cleanupMs: number; maxTextBytes: number; maxItems: number;
   rateWindowMs: number; rateGeneral: number; rateAuth: number; rateInvite: number;
   rateUpload: number; rateRoom: number; rateToken: number;
+  uploadChunkBytes: number; uploadChunkTimeoutMs: number; rateChunk: number;
+  uploadChunksPerSession: number; uploadChunksPerUser: number; uploadChunksGlobal: number;
+  uploadSessionsPerUser: number; uploadSessionsGlobal: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -37,6 +40,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rateAuth: number('RATE_AUTH', 20), rateInvite: number('RATE_INVITE', 10),
     rateUpload: number('RATE_UPLOAD', 30), rateRoom: number('RATE_ROOM', 10),
     rateToken: number('RATE_TOKEN', 120),
+    uploadChunkBytes: number('UPLOAD_CHUNK_BYTES', 8 * 1024 ** 2),
+    uploadChunkTimeoutMs: number('UPLOAD_CHUNK_TIMEOUT_MS', 120000),
+    rateChunk: number('RATE_CHUNK', 2000),
+    uploadChunksPerSession: number('UPLOAD_CHUNKS_PER_SESSION', 3),
+    uploadChunksPerUser: number('UPLOAD_CHUNKS_PER_USER', 6),
+    uploadChunksGlobal: number('UPLOAD_CHUNKS_GLOBAL', 16),
+    uploadSessionsPerUser: number('UPLOAD_SESSIONS_PER_USER', 8),
+    uploadSessionsGlobal: number('UPLOAD_SESSIONS_GLOBAL', 128),
   };
   validateLimits(config);
   return config;

@@ -59,6 +59,14 @@ function sampleLimits(): AdminLimits {
     rateUpload: field(30, 1_000_000),
     rateRoom: field(10, 1_000_000),
     sessionMs: field(7 * day, 365 * day),
+    uploadChunkBytes: field(8388608, 25165824),
+    uploadChunkTimeoutMs: field(120000, 3600000),
+    rateChunk: field(2000, 1000000),
+    uploadChunksPerSession: field(3, 16),
+    uploadChunksPerUser: field(6, 64),
+    uploadChunksGlobal: field(16, 256),
+    uploadSessionsPerUser: field(8, 1000),
+    uploadSessionsGlobal: field(128, 10000),
   }
 }
 

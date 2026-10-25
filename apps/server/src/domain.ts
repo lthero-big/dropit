@@ -7,6 +7,11 @@ export const token = () => randomBytes(32).toString('base64url');
 export const hash = (value: string) => createHash('sha256').update(value).digest('base64url');
 export interface User { id: string; email: string; name: string; role: 'admin' | 'user'; disabled: number; pending: number; createdAt: number }
 export interface Space { id: string; name: string; ownerId: string | null; expiresAt: number | null; roomHash: string | null }
+export interface UploadSession {
+  id: string; spaceId: string; userId: string | null; principal: string;
+  filename: string; mime: string; size: number; chunkSize: number; createdAt: number; expiresAt: number;
+}
+export interface UploadChunk { uploadId: string; index: number; key: string; size: number; sha256: string }
 export interface Invite { id: string; tokenHash: string; spaceId: string; maxUses: number; uses: number; expiresAt: number; revoked: number; createdBy: string }
 export interface Item {
   id: string; spaceId: string; userId: string | null; kind: 'text' | 'file'; text: string | null;

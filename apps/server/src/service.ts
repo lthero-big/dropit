@@ -5,8 +5,11 @@ import { ApiError, cleanFilename, hash, publicItem, publicShareItem, token, type
 import type { FileStorage } from './files.js';
 import type { Broadcaster } from './events.js';
 import type { Repository } from './repository.js';
+import { sniffRaster } from './media.js';
+import { UploadService } from './uploads.js';
 
 export class ClipboardService {
+  readonly uploads = new UploadService(this);
   private activeUploads = 0;
   private activePreviews = 0;
   private cleaning: Promise<void> | undefined;
@@ -117,9 +120,9 @@ export class ClipboardService {
       fileKey: null, thumbnailKey: null, createdAt: now, updatedAt: now, pinned: 0, tags: [],
       expiresAt: Math.min(now + this.config.retentionMs, space.expiresAt ?? Infinity) };
   }
-  private commit(item: Item, room: boolean) {
+  private commit(item: Item, room: boolean, uploadId?: string) {
     const quota = room ? this.config.roomQuotaBytes : (this.repo.quotaOverride(item.userId!) ?? this.config.userQuotaBytes);
-    this.repo.addItem(item, quota, room ? Math.min(100, this.config.maxItems) : this.config.maxItems);
+    this.repo.addItem(item, quota, room ? Math.min(100, this.config.maxItems) : this.config.maxItems, uploadId);
     this.events.publish(item.spaceId, { type: 'item.created', item: publicItem(item) });
     return publicItem(item);
   }
@@ -189,26 +192,31 @@ export class ClipboardService {
       return result;
     } finally { --this.activePreviews; }
   }
-  async upload(space: Space, session: Session | undefined, body: ReadableStream<Uint8Array>, filename: string, mime: string, expectedSize?: number) {
+  async upload(space: Space, session: Session | undefined, body: ReadableStream<Uint8Array>, filename: string, mime: string, expectedSize?: number, uploadId?: string, signal?: AbortSignal) {
     if (this.activeUploads >= 4) throw new ApiError(429, 'UPLOAD_BUSY');
     ++this.activeUploads;
     let fileKey: string | undefined;
     let thumbnailKey: string | undefined;
     try {
       const limit = space.roomHash ? this.config.roomMaxFileBytes : this.config.maxFileBytes;
-      const saved = await this.files.write(body, limit);
+      const saved = await this.files.write(body, limit, { signal });
       fileKey = saved.key;
       if (expectedSize != null && saved.size !== expectedSize) throw new ApiError(400, 'UPLOAD_INCOMPLETE');
+      const prefix = uploadId ? await this.files.prefix(fileKey, 4096) : undefined;
+      const rasterMime = prefix && sniffRaster(prefix);
+      // The session protocol rejects SVG, including SVG disguised as a raster.
+      // Legacy uploads retain download-only SVG/HTML compatibility.
+      if (prefix && (mime === 'image/svg+xml' || /<svg[\s/>]/i.test(prefix.toString('utf8')))) throw new ApiError(415, 'INVALID_IMAGE');
       let thumbnailSize = 0;
-      if (['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'].includes(mime)) {
+      if (rasterMime || ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'].includes(mime)) {
         const thumbnail = await this.raster(fileKey, 320);
-        const savedThumb = await this.files.write(new Blob([new Uint8Array(thumbnail)]).stream(), 1024 ** 2);
+        const savedThumb = await this.files.write(new Blob([new Uint8Array(thumbnail)]).stream(), 1024 ** 2, { signal });
         thumbnailKey = savedThumb.key;
         thumbnailSize = savedThumb.size;
       }
       const item = this.commit({ ...this.baseItem(space, session), kind: 'file', fileKey,
         thumbnailKey: thumbnailKey ?? null, filename: cleanFilename(filename), mime,
-        size: saved.size, storedBytes: saved.size + thumbnailSize }, Boolean(space.roomHash));
+        size: saved.size, storedBytes: saved.size + thumbnailSize }, Boolean(space.roomHash), uploadId);
       this.files.commit(fileKey);
       if (thumbnailKey) this.files.commit(thumbnailKey);
       return item;
@@ -238,6 +246,7 @@ export class ClipboardService {
   cleanup() {
     if (this.cleaning) return this.cleaning;
     this.cleaning = (async () => {
+      await this.uploads.expire();
       for (const item of this.repo.expire(this.now())) this.events.publish(item.spaceId, { type: 'item.deleted', id: item.id });
       this.events.revalidate();
       await this.flushGarbage();

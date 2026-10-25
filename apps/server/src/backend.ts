@@ -141,7 +141,8 @@ export function createBackend(options: BackendOptions = {}) {
     try { ip = resolveIp(remote, c.req.header('x-forwarded-for')); }
     catch { ip = remote; }
     c.set('ip', ip);
-    limit(c, 'general', config.rateGeneral, false);
+    const chunkRequest = c.req.method === 'PUT' && /^\/api\/(?:spaces|rooms)\/[^/]+\/uploads\/[^/]+\/chunks\/[^/]+$/.test(c.req.path);
+    limit(c, chunkRequest ? 'chunk' : 'general', chunkRequest ? config.rateChunk : config.rateGeneral, false);
     const rawSession = getCookie(c, sessionCookie);
     const authorization = c.req.header('authorization');
     if (authorization !== undefined) {
@@ -150,10 +151,10 @@ export function createBackend(options: BackendOptions = {}) {
       const auth = match ? repo.tokenSession(hash(match[1]), now()) : undefined;
       if (!auth) { c.header('WWW-Authenticate', 'Bearer'); throw new ApiError(401, 'UNAUTHENTICATED'); }
       c.set('session', auth);
-      consume(c, `token:${auth.bearer!.id}`, config.rateToken);
+      consume(c, `${chunkRequest ? 'chunk-token' : 'token'}:${auth.bearer!.id}`, chunkRequest ? config.rateChunk : config.rateToken);
     } else c.set('session', rawSession ? repo.session(hash(rawSession), now()) : undefined);
     const auth = c.get('session');
-    if (auth) consume(c, `general:user:${auth.user.id}`, config.rateGeneral);
+    if (auth) consume(c, `${chunkRequest ? 'chunk' : 'general'}:user:${auth.user.id}`, chunkRequest ? config.rateChunk : config.rateGeneral);
     const safe = ['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
     const bearer = c.get('session')?.bearer;
     if (bearer && !bearer.scopes.includes(safe ? 'read' : 'write')) throw new ApiError(403, 'INSUFFICIENT_SCOPE');
@@ -305,7 +306,7 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.get('/api/me', c => {
     const auth = service.requireSession(c.get('session'));
-    return c.json({ user: auth.user, usedBytes: repo.usage(auth.user.id),
+    return c.json({ user: auth.user, usedBytes: repo.usage(auth.user.id), reservedBytes: repo.reservedBytes(auth.user.id, now()),
       quotaBytes: repo.quotaOverride(auth.user.id) ?? config.userQuotaBytes,
       maxFileBytes: config.maxFileBytes, maxTextBytes: config.maxTextBytes, retentionMs: config.retentionMs });
   });
@@ -371,6 +372,7 @@ export function createBackend(options: BackendOptions = {}) {
     if ('quotaBytes' in body) patch.quotaBytes = body.quotaBytes === null ? null : integer(body.quotaBytes, 1, maxQuotaBytes);
     if (!('disabled' in body || 'role' in body || 'name' in body || 'quotaBytes' in body)) throw new ApiError(400, 'INVALID_INPUT');
     repo.updateUser(c.req.param('id'), patch);
+    if (patch.disabled) await service.uploads.cancelUser(c.req.param('id'));
     events.revalidate();
     return c.body(null, 204);
   });
@@ -496,14 +498,38 @@ export function createBackend(options: BackendOptions = {}) {
     return sendMedia(c, service.readPublicShare(raw, c.req.query('access')));
   });
 
-  const scope = (c: Ctx) => {
+  const scope = (c: Ctx, chunk = false) => {
     if (c.req.param('room')) {
-      limit(c, 'room-access', config.rateUpload);
+      if (!chunk) limit(c, 'room-access', config.rateUpload);
       return service.room(c.req.param('room')!);
     }
     return service.space(c.req.param('space')!, c.get('session'));
   };
   for (const base of ['/api/spaces/:space', '/api/rooms/:room']) {
+    app.post(`${base}/uploads`, async c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'upload', space.roomHash ? config.rateRoom : config.rateUpload);
+      const body = await json(c, 8192);
+      const mime = string(body.mime, 200).split(';')[0].trim().toLowerCase();
+      if (!mime) throw new ApiError(400, 'INVALID_INPUT');
+      return c.json(service.uploads.create(space, c.get('session'), string(body.filename, 4096),
+        integer(body.size, 1, Number.MAX_SAFE_INTEGER), mime), 201);
+    });
+    app.get(`${base}/uploads/:id`, c => c.json(service.uploads.get(scope(c), c.get('session'), c.req.param('id')!)));
+    app.put(`${base}/uploads/:id/chunks/:index`, async c => {
+      await service.uploads.put(scope(c, true), c.get('session'), c.req.param('id')!, c.req.param('index')!, c.req.raw.body,
+        c.req.header('x-chunk-sha256'));
+      return c.body(null, 204);
+    });
+    app.post(`${base}/uploads/:id/complete`, async c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'upload', space.roomHash ? config.rateRoom : config.rateUpload);
+      return c.json({ item: await service.uploads.complete(space, c.get('session'), c.req.param('id')!) }, 201);
+    });
+    app.delete(`${base}/uploads/:id`, async c => {
+      await service.uploads.cancel(scope(c), c.get('session'), c.req.param('id')!);
+      return c.body(null, 204);
+    });
     app.get(base, c => {
       const space = scope(c);
       const session = c.get('session');

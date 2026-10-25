@@ -17,7 +17,8 @@ backend.app.get('*', serveStatic({ path: resolve(staticDir, 'index.html') }));
 
 await backend.startMaintenance();
 const server = serve({ fetch: backend.app.fetch, port: backend.config.port, hostname: process.env.HOST ?? '0.0.0.0', websocket: backend.websocket }) as Server;
-server.requestTimeout = 120000;
+// Body deadlines belong to each chunk. Slow legacy uploads have no total deadline.
+server.requestTimeout = 0;
 server.headersTimeout = 30000;
 console.info(`dropit listening on port ${backend.config.port}`);
 
