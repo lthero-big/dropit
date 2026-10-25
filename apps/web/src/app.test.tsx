@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App.tsx'
 import { ThemeProvider } from './components/theme-provider.tsx'
@@ -377,8 +377,13 @@ describe('dropit web', () => {
     })
     expect(await screen.findByText('old note')).toBeTruthy()
     expect(screen.queryByText('已编辑')).toBeNull()
+    const mine = screen.getByText('old note').closest('li')
+    const theirs = screen.getByText('their note').closest('li')
+    const file = screen.getByText('a.bin').closest('li')
+    if (!mine || !theirs || !file) throw new Error('missing clip')
+    for (const row of [mine, theirs, file]) fireEvent.click(within(row).getByRole('button', { name: '更多' }))
     expect(screen.getAllByRole('button', { name: '编辑' })).toHaveLength(1)
-    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    fireEvent.click(within(mine).getByRole('button', { name: '编辑' }))
     fireEvent.change(screen.getByLabelText('编辑文本'), { target: { value: 'new note' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     expect(await screen.findByText('new note')).toBeTruthy()
@@ -408,7 +413,50 @@ describe('dropit web', () => {
       serverTime: Date.now(),
       expiresAt: Date.now() + 60_000,
     })
-    expect(await screen.findByRole('button', { name: '编辑' })).toBeTruthy()
+    fireEvent.click(await screen.findByRole('button', { name: '更多' }))
+    expect(screen.getByRole('button', { name: '编辑' })).toBeTruthy()
+  })
+
+  it('keeps copy, share, and retract as icon buttons and nests the rest', async () => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/spaces') return json({ spaces: [space] })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/')
+    await screen.findByRole('button', { name: '发送' })
+    FakeSocket.instances.at(-1)?.emit({
+      type: 'snapshot',
+      items: [
+        item({ id: 'note', text: 'keep me' }),
+        item({ id: 'file', text: null, kind: 'file', filename: 'a.bin' }),
+      ],
+      serverTime: Date.now(),
+      expiresAt: null,
+    })
+    const note = (await screen.findByText('keep me')).closest('li')
+    const file = screen.getByText('a.bin').closest('li')
+    if (!note || !file) throw new Error('missing clip')
+    const copy = within(note).getByRole('button', { name: '复制' })
+    const share = within(note).getByRole('button', { name: '分享' })
+    const retract = within(note).getByRole('button', { name: '撤回' })
+    for (const button of [copy, share, retract]) {
+      expect(button.getAttribute('title')).toBe(button.getAttribute('aria-label'))
+      expect(button.style.minWidth).toBe('40px')
+      expect(button.style.minHeight).toBe('40px')
+    }
+    expect(within(note).queryByRole('button', { name: '编辑' })).toBeNull()
+    expect(within(note).queryByRole('button', { name: '置顶' })).toBeNull()
+    fireEvent.click(within(note).getByRole('button', { name: '更多' }))
+    expect(within(note).getByRole('button', { name: '更多' }).getAttribute('aria-expanded')).toBe('true')
+    expect(within(note).getByRole('button', { name: '编辑' }).style.minHeight).toBe('40px')
+    expect(within(note).getByRole('button', { name: '置顶' })).toBeTruthy()
+    expect(within(note).getByRole('button', { name: '标签' })).toBeTruthy()
+    fireEvent.click(retract)
+    expect(within(note).getByRole('button', { name: '确认撤回' }).getAttribute('title')).toBe('确认撤回')
+    expect(within(file).queryByRole('button', { name: '复制' })).toBeNull()
+    fireEvent.click(within(file).getByRole('button', { name: '更多' }))
+    expect(within(file).getByRole('link', { name: '下载' }).getAttribute('href')).toBe('/api/spaces/s1/items/file/download')
   })
 
   it('pins clips, filters by tag, and applies a remote label update', async () => {
@@ -451,7 +499,10 @@ describe('dropit web', () => {
     fireEvent.change(screen.getByLabelText('搜索'), { target: { value: '上线' } })
     expect(screen.queryByText('newer note')).toBeNull()
     fireEvent.change(screen.getByLabelText('搜索'), { target: { value: '' } })
-    fireEvent.click(screen.getAllByRole('button', { name: '标签' })[0]!)
+    const pinned = screen.getByText('older note').closest('li')
+    if (!pinned) throw new Error('missing clip')
+    fireEvent.click(within(pinned).getByRole('button', { name: '更多' }))
+    fireEvent.click(within(pinned).getByRole('button', { name: '标签' }))
     fireEvent.change(screen.getByLabelText('新标签'), { target: { value: '#运维' } })
     fireEvent.click(screen.getByRole('button', { name: '添加' }))
     await waitFor(() => expect(calls.some((call) => call.url === '/api/spaces/s1/items/old/labels')).toBe(true))
