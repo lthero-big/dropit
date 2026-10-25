@@ -1,7 +1,7 @@
 # dropit backend API
 
 Same-origin HTTP API under `/api`; all responses are JSON except downloads,
-thumbnails, media previews, OAuth redirects and empty `204` responses. Dates are Unix milliseconds;
+thumbnails, image/media previews, OAuth redirects and empty `204` responses. Dates are Unix milliseconds;
 sizes are bytes. Browsers use the server session cookie (`credentials: 'same-origin'`);
 CLI clients use personal access tokens (PATs) in `Authorization: Bearer <token>`.
 There are no passwords, CORS origins or public mock logins.
@@ -221,6 +221,7 @@ Space routes require membership; room routes require the unexpired capability.
 | POST | `base/items/file` | **Raw binary body**, original type in `Content-Type`, filename in `X-File-Name: encodeURIComponent(name)` → 201 `{item:Item}` |
 | GET | `base/items/:id/download` | Raw bytes, `application/octet-stream`, `Content-Disposition: attachment`, `nosniff`. `Accept-Ranges: bytes`; single `Range` supports resume (206/416). |
 | GET | `base/items/:id/thumbnail` | Sanitized, re-encoded `image/webp` up to 320×320; 404 if no thumbnail |
+| GET | `base/items/:id/preview` | Sanitized `image/webp`, longest edge 2048px, aspect preserved, no enlargement; only previously validated raster uploads. `Content-Disposition: inline`, `nosniff`, `Cache-Control: private, max-age=N` (at most 60 seconds, capped by item expiry). Nonmembers/unknown items/nonimages return 404. |
 | GET | `base/items/:id/media` | Inline video or audio after a magic-byte allowlist. `Content-Type` is the sniffed type, never the upload header. `Accept-Ranges: bytes`; a single `Range` returns `206` or `416`. SVG, HTML, images and unknown bytes are `404`. `Content-Disposition: inline`, `nosniff`. |
 | DELETE | `base/items/:id` | 204; retract entry and stored file/thumbnail. In spaces, sender or space owner only; in rooms, every capability holder may retract. |
 | POST | `base/items/:id/shares` | `{expiresIn:'1h'\|'1d'\|'7d'\|'never', maxViews?: number\|null}` → 201 `{id,itemId,expiresAt,maxViews,views,revoked,createdAt,token,url}`. `maxViews` null or omitted is unlimited; otherwise 1–100 (`1` is one-time). Same manager as retract: item author or space owner; any current room capability. |
@@ -240,9 +241,10 @@ means the link itself has no extra deadline.
 
 | Method | Path | Response |
 | --- | --- | --- |
-| GET | `/s/:token` | `{item,linkExpiresAt,views,maxViews,access}`. Consumes one view. `item` is `{kind,text,filename,mime,size,hasThumbnail,createdAt,expiresAt,pinned,tags}` with no ids. `access` authorizes file, thumbnail and media requests for 10 minutes without a second view. |
+| GET | `/s/:token` | `{item,linkExpiresAt,views,maxViews,access}`. Consumes one view. `item` is `{kind,text,filename,mime,size,hasThumbnail,createdAt,expiresAt,pinned,tags}` with no ids. `access` authorizes file, thumbnail, image preview and media requests for 10 minutes without a second view. |
 | GET | `/s/:token/file?access=` | Raw bytes, `application/octet-stream`, attachment, `nosniff`; single Range (206/416). A valid unexpired `access` does not consume another view. Without `access`, this request consumes one view and returns a new ticket in `X-Share-Access` and a resumable URL in `Content-Location`. Reuse that ticket for all later ranges of this download. |
 | GET | `/s/:token/thumbnail?access=` | Sanitized `image/webp`, or 404. Same view rules as the file route. |
+| GET | `/s/:token/preview?access=` | Same sanitized 2048px WebP as the member/room preview route; inline, nosniff, `Cache-Control: no-store`. Same view accounting as thumbnail: valid `access` spends no additional view; without valid access, consumes one view. Expired/revoked/exhausted links return 404 (an existing unexpired ticket can still read an exhausted link). |
 | GET | `/s/:token/media?access=` | Same sniffed inline media and `Range` behavior as the member media route. Same view rules as the file route. |
 
 The second metadata read of a one-time link is `404`. Refreshing the page counts as another view.
@@ -294,7 +296,15 @@ await fetch(`/api/spaces/${spaceId}/items/file`, {
 
 Images claimed as JPEG/PNG/WebP/GIF/AVIF are decoded with a 16-megapixel limit and
 re-encoded for the thumbnail; malformed or oversized raster images return 415.
-GIF preview uses the first frame. Image previews use only the thumbnail endpoint.
+`/preview` revalidates the original with the same decoded-pixel limit and re-encodes
+it as WebP with a longest edge of 2048px, preserving aspect and applying EXIF
+orientation without enlarging small images. Both thumbnail and preview strip
+EXIF and other metadata; GIF uses only the first frame. Files without a validated
+raster thumbnail return `404 NOT_FOUND`; corrupt/oversized image data returns
+`415 INVALID_IMAGE` without decoder details. The existing member/room and share
+rate limits also cover previews. Each server instance allows at most two active
+preview generations across member, room and share routes; additional requests
+return `429 PREVIEW_BUSY` with `Retry-After: 1`.
 SVG and HTML are accepted for **download only** and are never inline-previewed,
 even when the client sends `video/*` or a media filename. Video and audio
 previews use `/media` only after the stored bytes match an allowlist (MP4,
@@ -305,7 +315,11 @@ elements. It does not parse raw HTML, images, or other URL schemes. Do not fetch
 arbitrary URLs from text or the original file MIME.
 
 User quota counts all original text/file bytes **plus thumbnail bytes** uploaded
-by that user across spaces. The limit is that user's `quotaOverride` when set,
+by that user across spaces. Large image previews are generated on demand, never
+stored or cached by the server, and **do not count toward user or room quotas**.
+There is no preview cache/key to delete on retraction, expiry or cleanup; only
+the original and thumbnail remain in storage. The `Item` structure is unchanged.
+The limit is that user's `quotaOverride` when set,
 otherwise the effective `userQuotaBytes` runtime limit (environment default
 `USER_QUOTA_BYTES`, also returned as `quotaBytes` on `GET /me`).
 Lowering a quota does not delete existing entries; further uploads and text

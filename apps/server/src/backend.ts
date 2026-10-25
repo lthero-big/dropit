@@ -417,6 +417,14 @@ export function createBackend(options: BackendOptions = {}) {
     limit(c, 'share', config.rateAuth, false);
     limit(c, `share:${hash(raw).slice(0, 32)}`, config.rateUpload, false);
   };
+  const sendPreview = async (c: Ctx, item: Item, shared = false) => {
+    const preview = await service.preview(item);
+    const maxAge = Math.max(0, Math.min(60, Math.floor((item.expiresAt - now()) / 1000)));
+    c.header('Content-Type', 'image/webp');
+    c.header('Content-Disposition', 'inline');
+    c.header('Cache-Control', shared ? 'no-store' : `private, max-age=${maxAge}`);
+    return c.body(new Uint8Array(preview));
+  };
   const sendMedia = async (c: Ctx, item: Item) => {
     if (!item.fileKey || item.size < 1) throw new ApiError(404, 'NOT_FOUND');
     const sniffed = sniffMedia(await files.prefix(item.fileKey, 4096));
@@ -476,6 +484,11 @@ export function createBackend(options: BackendOptions = {}) {
     if (!item.thumbnailKey) throw new ApiError(404, 'NOT_FOUND');
     c.header('Content-Type', 'image/webp');
     return c.body(files.stream(item.thumbnailKey));
+  });
+  app.get('/api/s/:token/preview', async c => {
+    const raw = c.req.param('token');
+    shareLimit(c, raw);
+    return sendPreview(c, service.readPublicShare(raw, c.req.query('access')), true);
   });
   app.get('/api/s/:token/media', async c => {
     const raw = c.req.param('token');
@@ -571,6 +584,7 @@ export function createBackend(options: BackendOptions = {}) {
       c.header('Content-Type', 'image/webp');
       return c.body(files.stream(item.thumbnailKey));
     });
+    app.get(`${base}/items/:id/preview`, async c => sendPreview(c, service.item(scope(c), c.req.param('id')!)));
     app.get(`${base}/items/:id/media`, async c => sendMedia(c, service.item(scope(c), c.req.param('id')!)));
   }
 
