@@ -665,13 +665,74 @@ describe('dropit web', () => {
     expect(document.querySelector('script')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '渲染' }))
     expect(screen.getByRole('heading', { name: '清单' })).toBeTruthy()
-    expect(screen.getByRole('link', { name: '手册' }).getAttribute('href')).toBe('https://example.com/run')
+    const manual = screen.getByRole('link', { name: '手册' })
+    expect(manual.getAttribute('href')).toBe('https://example.com/run')
+    expect(manual.textContent).toBe('手册')
+    expect(manual.getAttribute('target')).toBe('_blank')
+    expect(manual.getAttribute('rel')).toBe('noopener noreferrer nofollow')
+    expect(manual.getAttribute('referrerpolicy')).toBe('no-referrer')
     expect(screen.queryByRole('link', { name: '坏' })).toBeNull()
+    expect(document.body.innerHTML).not.toContain('href="javascript:')
     expect(document.querySelector('script')).toBeNull()
     expect(document.querySelector('img')?.getAttribute('src')).toBe('/api/spaces/s1/items/pic/thumbnail')
     expect(document.querySelector('video')?.getAttribute('src')).toBe('/api/spaces/s1/items/vid/media')
     expect(document.querySelectorAll('video')).toHaveLength(1)
     expect(screen.getByText('page.html')).toBeTruthy()
+  })
+
+  it('autolinks item text on the board, in a room, and on a share page', async () => {
+    const source = '打开 https://example.com/docs。 <script>alert(1)</script>'
+    const writeText = vi.fn(async () => undefined)
+    vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(writeText)
+    stubFetch((url) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/spaces') return json({ spaces: [space] })
+      if (url === '/api/s/tok') {
+        return json({
+          item: { kind: 'text', text: source, filename: null, mime: null, size: source.length, hasThumbnail: false, createdAt: 1, expiresAt: 9 },
+          linkExpiresAt: null,
+          views: 1,
+          maxViews: null,
+          access: 'ticket',
+        })
+      }
+      if (url.startsWith('/api/rooms/room-token')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/')
+    await screen.findByRole('button', { name: '发送' })
+    FakeSocket.instances.at(-1)?.emit({
+      type: 'snapshot',
+      items: [item({ id: 'linky', text: source })],
+      serverTime: Date.now(),
+      expiresAt: null,
+    })
+    const boardLink = await screen.findByRole('link', { name: 'https://example.com/docs' })
+    expect(boardLink.getAttribute('href')).toBe('https://example.com/docs')
+    expect(boardLink.textContent).toBe('https://example.com/docs')
+    expect(document.querySelector('script')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '复制' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(source))
+    fireEvent.click(screen.getByRole('button', { name: '更多' }))
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }))
+    expect((screen.getByLabelText('编辑文本') as HTMLTextAreaElement).value).toBe(source)
+
+    cleanup()
+    renderAt('/rooms/room-token')
+    await screen.findByRole('heading', { name: '临时房间' })
+    FakeSocket.instances.at(-1)?.emit({
+      type: 'snapshot',
+      items: [item({ id: 'room-link', text: source, spaceId: 'room', userId: null })],
+      serverTime: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    })
+    expect((await screen.findByRole('link', { name: 'https://example.com/docs' })).getAttribute('href')).toBe('https://example.com/docs')
+
+    cleanup()
+    renderAt('/s/tok')
+    expect((await screen.findByRole('link', { name: 'https://example.com/docs' })).getAttribute('href')).toBe('https://example.com/docs')
+    expect(document.querySelector('script')).toBeNull()
+    expect(document.body.textContent).toContain(source)
   })
 
   it('says when an invite or room is gone', async () => {
