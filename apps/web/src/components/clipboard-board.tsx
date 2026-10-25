@@ -7,8 +7,10 @@ import { ImageLightbox, type LightboxSlide } from '@/components/image-lightbox.t
 import { SharePanel } from '@/components/share-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
+import { discardUpload, uploadMaybeChunked } from '@/lib/chunked-upload.ts'
 import { useChannel } from '@/lib/channel.ts'
 import { createUploadQueue, type UploadQueue, type UploadRow } from '@/lib/upload-queue.ts'
+import { formatEta, formatSpeed } from '@/lib/upload-speed.ts'
 import { copyText, formatBytes, formatRemain, formatWhen, quotaTone, useClock, utf8Size } from '@/lib/format.ts'
 import { MarkdownText } from '@/lib/markdown.tsx'
 import { mediaKind } from '@/lib/media.ts'
@@ -60,10 +62,15 @@ function IconAction({
 const uploadStatusLabel: Record<UploadRow['status'], string> = {
   queued: '排队中',
   uploading: '上传中',
+  processing: '处理中…',
+  paused: '已暂停',
   done: '完成',
   failed: '失败',
   cancelled: '已取消',
 }
+
+const queueActionClass =
+  'inline-flex min-h-10 items-center border-2 border-foreground bg-background px-2 text-xs font-extrabold tracking-wider uppercase focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary'
 
 function extension(name: string): string {
   const dot = name.lastIndexOf('.')
@@ -110,6 +117,7 @@ export function ClipboardBoard({
   onBusyChange,
   onBindCancel,
   upload = uploadFile,
+  chunkBytes,
 }: {
   base: string | null
   title: string
@@ -129,6 +137,8 @@ export function ClipboardBoard({
   onBusyChange?: (busy: boolean) => void
   onBindCancel?: (cancel: () => void) => void
   upload?: typeof uploadFile
+  /** Bytes above this use the resumable chunk protocol. Omit to use the learned or 8 MiB default. */
+  chunkBytes?: number
 }) {
   const channel = useChannel(base)
   const now = useClock(channel.offset)
@@ -159,6 +169,7 @@ export function ClipboardBoard({
   const onActivityRef = useRef(onActivity)
   const onAuthLostRef = useRef(onAuthLost)
   const uploadRef = useRef(upload)
+  const chunkBytesRef = useRef(chunkBytes)
   const visible = channel.items.filter((item) => item.expiresAt > now)
   const needle = query.trim().toLowerCase()
   const shown = visible.filter((item) => {
@@ -260,12 +271,21 @@ export function ClipboardBoard({
     onActivityRef.current = onActivity
     onAuthLostRef.current = onAuthLost
     uploadRef.current = upload
+    chunkBytesRef.current = chunkBytes
     sendFilesRef.current = sendFiles
   })
 
   useEffect(() => {
     const queue = createUploadQueue({
-      upload: (file, onProgress, signal) => uploadRef.current(baseRef.current ?? '', file, onProgress, signal),
+      upload: (file, onProgress, signal) => uploadMaybeChunked({
+        base: baseRef.current ?? '',
+        file,
+        onProgress,
+        signal,
+        chunkBytes: chunkBytesRef.current,
+        single: (next, progress, nextSignal) => uploadRef.current(baseRef.current ?? '', next, progress, nextSignal),
+      }),
+      discard: (file) => discardUpload(baseRef.current ?? '', file),
       onItem: (item) => {
         channelRef.current.upsert(item)
         onActivityRef.current?.()
@@ -282,7 +302,7 @@ export function ClipboardBoard({
     }
   }, [])
 
-  const uploadBusy = rows.some((row) => row.status === 'queued' || row.status === 'uploading')
+  const uploadBusy = rows.some((row) => row.status === 'queued' || row.status === 'uploading' || row.status === 'processing' || row.status === 'paused')
 
   useEffect(() => {
     onBusyChange?.(uploadBusy)
@@ -549,7 +569,7 @@ export function ClipboardBoard({
                 {uploadBusy ? (
                   <button
                     type="button"
-                    className="inline-flex min-h-10 items-center border-2 border-foreground bg-background px-2 text-xs font-extrabold tracking-wider uppercase focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                    className={queueActionClass}
                     onClick={() => queueRef.current?.cancelAll()}
                   >
                     全部取消
@@ -558,24 +578,44 @@ export function ClipboardBoard({
               </div>
               <ul>
                 {rows.map((row) => (
-                  <li key={row.id} className="border-t border-foreground px-3 py-2 first:border-t-0">
-                    <div className="flex min-w-0 items-start justify-between gap-2">
-                      <p className="min-w-0 truncate text-sm font-medium">{row.name}</p>
-                      <div className="flex shrink-0 gap-2">
+                  <li key={row.id} className="border-t border-foreground px-3 py-2 first:border-t-0" data-upload-status={row.status}>
+                    <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
+                      <p className="min-w-0 flex-1 truncate text-sm font-medium">{row.name}</p>
+                      <div className="flex shrink-0 flex-wrap gap-2">
                         {row.status === 'failed' ? (
                           <button
                             type="button"
-                            className="inline-flex min-h-10 items-center border-2 border-foreground bg-background px-2 text-xs font-extrabold tracking-wider uppercase focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                            className={queueActionClass}
                             aria-label={`重试 ${row.name}`}
                             onClick={() => queueRef.current?.retry(row.id)}
                           >
                             重试
                           </button>
                         ) : null}
-                        {row.status === 'queued' || row.status === 'uploading' ? (
+                        {row.status === 'uploading' ? (
                           <button
                             type="button"
-                            className="inline-flex min-h-10 items-center border-2 border-foreground bg-background px-2 text-xs font-extrabold tracking-wider uppercase focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                            className={queueActionClass}
+                            aria-label={`暂停 ${row.name}`}
+                            onClick={() => queueRef.current?.pause(row.id)}
+                          >
+                            暂停
+                          </button>
+                        ) : null}
+                        {row.status === 'paused' ? (
+                          <button
+                            type="button"
+                            className={queueActionClass}
+                            aria-label={`继续 ${row.name}`}
+                            onClick={() => queueRef.current?.resume(row.id)}
+                          >
+                            继续
+                          </button>
+                        ) : null}
+                        {row.status === 'queued' || row.status === 'uploading' || row.status === 'processing' || row.status === 'paused' ? (
+                          <button
+                            type="button"
+                            className={queueActionClass}
                             aria-label={`取消 ${row.name}`}
                             onClick={() => queueRef.current?.cancel(row.id)}
                           >
@@ -584,9 +624,13 @@ export function ClipboardBoard({
                         ) : null}
                       </div>
                     </div>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {formatBytes(row.size)} · {uploadStatusLabel[row.status]}
+                    <p className="mt-1 text-xs break-words text-muted-foreground tabular-nums">
+                      {formatBytes(row.size)} ·{' '}
+                      <span className={row.status === 'processing' ? 'font-extrabold tracking-wider text-foreground uppercase' : undefined}>
+                        {uploadStatusLabel[row.status]}
+                      </span>
                       {row.status === 'uploading' || row.status === 'done' ? ` · ${Math.round(row.ratio * 100)}%` : ''}
+                      {row.status === 'uploading' && row.speedBps > 0 ? ` · ${formatSpeed(row.speedBps)} · ${formatEta(row.etaMs)}` : ''}
                     </p>
                     {row.status === 'failed' && row.error ? <p className="mt-1 text-xs break-words text-destructive">{row.error}</p> : null}
                     <div
@@ -595,9 +639,10 @@ export function ClipboardBoard({
                       aria-valuemin={0}
                       aria-valuemax={100}
                       aria-valuenow={Math.round(row.ratio * 100)}
+                      aria-valuetext={row.status === 'processing' ? '处理中' : undefined}
                       aria-label={row.name}
                     >
-                      <div className="h-full bg-primary" style={{ width: `${Math.round(row.ratio * 100)}%` }} />
+                      <div className="h-full bg-primary motion-safe:transition-[width] motion-safe:duration-150" style={{ width: `${Math.round(row.ratio * 100)}%` }} />
                     </div>
                   </li>
                 ))}

@@ -48,6 +48,14 @@ const labels: Record<string, string> = {
   BROWSER_SESSION_REQUIRED: '需要在浏览器中登录后操作',
   UPLOAD_BUSY: '上传过于频繁',
   UPLOAD_INCOMPLETE: '上传已中断',
+  UPLOAD_SESSION_LIMIT: '未完成的上传太多',
+  UPLOAD_IN_PROGRESS: '上传仍在处理',
+  CHUNK_BUSY: '分片上传繁忙',
+  CHUNK_CONFLICT: '分片冲突，请重试',
+  CHUNK_SIZE_MISMATCH: '分片大小不符',
+  INVALID_CHUNK_INDEX: '分片序号无效',
+  INVALID_CHECKSUM: '校验和无效',
+  CHECKSUM_MISMATCH: '分片校验失败',
   SOCKET_LIMIT: '连接数已达上限',
   INTERNAL_ERROR: '服务暂时不可用',
 }
@@ -107,6 +115,18 @@ export class UploadCancelled extends Error {
 
 export function isUploadCancelled(error: unknown): boolean {
   return error instanceof UploadCancelled
+}
+
+/** Abort an in-flight transfer without deleting the server session, so a refresh can resume. */
+export class KeepSession extends Error {
+  constructor() {
+    super('KEEP_SESSION')
+    this.name = 'KeepSession'
+  }
+}
+
+export function isKeepSession(error: unknown): boolean {
+  return error instanceof KeepSession
 }
 
 export function uploadFile(
