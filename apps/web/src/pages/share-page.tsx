@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
+import { ImageLightbox } from '@/components/image-lightbox.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api } from '@/lib/api.ts'
 import { formatBytes } from '@/lib/format.ts'
@@ -11,11 +12,13 @@ export function SharePage() {
   const { token = '' } = useParams()
   const [share, setShare] = useState<PublicShare | null>(null)
   const [missing, setMissing] = useState(false)
+  const [open, setOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     setShare(null)
     setMissing(false)
+    setOpen(false)
     api<PublicShare>(`/api/s/${encodeURIComponent(token)}`)
       .then((body) => {
         if (!cancelled) setShare(body)
@@ -51,11 +54,18 @@ export function SharePage() {
           ) : (
             <div className="mt-6">
               {share.item.hasThumbnail ? (
-                <img
-                  src={`/api/s/${encodeURIComponent(token)}/thumbnail?access=${encodeURIComponent(share.access)}`}
-                  alt=""
-                  className="max-h-80 border border-foreground object-contain"
-                />
+                <button
+                  type="button"
+                  aria-label={`查看 ${share.item.filename?.trim() || '图片'}`}
+                  className="block border-0 bg-transparent p-0 text-left"
+                  onClick={() => setOpen(true)}
+                >
+                  <img
+                    src={`/api/s/${encodeURIComponent(token)}/thumbnail?access=${encodeURIComponent(share.access)}`}
+                    alt=""
+                    className="max-h-80 border border-foreground object-contain"
+                  />
+                </button>
               ) : mediaKind({ ...share.item, hasThumbnail: share.item.hasThumbnail }) === 'video' ? (
                 <video
                   controls
@@ -76,6 +86,23 @@ export function SharePage() {
               <Button type="button" className="mt-4" asChild>
                 <a href={`/api/s/${encodeURIComponent(token)}/file?access=${encodeURIComponent(share.access)}`}>下载</a>
               </Button>
+              {open && share.item.hasThumbnail ? (
+                <ImageLightbox
+                  slides={[
+                    {
+                      key: token,
+                      filename: share.item.filename?.trim() || '未命名图片',
+                      byteSize: share.item.size,
+                      thumbnailSrc: `/api/s/${encodeURIComponent(token)}/thumbnail?access=${encodeURIComponent(share.access)}`,
+                      previewSrc: `/api/s/${encodeURIComponent(token)}/preview?access=${encodeURIComponent(share.access)}`,
+                      downloadHref: `/api/s/${encodeURIComponent(token)}/file?access=${encodeURIComponent(share.access)}`,
+                    },
+                  ]}
+                  index={0}
+                  onClose={() => setOpen(false)}
+                  onIndex={() => {}}
+                />
+              ) : null}
             </div>
           )}
           <p className="mt-6 text-xs text-muted-foreground">

@@ -3,6 +3,7 @@ import { CopyIcon, DownloadIcon, EllipsisIcon, PencilIcon, PinIcon, PinOffIcon, 
 import { toast } from 'sonner'
 import { CommandPalette } from '@/components/command-palette.tsx'
 import { ExpandCapsule } from '@/components/expand-capsule.tsx'
+import { ImageLightbox, type LightboxSlide } from '@/components/image-lightbox.tsx'
 import { SharePanel } from '@/components/share-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
@@ -119,6 +120,7 @@ export function ClipboardBoard({
   const [rows, setRows] = useState<UploadRow[]>([])
   const [dragOver, setDragOver] = useState(false)
   const [sending, setSending] = useState(false)
+  const [openId, setOpenId] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const seenAuth = useRef(0)
   const sendFilesRef = useRef<(files: File[]) => void>(() => {})
@@ -137,6 +139,23 @@ export function ClipboardBoard({
     const haystack = `${item.text ?? ''}\n${item.filename ?? ''}\n${(item.tags ?? []).join('\n')}`
     return haystack.toLowerCase().includes(needle)
   })
+  const slides: LightboxSlide[] = base
+    ? shown.flatMap((item) =>
+        item.hasThumbnail
+          ? [
+              {
+                key: item.id,
+                filename: item.filename?.trim() || '未命名图片',
+                byteSize: item.size,
+                thumbnailSrc: `${base}/items/${item.id}/thumbnail`,
+                previewSrc: `${base}/items/${item.id}/preview`,
+                downloadHref: `${base}/items/${item.id}/download`,
+              },
+            ]
+          : [],
+      )
+    : []
+  const openIndex = openId === null ? -1 : slides.findIndex((slide) => slide.key === openId)
   const roomUsed = usedBytes ?? channel.items.reduce((sum, item) => sum + item.size, 0)
 
   useEffect(() => {
@@ -538,11 +557,14 @@ export function ClipboardBoard({
               ) : (
                 <div>
                   {item.hasThumbnail ? (
-                    <img
-                      src={`${base}/items/${item.id}/thumbnail`}
-                      alt=""
-                      className="mb-2 max-h-80 max-w-full border border-foreground object-contain"
-                    />
+                    <button
+                      type="button"
+                      aria-label={`查看 ${item.filename?.trim() || '图片'}`}
+                      className="mb-2 block max-w-full border-0 bg-transparent p-0 text-left"
+                      onClick={() => setOpenId(item.id)}
+                    >
+                      <img src={`${base}/items/${item.id}/thumbnail`} alt="" className="max-h-80 max-w-full border border-foreground object-contain" />
+                    </button>
                   ) : mediaKind(item) === 'video' ? (
                     <video controls preload="metadata" src={`${base}/items/${item.id}/media`} className="mb-2 max-h-80 w-full bg-foreground" />
                   ) : mediaKind(item) === 'audio' ? (
@@ -720,6 +742,17 @@ export function ClipboardBoard({
           <p className="mt-2 text-xs text-muted-foreground">打开同一空间的设备会实时收到新条目。断线后会自动重连并补拉。Ctrl 或 ⌘ K 可搜索当前内容。</p>
         </div>
       </aside>
+      {openIndex >= 0 ? (
+        <ImageLightbox
+          slides={slides}
+          index={openIndex}
+          onClose={() => setOpenId(null)}
+          onIndex={(next) => {
+            const slide = slides[next]
+            if (slide) setOpenId(slide.key)
+          }}
+        />
+      ) : null}
       <CommandPalette
         items={visible}
         onJump={(id) => {
