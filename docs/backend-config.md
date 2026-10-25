@@ -1,7 +1,8 @@
 # Backend environment
 
 Load `.env` into the process using your process manager / Compose; the backend
-does not read a secrets file itself. `loadConfig()` validates settings at startup.
+does not read a secrets file itself. `loadConfig()` validates environment defaults
+at startup; persisted runtime overrides then take precedence.
 Run a single Node 22+ process. Local HTTP is supported; production requires HTTPS
 at `APP_ORIGIN` (typically terminated by a trusted reverse proxy).
 
@@ -42,3 +43,67 @@ are cryptographically random; session/invite/room secrets are stored only as has
 Use `pnpm --filter @dropit/server test` for mock OAuth, HTTP/SQLite/disk integration
 and actual WebSocket tests; `typecheck` and `build` validate server TypeScript.
 See [API contract](api.md) for exact frontend calls and event/reconnection semantics.
+
+## Runtime overrides and hard ceilings
+
+Admins can read/change/reset runtime limits using `/api/admin/limits`; audit
+history is at `/api/admin/limits/audit`. Both accept admin sessions/PATs, but
+read-only Bearers cannot PATCH. See [API contract](api.md#runtime-limit-policy)
+for payloads, cross-field rules, pagination and effective-time semantics.
+
+Precedence is **SQLite runtime override > environment default**. Removing an
+override (`null`) restores the environment default loaded at the current process
+startup. Changing the environment still requires a restart; existing overrides
+keep taking precedence. The API reports the current value, environment default,
+override state and bounds per key. No secret/path/OAuth/proxy setting is exposed.
+
+Migration v7 adds `runtime_limits` and append-only `limit_audit` to
+`DATA_DIR/dropit.sqlite`; audit rows and override changes share one transaction.
+Mount the same persistent data volume for process/container restarts and container
+recreation (the image uses `/data`, Compose uses the `dropit-data` volume).
+Back up the database together with its audit trail. Deleting the volume removes
+overrides, audits and content. Run one server process; overrides are held in memory
+after loading and this is not a multi-instance synchronization mechanism.
+
+All editable values are positive safe integers, with minimum 1. The following
+code-level ceilings apply to environment defaults **and** runtime overrides;
+they are fixed safeguards, not a measurement of available disk space. Operators
+must still provision enough disk and monitor usage. Cross-field constraints may
+make an individual ceiling unattainable (room limits stay strictly below user
+limits, sensitive rate limits strictly below general limits).
+
+| Runtime key | Environment default source | Hard maximum |
+| --- | --- | --- |
+| `maxFileBytes` | `MAX_FILE_BYTES` | 1 GiB (1073741824 bytes) |
+| `maxTextBytes` | `MAX_TEXT_BYTES` | 1 MiB (1048576 bytes) |
+| `maxItems` | `MAX_ITEMS` | 100000 |
+| `userQuotaBytes` | `USER_QUOTA_BYTES` | 100 GiB (107374182400 bytes) |
+| `retentionMs` | `RETENTION_HOURS` × 3600000 | 365 days (31536000000 ms) |
+| `roomQuotaBytes` | `ROOM_QUOTA_BYTES` | 100 GiB (107374182400 bytes) |
+| `roomMaxFileBytes` | `ROOM_MAX_FILE_BYTES` | 1 GiB (1073741824 bytes) |
+| `roomRetentionMs` | `ROOM_RETENTION_HOURS` × 3600000 | 24 hours (86400000 ms) |
+| `rateWindowMs` | `RATE_WINDOW_MS` | 1 hour (3600000 ms) |
+| `rateGeneral`, `rateAuth`, `rateInvite`, `rateUpload`, `rateRoom` | Corresponding `RATE_*` variable | 1000000 each |
+| `sessionMs` | `SESSION_HOURS` × 3600000 | 365 days (31536000000 ms) |
+
+Startup fails if environment defaults or the merged persisted configuration
+violate policy. In particular, changing environment defaults can conflict with
+an existing coupled override: restore the previous valid environment, then reset
+or update those overrides through the API before changing the environment again.
+Overrides are never silently discarded or clamped.
+
+Changes take effect for new requests without restarting. Decreasing file size,
+item count or quota does not remove existing content; existing per-user quotas
+still take priority over the installation default. A running upload retains its
+starting file-size cap but must pass current quotas/counts when committing.
+Retention changes only affect **new** entries/rooms: existing `expiresAt` values
+and cleanup schedules stay unchanged. Existing room expiry still bounds entries
+added to it. Session lifetime changes affect only new OAuth sessions, not current
+sessions or PATs. Rate threshold changes retain current counts; window changes
+retain active reset deadlines and apply the new duration to new buckets.
+
+Startup-only settings include `APP_ORIGIN`, `TRUST_PROXY`, `DATA_DIR`,
+`ADMIN_EMAILS`, OAuth credentials, `RATE_TOKEN`, ports, cleanup interval and all
+other settings outside the editable list. Any externally managed
+`SESSION_SECRET` also remains outside this API; the backend uses random
+server-stored opaque sessions and has no editable session signing secret.

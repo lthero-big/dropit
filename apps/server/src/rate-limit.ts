@@ -4,6 +4,8 @@ import type { Config } from './config.js';
 export class RateLimiter {
   private buckets = new Map<string, { count: number; reset: number }>();
   constructor(private windowMs: number) {}
+  // Active buckets retain counts and reset times; the new duration applies when they expire.
+  setWindow(windowMs: number) { this.windowMs = windowMs; }
   consume(key: string, limit: number, now: number): number | undefined {
     for (const [key, bucket] of this.buckets) if (bucket.reset <= now) this.buckets.delete(key);
     let bucket = this.buckets.get(key);

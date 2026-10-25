@@ -84,3 +84,15 @@ CREATE TABLE device_authorizations (
 CREATE INDEX device_expiry ON device_authorizations(expiresAt);
 PRAGMA user_version=6;
 `;
+
+// Both runtime overrides and their audit trail live alongside content in DATA_DIR.
+export const migration7 = `
+CREATE TABLE runtime_limits (key TEXT PRIMARY KEY, value INTEGER NOT NULL CHECK(value > 0));
+CREATE TABLE limit_audit (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ actorId TEXT NOT NULL REFERENCES users(id), actorEmail TEXT NOT NULL, createdAt INTEGER NOT NULL,
+ key TEXT NOT NULL, oldValue INTEGER NOT NULL, newValue INTEGER NOT NULL,
+ oldOverride INTEGER, newOverride INTEGER
+);
+PRAGMA user_version=7;
+`;

@@ -137,7 +137,9 @@ All paths here require an enabled admin, otherwise 401/403.
 | POST | `/admin/users` | `{email, name?: string, role?: 'admin' or 'user', quotaBytes?: number}` → 201, `User & {usedBytes, quotaBytes, quotaOverride}`. Pre-creates a pending account and its private space. No password and no invite token. The first later OAuth login whose **verified** email matches (case-insensitive) binds that identity, clears `pending`, and does not create a second user or space. A different provider subject with the same email is not linked and still needs an invite or admin bootstrap. Email must not already belong to any user (`409 EMAIL_IN_USE`). `ADMIN_EMAILS` matches are stored as `admin`. `quotaBytes` when omitted is the installation default (`quotaOverride: null`); when set, 1 byte through 100 GiB. |
 | PATCH | `/admin/users/:id` | At least one of `{disabled?: boolean, role?: 'admin'\|'user', name?: string, quotaBytes?: number\|null}` → 204. `quotaBytes: null` clears the override. Disabling immediately revokes every session/socket. Enabling requires a new login. Role and quota apply to the next request on existing sessions. The last enabled admin cannot be disabled or demoted (`409 LAST_ADMIN`). Email cannot be changed. |
 | POST | `/admin/users/:id/logout` | 204. Deletes every session for that user and closes their sockets. The account stays enabled; they can sign in again. Unknown id: `404`. |
-| GET | `/admin/limits` | Read-only installation limits from the environment: `{maxFileBytes, maxTextBytes, maxItems, userQuotaBytes, retentionMs, roomQuotaBytes, roomMaxFileBytes, roomRetentionMs, rateWindowMs, rateGeneral, rateAuth, rateInvite, rateUpload, rateRoom, sessionMs}`. There is no write API; change the environment and restart. |
+| GET | `/admin/limits` | `{key: {value, default, overridden, min, max}}` for each of the 15 runtime limits below. `default` is the environment-derived value at process startup; `overridden` means a SQLite override exists (even if equal to the default). |
+| PATCH | `/admin/limits` | Partial `{key: positiveInteger \| null}` → 200, same description map as GET. `null` removes that override. Requires an admin and browser Origin or a Bearer with `write` scope. The entire candidate is validated and all overrides/audit rows commit atomically. Empty objects, unknown/read-only keys, invalid types, ranges or cross-field policy → `400 INVALID_LIMITS`; no partial writes. |
+| GET | `/admin/limits/audit?limit=50&cursor=123` | `{entries: LimitAudit[], nextCursor: number \| null}`; newest first. `limit`: integer 1–100 (default 50); optional `cursor`: positive integer, exclusive audit id from the preceding page's `nextCursor`. Invalid pagination → `400 INVALID_INPUT`. Read-only admin Bearers may read limits and audits. |
 | GET | `/admin/invites` | `{invites: [Invite]}` (no secret token) |
 | POST | `/admin/invites` | `{spaceId, maxUses?: 1, expiresInHours?: 24}` → 201, `Invite & {token,url}`. Uses: 1–100; expiry: 1–720 hours. Admin must belong to target space. |
 | DELETE | `/admin/invites/:id` | 204; immediate revocation |
@@ -146,6 +148,54 @@ All paths here require an enabled admin, otherwise 401/403.
 The invitation token is returned only at creation; share the returned URL securely.
 Only its SHA-256 digest is stored. Expired/revoked invitation records may be removed
 by maintenance. There is no arbitrary member-join endpoint.
+
+### Runtime limit policy
+
+Editable keys are `maxFileBytes`, `maxTextBytes`, `maxItems`, `userQuotaBytes`,
+`retentionMs`, `roomQuotaBytes`, `roomMaxFileBytes`, `roomRetentionMs`,
+`rateWindowMs`, `rateGeneral`, `rateAuth`, `rateInvite`, `rateUpload`, `rateRoom`,
+and `sessionMs`. All durations use milliseconds and sizes use bytes. See
+[backend configuration](backend-config.md#runtime-overrides-and-hard-ceilings)
+for hard ceilings. `min`/`max` describe each key's absolute bounds; the complete
+effective configuration must also satisfy:
+
+- `roomMaxFileBytes < maxFileBytes`, `roomQuotaBytes < userQuotaBytes`.
+- `roomRetentionMs <= retentionMs` and `roomRetentionMs <= 86400000` (24 hours).
+- `rateAuth`, `rateInvite`, `rateUpload` each `< rateGeneral`; `rateRoom < rateUpload`.
+
+Coupled changes may be sent in one PATCH, e.g.
+`{"maxFileBytes":10485760,"roomMaxFileBytes":2097152}`. Resets are validated
+against the other effective values too; reset coupled keys together if needed.
+`{"maxFileBytes":null,"roomMaxFileBytes":null}` restores their environment defaults.
+Secrets, origin, proxy configuration, paths, OAuth credentials, `rateToken`, and
+all other startup settings cannot be changed or read through this API.
+
+`LimitAudit = {id, actorId, actorEmail, createdAt, key, oldValue, newValue,
+oldOverride: number|null, newOverride: number|null}`. `actorEmail` is captured at
+change time; ids are monotonic and `createdAt` is epoch milliseconds. Each changed
+override produces one row, including a reset or setting an explicit value equal
+to the default. Repeating the same override or resetting an unset key is a no-op
+and produces no row. Failed changes produce no rows. Audit pagination stays
+stable when newer changes arrive between pages.
+
+Successful changes apply immediately to subsequent requests, including `/me`,
+space/room metadata, validation, quotas and rate limits. An upload already in
+flight keeps its starting file-size limit; quota/item-count checks still use
+the effective configuration at commit. Lowering quotas/counts/file sizes does
+not delete existing content or block its download. Explicit per-user quotas
+remain authoritative over `userQuotaBytes`.
+
+Retention is assigned on creation: `retentionMs` affects new entries and
+`roomRetentionMs` affects new rooms. Existing entry/room `expiresAt` timestamps
+stay unchanged, including edits, pins and shares. Room entries are also bounded
+by their room's existing expiry. No content is retroactively extended/deleted.
+`sessionMs` affects only newly issued OAuth sessions/cookies, never existing
+sessions, PATs, device flows or share links.
+
+Rate thresholds use existing live counters immediately. A window-duration change
+keeps each active bucket's count and original reset time; newly created buckets
+use the new duration. Counters are not cleared by PATCH, even on no-ops/resets.
+Rate counts remain per-process and reset on process restart.
 
 ## Spaces, temporary rooms, entries
 
@@ -256,7 +306,8 @@ arbitrary URLs from text or the original file MIME.
 
 User quota counts all original text/file bytes **plus thumbnail bytes** uploaded
 by that user across spaces. The limit is that user's `quotaOverride` when set,
-otherwise `USER_QUOTA_BYTES` (also returned as `quotaBytes` on `GET /me`).
+otherwise the effective `userQuotaBytes` runtime limit (environment default
+`USER_QUOTA_BYTES`, also returned as `quotaBytes` on `GET /me`).
 Lowering a quota does not delete existing entries; further uploads and text
 edits that grow past the limit fail with `QUOTA_EXCEEDED` until usage drops
 below the new limit. Shrinking a text item is always allowed. Room quota counts all
@@ -323,7 +374,7 @@ and auth-start rate limits still use JSON.
 
 | HTTP | Codes / frontend action |
 | --- | --- |
-| 400 | `INVALID_INPUT`, `INVALID_JSON`, `JSON_REQUIRED`, `EMPTY_TEXT`, `EMPTY_FILE`, `UPLOAD_TIMEOUT`, `INVALID_FILENAME`, `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR` |
+| 400 | `INVALID_INPUT`, `INVALID_LIMITS`, `INVALID_JSON`, `JSON_REQUIRED`, `EMPTY_TEXT`, `EMPTY_FILE`, `UPLOAD_TIMEOUT`, `INVALID_FILENAME`, `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR` |
 | 401 | `UNAUTHENTICATED` → login |
 | 403 | `FORBIDDEN`, `ORIGIN_REJECTED`, `USER_DISABLED`, `INVITATION_REQUIRED`, `INVITE_INVALID`, `VERIFIED_EMAIL_REQUIRED` |
 | 403 | `INSUFFICIENT_SCOPE`, `BROWSER_SESSION_REQUIRED` for PATs |
