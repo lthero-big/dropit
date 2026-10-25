@@ -47,6 +47,7 @@ const labels: Record<string, string> = {
   INSUFFICIENT_SCOPE: '令牌权限不足',
   BROWSER_SESSION_REQUIRED: '需要在浏览器中登录后操作',
   UPLOAD_BUSY: '上传过于频繁',
+  UPLOAD_INCOMPLETE: '上传已中断',
   SOCKET_LIMIT: '连接数已达上限',
   INTERNAL_ERROR: '服务暂时不可用',
 }
@@ -97,35 +98,63 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T
 }
 
+export class UploadCancelled extends Error {
+  constructor() {
+    super('UPLOAD_CANCELLED')
+    this.name = 'UploadCancelled'
+  }
+}
+
+export function isUploadCancelled(error: unknown): boolean {
+  return error instanceof UploadCancelled
+}
+
 export function uploadFile(
   base: string,
   file: File,
   onProgress: (ratio: number) => void,
+  signal?: AbortSignal,
 ): Promise<{ item: Item }> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new UploadCancelled())
+      return
+    }
     const xhr = new XMLHttpRequest()
+    let settled = false
+    const finish = (run: () => void) => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener('abort', onAbort)
+      run()
+    }
+    const onAbort = () => xhr.abort()
+    signal?.addEventListener('abort', onAbort, { once: true })
     xhr.open('POST', `${base}/items/file`)
     xhr.withCredentials = true
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
     xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name || 'clipboard'))
     xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) onProgress(event.loaded / event.total)
+      if (event.lengthComputable && event.total > 0) onProgress(event.loaded / event.total)
     }
     xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(JSON.parse(xhr.responseText) as { item: Item })
-        return
-      }
-      let code = 'INTERNAL_ERROR'
-      try {
-        code = (JSON.parse(xhr.responseText) as { error?: { code?: string } }).error?.code ?? code
-      } catch {
-        // Keep the fallback code.
-      }
-      const retry = xhr.getResponseHeader('Retry-After')
-      reject(new ApiError(xhr.status, code, retry && /^\d+$/.test(retry) ? Number(retry) : null))
+      finish(() => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.responseText) as { item: Item })
+          return
+        }
+        let code = 'INTERNAL_ERROR'
+        try {
+          code = (JSON.parse(xhr.responseText) as { error?: { code?: string } }).error?.code ?? code
+        } catch {
+          // Keep the fallback code.
+        }
+        const retry = xhr.getResponseHeader('Retry-After')
+        reject(new ApiError(xhr.status, code, retry && /^\d+$/.test(retry) ? Number(retry) : null))
+      })
     }
-    xhr.onerror = () => reject(new ApiError(0, 'INTERNAL_ERROR', null))
+    xhr.onerror = () => finish(() => reject(new ApiError(0, 'INTERNAL_ERROR', null)))
+    xhr.onabort = () => finish(() => reject(new UploadCancelled()))
     xhr.send(file)
   })
 }

@@ -1,5 +1,4 @@
 import { hostname } from 'node:os';
-import { basename } from 'node:path';
 import { Readable } from 'node:stream';
 import { parseArgs, usageText, type Globals, type Parsed } from './args.js';
 import { Client, type Target } from './client.js';
@@ -9,7 +8,10 @@ import { runItemCommand } from './exec.js';
 import { latestItem, pickSpace, type Item } from './items.js';
 import { deviceLogin } from './login.js';
 import { destination, existingSize, prepareDirectory, saveStream, withoutControls } from './paths.js';
+import { createPushWriter, pushFiles } from './push.js';
 import { watchLoop } from './watch.js';
+
+export { formatProgress } from './push.js';
 
 export interface Io {
   stdout: NodeJS.WritableStream;
@@ -44,11 +46,6 @@ function report(io: Io, json: boolean, error: unknown, secrets: readonly string[
   if (json) io.stderr.write(`${JSON.stringify({ error: { code: cli.code, message } })}\n`);
   else io.stderr.write(`dropit: ${message}\n`);
   return cli.exitCode;
-}
-
-export function formatProgress(label: string, sent: number, total: number): string {
-  const pct = total > 0 ? Math.min(100, Math.floor((sent * 100) / total)) : 0;
-  return `${label} ${String(pct).padStart(3, ' ')}%  ${sent}/${total}`;
 }
 
 export function parseRoomToken(input: string): string {
@@ -219,22 +216,22 @@ async function dispatch(parsed: Parsed, env: NodeJS.ProcessEnv, io: Io, secrets:
     return;
   }
   if (command.kind === 'push') {
-    const items: Item[] = [];
-    for (const filePath of command.files) {
-      let open = false;
-      const onProgress = io.stderrIsTTY ? (sent: number, total: number) => {
-        io.stderr.write(`\r${formatProgress(basename(filePath), sent, total)}`);
-        open = sent < total;
-        if (!open) io.stderr.write('\n');
-      } : undefined;
-      try {
-        items.push(await client.upload(target, filePath, onProgress));
-      } catch (error) {
-        if (open) io.stderr.write('\n');
-        throw error;
-      }
+    const controller = new AbortController();
+    const onSigint = () => controller.abort();
+    process.on('SIGINT', onSigint);
+    try {
+      const result = await pushFiles({
+        files: command.files,
+        signal: controller.signal,
+        onEvent: createPushWriter(io),
+        upload: (file, onProgress, signal) => client.upload(target, file, onProgress, signal),
+      });
+      if (result.items.length) emit(io, json, { items: result.items }, result.items.map(item => `${item.id}\t${item.filename ?? ''}`).join('\n'));
+      if (controller.signal.aborted || result.cancelled) throw new CliError('INTERRUPTED', '已取消上传', 130);
+      if (result.failed) throw new CliError('UPLOAD_FAILED', result.errors[0] ?? `${result.failed} 个文件上传失败`);
+    } finally {
+      process.off('SIGINT', onSigint);
     }
-    emit(io, json, { items }, items.map(item => `${item.id}\t${item.filename ?? ''}`).join('\n'));
     return;
   }
   if (command.kind === 'ls') {

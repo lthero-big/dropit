@@ -522,8 +522,10 @@ export function createBackend(options: BackendOptions = {}) {
       const space = scope(c);
       limit(c, space.roomHash ? 'room-write' : 'upload', space.roomHash ? config.rateRoom : config.rateUpload);
       const max = space.roomHash ? config.roomMaxFileBytes : config.maxFileBytes;
-      const length = Number(c.req.header('content-length'));
+      const rawLength = c.req.header('content-length');
+      const length = rawLength == null || rawLength === '' ? NaN : Number(rawLength);
       if (Number.isFinite(length) && length > max) throw new ApiError(413, 'FILE_TOO_LARGE');
+      const expected = Number.isInteger(length) && length >= 0 ? length : undefined;
       let filename: string;
       try { filename = decodeURIComponent(c.req.header('x-file-name') ?? 'download'); }
       catch { throw new ApiError(400, 'INVALID_FILENAME'); }
@@ -531,7 +533,7 @@ export function createBackend(options: BackendOptions = {}) {
       const mime = (c.req.header('content-type') ?? 'application/octet-stream').split(';')[0].trim().toLowerCase();
       if (mime.length > 200) throw new ApiError(400, 'INVALID_INPUT');
       if (!c.req.raw.body) throw new ApiError(400, 'EMPTY_FILE');
-      return c.json({ item: await service.upload(space, c.get('session'), c.req.raw.body, filename, mime) }, 201);
+      return c.json({ item: await service.upload(space, c.get('session'), c.req.raw.body, filename, mime, expected) }, 201);
     });
     app.patch(`${base}/items/:id/labels`, async c => {
       const space = scope(c);

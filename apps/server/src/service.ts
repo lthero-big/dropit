@@ -189,7 +189,7 @@ export class ClipboardService {
       return result;
     } finally { --this.activePreviews; }
   }
-  async upload(space: Space, session: Session | undefined, body: ReadableStream<Uint8Array>, filename: string, mime: string) {
+  async upload(space: Space, session: Session | undefined, body: ReadableStream<Uint8Array>, filename: string, mime: string, expectedSize?: number) {
     if (this.activeUploads >= 4) throw new ApiError(429, 'UPLOAD_BUSY');
     ++this.activeUploads;
     let fileKey: string | undefined;
@@ -198,6 +198,7 @@ export class ClipboardService {
       const limit = space.roomHash ? this.config.roomMaxFileBytes : this.config.maxFileBytes;
       const saved = await this.files.write(body, limit);
       fileKey = saved.key;
+      if (expectedSize != null && saved.size !== expectedSize) throw new ApiError(400, 'UPLOAD_INCOMPLETE');
       let thumbnailSize = 0;
       if (['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/avif'].includes(mime)) {
         const thumbnail = await this.raster(fileKey, 320);

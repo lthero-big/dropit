@@ -592,3 +592,25 @@ test('push draws a progress line on a stderr TTY', async () => {
   await rm(dir, { recursive: true, force: true });
   await rm(work, { recursive: true, force: true });
 });
+
+test('push prints one non-TTY status line per file and still lists both successes', async () => {
+  const dir = await home();
+  const work = await mkdtemp(join(tmpdir(), 'dropit-cli-push-lines-'));
+  const env = cliEnv(dir, { DROPIT_TOKEN: token });
+  const first = join(work, 'alpha.bin');
+  const second = join(work, 'beta.bin');
+  await writeFile(first, Buffer.from('alpha'));
+  await writeFile(second, Buffer.from('beta'));
+  const pushed = await run(['push', first, second], env);
+  assert.equal(pushed.code, 0, redact(pushed.stderr));
+  assert.equal(pushed.stderr.includes('排队 alpha.bin'), true);
+  assert.equal(pushed.stderr.includes('排队 beta.bin'), true);
+  assert.equal(pushed.stderr.includes('上传 alpha.bin'), true);
+  assert.equal(pushed.stderr.includes('上传 beta.bin'), true);
+  assert.equal(pushed.stderr.includes('完成 alpha.bin'), true);
+  assert.equal(pushed.stderr.includes('完成 beta.bin'), true);
+  const lines = pushed.stdout.trim().split('\n');
+  assert.deepEqual(lines.map((line) => line.split('\t')[1]).sort(), ['alpha.bin', 'beta.bin']);
+  await rm(dir, { recursive: true, force: true });
+  await rm(work, { recursive: true, force: true });
+});

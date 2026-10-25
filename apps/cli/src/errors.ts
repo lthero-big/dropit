@@ -1,5 +1,6 @@
 export class CliError extends Error {
   readonly fatal: boolean;
+  retryAfter: number | null = null;
   constructor(readonly code: string, message: string, readonly exitCode = 1, fatal = false) {
     super(message);
     this.name = 'CliError';
