@@ -76,6 +76,23 @@ function queueFrames() {
 }
 
 describe('ExpandCapsule', () => {
+  it('collapses to a 40×40 icon button with a label and springs open', () => {
+    const frames = queueFrames()
+    renderCapsule()
+    const trigger = screen.getByRole('button', { name: '更多' })
+    expect(pill().style.width).toBe('40px')
+    expect(pill().style.height).toBe('40px')
+    expect(trigger.getAttribute('aria-label')).toBe('更多')
+    expect(trigger.getAttribute('title')).toBe('更多')
+    expect(trigger.textContent ?? '').not.toContain('更多')
+    mockWidths(160)
+    fireEvent.click(trigger, { detail: 1 })
+    frames.drain()
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+    expect(parseFloat(pill().style.width)).toBeGreaterThan(40)
+    expect(screen.getByRole('button', { name: '动作1' })).toBeTruthy()
+  })
+
   it('opens on click, closes on Escape, and restores focus', () => {
     renderCapsule()
     const trigger = screen.getByRole('button', { name: '更多' })

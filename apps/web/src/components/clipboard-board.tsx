@@ -20,9 +20,12 @@ function filesFromList(list: FileList | File[] | null | undefined): File[] {
 
 const iconButtonClass =
   'inline-flex size-10 shrink-0 items-center justify-center border-2 border-foreground bg-background text-foreground hover:bg-foreground hover:text-background'
+const confirmButtonClass =
+  'inline-flex h-10 min-w-10 shrink-0 items-center justify-center gap-1 border-2 border-primary bg-primary px-2 text-xs font-extrabold tracking-wider text-primary-foreground hover:bg-primary/80'
 const capsuleIconClass =
   'inline-flex size-10 shrink-0 items-center justify-center bg-transparent text-foreground hover:bg-foreground hover:text-background'
 const touchTarget = { minWidth: 40, minHeight: 40 }
+const RETRACT_MS = 3000
 
 function IconAction({
   label,
@@ -43,11 +46,13 @@ function IconAction({
       title={label}
       aria-label={label}
       aria-expanded={expanded}
+      data-retract={confirm ? 'confirm' : undefined}
       onClick={onClick}
-      className={confirm ? `${iconButtonClass} border-primary bg-primary text-primary-foreground hover:bg-primary/80` : iconButtonClass}
+      className={confirm ? confirmButtonClass : iconButtonClass}
       style={touchTarget}
     >
       {children}
+      {confirm ? <span>确认</span> : null}
     </button>
   )
 }
@@ -110,6 +115,7 @@ export function ClipboardBoard({
   const [draft, setDraft] = useState('')
   const [query, setQuery] = useState('')
   const [pending, setPending] = useState<string | null>(null)
+  const pendingRef = useRef<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
@@ -342,21 +348,62 @@ export function ClipboardBoard({
     }
   }
 
+  function clearPending() {
+    pendingRef.current = null
+    setPending(null)
+  }
+
+  function armPending(id: string) {
+    pendingRef.current = id
+    setPending(id)
+  }
+
+  useEffect(() => {
+    if (!pending) return
+    const timer = window.setTimeout(() => {
+      if (pendingRef.current !== pending) return
+      clearPending()
+    }, RETRACT_MS)
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target
+      const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null
+      if (element?.closest('[data-retract="confirm"]')) return
+      clearPending()
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      clearPending()
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.clearTimeout(timer)
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [pending])
+
   async function retract(item: Item) {
     if (!base) return
-    if (pending !== item.id) {
-      setPending(item.id)
+    if (pendingRef.current !== item.id) {
+      armPending(item.id)
       return
     }
+    clearPending()
     try {
       await api(`${base}/items/${item.id}`, { method: 'DELETE' })
       channel.remove(item.id)
-      setPending(null)
       onActivity?.()
       toast.success('已撤回')
     } catch (error) {
       toast.error(errorText(error))
     }
+  }
+
+  function copyValue(item: Item): string {
+    if (item.kind === 'text') return item.text ?? ''
+    if (!base) return ''
+    return new URL(`${base}/items/${item.id}/download`, window.location.origin).href
   }
 
   const ratio = quotaBytes > 0 ? Math.min(100, Math.round((roomUsed / quotaBytes) * 100)) : 0
@@ -519,7 +566,7 @@ export function ClipboardBoard({
         ) : null}
         <ul>
           {shown.map((item) => (
-            <li id={`clip-${item.id}`} tabIndex={-1} key={item.id} className="border-b border-foreground px-3 py-4 hover:shadow-[inset_0_0_0_2px_var(--primary)]">
+            <li id={`clip-${item.id}`} tabIndex={-1} key={item.id} data-interactive-card="" className="border-b border-foreground px-3 py-4">
               <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
                 <span className="bg-foreground px-2 py-0.5 font-extrabold tracking-wider text-background uppercase">{sender(item)}</span>
                 <span className="text-muted-foreground">{formatWhen(item.createdAt, now)}</span>
@@ -579,11 +626,11 @@ export function ClipboardBoard({
                 </div>
               )}
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                {item.kind === 'text' ? (
+                {item.kind === 'text' || item.kind === 'file' ? (
                   <IconAction
                     label="复制"
                     onClick={() => {
-                      void copyText(item.text ?? '').then(() => toast.success('已复制'))
+                      void copyText(copyValue(item)).then(() => toast.success('已复制'))
                     }}
                   >
                     <CopyIcon className="size-5" aria-hidden="true" />
@@ -595,7 +642,7 @@ export function ClipboardBoard({
                     expanded={shareFor === item.id}
                     onClick={() => {
                       setShareFor((current) => (current === item.id ? null : item.id))
-                      setPending(null)
+                      clearPending()
                     }}
                   >
                     <Share2Icon className="size-5" aria-hidden="true" />
@@ -607,7 +654,7 @@ export function ClipboardBoard({
                   </IconAction>
                 ) : null}
                 {(canEdit(item) && editing !== item.id) || item.kind === 'file' || canShare(item) ? (
-                  <ExpandCapsule label="更多" icon={<EllipsisIcon className="size-4" aria-hidden="true" />}>
+                  <ExpandCapsule label="更多" icon={<EllipsisIcon className="size-5" aria-hidden="true" />}>
                     {canEdit(item) && editing !== item.id ? (
                       <button
                         type="button"
@@ -618,7 +665,7 @@ export function ClipboardBoard({
                         onClick={() => {
                           setEditing(item.id)
                           setEditDraft(item.text ?? '')
-                          setPending(null)
+                          clearPending()
                         }}
                       >
                         <PencilIcon className="size-5" aria-hidden="true" />

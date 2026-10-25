@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 const ACTION = 40
 const PAD = 8
 const BORDER = 4
+const OPEN_ROW = 48
 const FADE_MS = 90
 const ENTER_MS = 200
 const ENTER_DELAY_MS = 100
@@ -13,8 +14,8 @@ export function ExpandCapsule({
   children,
   stiffness = 300,
   damping = 25,
-  collapsedWidth = 120,
-  height = 48,
+  collapsedWidth = 40,
+  height = 40,
   className,
 }: {
   label: string
@@ -106,7 +107,8 @@ export function ExpandCapsule({
     const natural = content + BORDER
     const parentWidth = pillRef.current?.parentElement?.clientWidth ?? 0
     const limit = parentWidth > 0 ? parentWidth : Number.POSITIVE_INFINITY
-    if (natural <= limit) return { width: natural, height, wrap: false, vertical: false, count }
+    const openHeight = Math.max(height, OPEN_ROW)
+    if (natural <= limit) return { width: natural, height: openHeight, wrap: false, vertical: false, count }
     if (limit < ACTION + PAD + BORDER) {
       return {
         width: Math.min(height, limit),
@@ -355,7 +357,7 @@ export function ExpandCapsule({
       <button
         ref={triggerRef}
         type="button"
-        className="absolute inset-0 flex cursor-pointer items-center justify-center gap-2 border-0 bg-transparent px-2 text-sm font-extrabold tracking-wide text-foreground hover:bg-foreground hover:text-background"
+        className="absolute inset-0 flex cursor-pointer items-center justify-center border-0 bg-transparent text-foreground hover:bg-foreground hover:text-background"
         aria-expanded={expanded}
         aria-label={label}
         title={label}
@@ -366,7 +368,6 @@ export function ExpandCapsule({
         }}
       >
         {icon}
-        <span>{label}</span>
       </button>
       <div
         ref={setActs}
