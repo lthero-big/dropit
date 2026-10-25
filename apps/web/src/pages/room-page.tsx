@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toDataURL } from 'qrcode'
 import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
@@ -18,6 +18,9 @@ export function RoomPage() {
   const [missing, setMissing] = useState(false)
   const [connection, setConnection] = useState<ConnectionStatus>('idle')
   const [qr, setQr] = useState<string | null>(null)
+  const [qrOpen, setQrOpen] = useState(false)
+  const [qrLarge, setQrLarge] = useState(false)
+  const qrRootRef = useRef<HTMLDivElement>(null)
   const shareUrl = `${window.location.origin}/rooms/${token}`
 
   useEffect(() => {
@@ -41,7 +44,7 @@ export function RoomPage() {
   useEffect(() => {
     let cancelled = false
     setQr(null)
-    void toDataURL(shareUrl, { margin: 1, width: 192, errorCorrectionLevel: 'M' })
+    void toDataURL(shareUrl, { margin: 1, width: 384, errorCorrectionLevel: 'M' })
       .then((url) => {
         if (!cancelled) setQr(url)
       })
@@ -55,6 +58,28 @@ export function RoomPage() {
 
   const onStatus = useCallback((next: ConnectionStatus) => setConnection(next), [])
   const onAuthLost = useCallback(() => setMissing(true), [])
+
+  useEffect(() => {
+    if (!qrOpen) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setQrOpen(false)
+        setQrLarge(false)
+      }
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      const root = qrRootRef.current
+      if (root && event.target instanceof Node && root.contains(event.target)) return
+      setQrOpen(false)
+      setQrLarge(false)
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [qrOpen])
 
   async function createAnother() {
     try {
@@ -81,7 +106,7 @@ export function RoomPage() {
     <Shell connection={connection}>
       {scope ? (
         <>
-          <div className="mb-4 flex flex-wrap items-center gap-2 border border-foreground p-3">
+          <div ref={qrRootRef} className="relative mb-4 flex flex-wrap items-center gap-2 border border-foreground px-3 py-2">
             <code className="min-w-0 flex-1 truncate text-sm">{shareUrl}</code>
             <Button
               type="button"
@@ -96,8 +121,50 @@ export function RoomPage() {
             <Button type="button" variant="outline" size="sm" onClick={() => void createAnother()}>
               新建房间
             </Button>
-            {qr ? (
-              <img src={qr} alt="房间二维码" width={96} height={96} className="border border-foreground bg-white p-1" />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-expanded={qrOpen}
+              aria-label="二维码"
+              title="二维码"
+              className="ml-auto"
+              onClick={() => {
+                setQrOpen((open) => !open)
+                setQrLarge(false)
+              }}
+            >
+              二维码
+            </Button>
+            {qrOpen ? (
+              <div role="dialog" aria-label="房间二维码" className="absolute top-full right-0 z-30 mt-2 border-2 border-foreground bg-card p-3">
+                {qr ? (
+                  <img
+                    src={qr}
+                    alt="房间二维码"
+                    width={qrLarge ? 192 : 96}
+                    height={qrLarge ? 192 : 96}
+                    className="border border-foreground bg-white p-1"
+                  />
+                ) : (
+                  <p className="text-xs text-muted-foreground">正在生成二维码…</p>
+                )}
+                <div className="mt-2 flex gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={() => setQrLarge((large) => !large)} disabled={!qr}>
+                    {qrLarge ? '还原' : '放大'}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      void copyText(shareUrl).then(() => toast.success('链接已复制'))
+                    }}
+                  >
+                    复制链接
+                  </Button>
+                </div>
+              </div>
             ) : null}
           </div>
           <ClipboardBoard

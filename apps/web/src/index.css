@@ -131,6 +131,29 @@
     outline: 2px solid var(--ring);
     outline-offset: 2px;
     }
+  /* One press treatment for every control. Utilities still win on hover color. */
+  :where(button, a[href], summary, [role="button"], [role="menuitem"], [data-pressable]) {
+    transition-property: background-color, color, border-color, box-shadow, opacity, transform;
+    transition-duration: 150ms;
+    transition-timing-function: ease;
+    }
+  :where(button, a[href], summary, [role="button"], [role="menuitem"], [data-pressable]):hover {
+    background-color: color-mix(in srgb, var(--foreground) 8%, transparent);
+    }
+  :where(button:not(:disabled), a[href], summary, [role="button"]:not([aria-disabled="true"]), [role="menuitem"]:not([aria-disabled="true"]), [data-pressable]):active {
+    transform: scale(0.97);
+    }
+  :where([data-interactive-card]) {
+    transition-property: background-color, border-color, box-shadow, transform;
+    transition-duration: 150ms;
+    transition-timing-function: ease;
+    }
+  :where([data-interactive-card]):hover {
+    box-shadow: inset 0 0 0 2px var(--primary);
+    }
+  :where([data-interactive-card][data-pressable]):active {
+    transform: scale(0.97);
+    }
 }
 
 .lightbox-safe {
@@ -146,5 +169,8 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+    }
+  :where(button, a[href], summary, [role="button"], [role="menuitem"], [data-pressable], [data-interactive-card]):active {
+    transform: none !important;
     }
 }

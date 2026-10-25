@@ -17,7 +17,7 @@ const ZOOM_STEP = 0.5
 const SWIPE_CLOSE_PX = 96
 const CHROME_FG = '#f5f5f5'
 const CHROME_BG = '#0a0a0a'
-const BLUR_BG = 'rgba(10, 10, 10, 0.62)'
+const BLUR_BG = 'rgba(10, 10, 10, 0.45)'
 const SOLID_BG = 'rgba(10, 10, 10, 0.94)'
 
 type Point = { x: number; y: number }
@@ -87,11 +87,22 @@ function distance(a: Point, b: Point): number {
   return Math.hypot(a.x - b.x, a.y - b.y)
 }
 
-function edgeStyle(edge: 'top' | 'bottom'): CSSProperties {
-  const mask = edge === 'top' ? 'linear-gradient(to bottom, #000 0%, transparent 100%)' : 'linear-gradient(to top, #000 0%, transparent 100%)'
+const PROGRESSIVE_LAYERS = [
+  { blur: 4, stop: 100 },
+  { blur: 10, stop: 78 },
+  { blur: 18, stop: 56 },
+  { blur: 32, stop: 34 },
+  { blur: 48, stop: 16 },
+] as const
+
+function layerStyle(edge: 'top' | 'bottom', blur: number, stop: number): CSSProperties {
+  const mask =
+    edge === 'top'
+      ? `linear-gradient(to bottom, #000 0%, transparent ${stop}%)`
+      : `linear-gradient(to top, #000 0%, transparent ${stop}%)`
   return {
-    backdropFilter: 'blur(16px)',
-    WebkitBackdropFilter: 'blur(16px)',
+    backdropFilter: `blur(${blur}px)`,
+    WebkitBackdropFilter: `blur(${blur}px)`,
     maskImage: mask,
     WebkitMaskImage: mask,
   }
@@ -321,8 +332,8 @@ export function ImageLightbox({
 
   const backdropStyle: CSSProperties = {
     backgroundColor: backdrop.blur ? BLUR_BG : SOLID_BG,
-    backdropFilter: backdrop.blur ? 'blur(8px)' : 'none',
-    WebkitBackdropFilter: backdrop.blur ? 'blur(8px)' : 'none',
+    backdropFilter: backdrop.blur ? 'blur(2px)' : 'none',
+    WebkitBackdropFilter: backdrop.blur ? 'blur(2px)' : 'none',
     transition: backdrop.transition,
   }
   const multiple = slides.length > 1
@@ -342,8 +353,23 @@ export function ImageLightbox({
       <div data-testid="lightbox-backdrop" className="absolute inset-0" style={backdropStyle} onClick={onClose} />
       {backdrop.blur ? (
         <>
-          <div data-progressive-blur="top" aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 z-10 h-16" style={edgeStyle('top')} />
-          <div data-progressive-blur="bottom" aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-16" style={edgeStyle('bottom')} />
+          {(['top', 'bottom'] as const).map((edge) => (
+            <div
+              key={edge}
+              data-progressive-blur={edge}
+              aria-hidden="true"
+              className={`pointer-events-none absolute inset-x-0 z-10 h-[40%] ${edge === 'top' ? 'top-0' : 'bottom-0'}`}
+            >
+              {PROGRESSIVE_LAYERS.map((layer) => (
+                <div
+                  key={layer.blur}
+                  data-progressive-blur-layer={edge}
+                  className="absolute inset-0"
+                  style={layerStyle(edge, layer.blur, layer.stop)}
+                />
+              ))}
+            </div>
+          ))}
         </>
       ) : null}
       <div className="pointer-events-none relative z-20 flex h-full min-h-0 flex-col">
