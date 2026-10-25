@@ -104,6 +104,7 @@ function renderBoard(upload: typeof uploadFile, maxFileBytes = 500) {
       canRetract={() => false}
       canShare={() => false}
       upload={upload}
+      chunkBytes={8 * 1024 * 1024}
     />,
   )
 }
@@ -127,6 +128,8 @@ function rowFor(name: string) {
 
 beforeEach(() => {
   FakeSocket.instances = []
+  localStorage.removeItem('dropit-chunk-bytes')
+  localStorage.removeItem('dropit-upload-sessions')
   vi.stubGlobal('WebSocket', FakeSocket)
   window.WebSocket = FakeSocket as unknown as typeof WebSocket
 })
@@ -262,5 +265,49 @@ describe('upload queue', () => {
     const leaving = new Event('beforeunload', { cancelable: true })
     window.dispatchEvent(leaving)
     expect(leaving.defaultPrevented).toBe(true)
+  })
+
+  it('shows 处理中 after the bytes are sent, and speed with remaining time while uploading', () => {
+    const gate = holdUpload()
+    renderBoard(gate.upload, 8 * 1024 * 1024)
+    choose([namedFile('movie.bin', 1024 * 1024)])
+    act(() => gate.held[0]?.progress(1))
+    const processing = rowFor('movie.bin')
+    expect(processing.textContent).toContain('处理中…')
+    expect(processing.getAttribute('data-upload-status')).toBe('processing')
+    expect(screen.getByRole('progressbar', { name: 'movie.bin' }).getAttribute('aria-valuetext')).toBe('处理中')
+    expect(screen.queryByRole('button', { name: '暂停 movie.bin' })).toBeNull()
+    expect(screen.getByRole('button', { name: '取消 movie.bin' })).toBeTruthy()
+
+    cleanup()
+    let now = 1_000
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const speed = holdUpload()
+    renderBoard(speed.upload, 8 * 1024 * 1024)
+    choose([namedFile('movie.bin', 1024 * 1024)])
+    act(() => speed.held[0]?.progress(0))
+    now = 2_000
+    act(() => speed.held[0]?.progress(0.5))
+    const row = rowFor('movie.bin')
+    expect(row.textContent).toContain('上传中')
+    expect(row.textContent).toContain('0.5 MB/s')
+    expect(row.textContent).toContain('剩余 1 秒')
+  })
+
+  it('pauses an upload and continues it without losing the row', async () => {
+    const gate = holdUpload()
+    renderBoard(gate.upload)
+    choose([namedFile('notes.txt')])
+    fireEvent.click(screen.getByRole('button', { name: '暂停 notes.txt' }))
+    fireEvent.click(screen.getByRole('button', { name: '继续 notes.txt' }))
+    await act(async () => {})
+    expect(rowFor('notes.txt').textContent).toContain('上传中')
+    expect(gate.held).toHaveLength(2)
+    expect(gate.held[1]?.signal.aborted).toBe(false)
+    await act(async () => {
+      gate.held[1]?.succeed()
+    })
+    expect(rowFor('notes.txt').textContent).toContain('完成')
+    expect(document.getElementById('clip-item-notes.txt')).not.toBeNull()
   })
 })
