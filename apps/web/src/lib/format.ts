@@ -9,6 +9,13 @@ export const connectionText: Record<ConnectionStatus, string> = {
   stopped: '已断开',
 }
 
+export function quotaTone(used: number, quota: number): 'ok' | 'warn' | 'over' {
+  if (quota <= 0) return 'ok'
+  if (used > quota) return 'over'
+  if (used / quota >= 0.8) return 'warn'
+  return 'ok'
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`

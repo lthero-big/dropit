@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { CopyIcon, DownloadIcon, EllipsisIcon, PencilIcon, PinIcon, PinOffIcon, Share2Icon, TagIcon, Undo2Icon } from 'lucide-react'
+import { CopyIcon, DownloadIcon, EllipsisIcon, LayoutGridIcon, ListIcon, PencilIcon, PinIcon, PinOffIcon, Share2Icon, TagIcon, Undo2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 import { CommandPalette } from '@/components/command-palette.tsx'
 import { ExpandCapsule } from '@/components/expand-capsule.tsx'
@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
 import { useChannel } from '@/lib/channel.ts'
 import { createUploadQueue, type UploadQueue, type UploadRow } from '@/lib/upload-queue.ts'
-import { connectionText, copyText, formatBytes, formatRemain, formatWhen, useClock, utf8Size } from '@/lib/format.ts'
+import { copyText, formatBytes, formatRemain, formatWhen, quotaTone, useClock, utf8Size } from '@/lib/format.ts'
 import { MarkdownText } from '@/lib/markdown.tsx'
 import { mediaKind } from '@/lib/media.ts'
 import type { ConnectionStatus, Item } from '@/lib/types.ts'
@@ -71,6 +71,26 @@ function extension(name: string): string {
   return name.slice(dot + 1, dot + 5).toUpperCase()
 }
 
+const layoutKey = 'dropit-layout'
+type BoardLayout = 'grid' | 'list'
+
+function readLayout(): BoardLayout {
+  try {
+    return localStorage.getItem(layoutKey) === 'list' ? 'list' : 'grid'
+  } catch {
+    return 'grid'
+  }
+}
+
+function plainLines(text: string): string[] {
+  return text.split('\n')
+}
+
+function textOverflows(text: string): boolean {
+  const lines = plainLines(text)
+  return lines.length > 6 || lines.some((line) => line.length > 42)
+}
+
 export function ClipboardBoard({
   base,
   title,
@@ -127,6 +147,8 @@ export function ClipboardBoard({
   const [dragOver, setDragOver] = useState(false)
   const [sending, setSending] = useState(false)
   const [openId, setOpenId] = useState<string | null>(null)
+  const [layout, setLayout] = useState<BoardLayout>(readLayout)
+  const [expandedText, setExpandedText] = useState<Record<string, boolean>>({})
   const fileRef = useRef<HTMLInputElement>(null)
   const seenAuth = useRef(0)
   const sendFilesRef = useRef<(files: File[]) => void>(() => {})
@@ -163,6 +185,7 @@ export function ClipboardBoard({
     : []
   const openIndex = openId === null ? -1 : slides.findIndex((slide) => slide.key === openId)
   const roomUsed = usedBytes ?? channel.items.reduce((sum, item) => sum + item.size, 0)
+  const grid = layout === 'grid'
 
   useEffect(() => {
     onStatus?.(channel.status)
@@ -407,16 +430,71 @@ export function ClipboardBoard({
   }
 
   const ratio = quotaBytes > 0 ? Math.min(100, Math.round((roomUsed / quotaBytes) * 100)) : 0
+  const tone = quotaTone(roomUsed, quotaBytes)
+  const quotaBar = tone === 'over' ? 'bg-destructive' : tone === 'warn' ? 'bg-[#b45309]' : 'bg-primary'
+
+  function chooseLayout(next: BoardLayout) {
+    setLayout(next)
+    try {
+      localStorage.setItem(layoutKey, next)
+    } catch {
+      // Ignore persistence failures.
+    }
+  }
 
   return (
-    <section className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
+    <section>
       <div>
         <header className="mb-6 border-b-2 border-foreground pb-3">
-          <h1 className="border-l-[14px] border-primary pl-4 text-4xl font-black tracking-tight md:text-[56px] md:leading-none">{title}</h1>
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <h1 className="border-l-[14px] border-primary pl-4 text-4xl font-black tracking-tight md:text-[56px] md:leading-none">{title}</h1>
+            <span className="inline-flex items-center gap-2">
+              <span
+                className="inline-flex min-h-10 items-center gap-1.5 border border-foreground px-2 text-xs font-extrabold"
+                tabIndex={0}
+                role="status"
+                title={`${channel.devices} 台设备在线`}
+                aria-label={`${channel.devices} 台设备在线`}
+              >
+                <span className={`size-2 ${channel.status === 'live' ? 'bg-primary' : 'bg-muted-foreground'}`} aria-hidden="true" />
+                {channel.devices}
+              </span>
+              <span className="inline-flex border-2 border-foreground" role="group" aria-label="布局">
+                <button
+                  type="button"
+                  aria-pressed={layout === 'grid'}
+                  aria-label="网格"
+                  title="网格"
+                  className={`inline-flex size-10 items-center justify-center ${layout === 'grid' ? 'bg-foreground text-background' : 'bg-background'}`}
+                  onClick={() => chooseLayout('grid')}
+                >
+                  <LayoutGridIcon className="size-4" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={layout === 'list'}
+                  aria-label="列表"
+                  title="列表"
+                  className={`inline-flex size-10 items-center justify-center border-l-2 border-foreground ${layout === 'list' ? 'bg-foreground text-background' : 'bg-background'}`}
+                  onClick={() => chooseLayout('list')}
+                >
+                  <ListIcon className="size-4" aria-hidden="true" />
+                </button>
+              </span>
+            </span>
+          </div>
           {subtitle ? <p className="mt-3 text-sm text-muted-foreground">{subtitle}</p> : null}
           {deadline ? (
             <p className="mt-2 text-sm">
               剩余 <b>{formatRemain(deadline - now)}</b> 后自动销毁
+            </p>
+          ) : null}
+          {usedBytes === null ? (
+            <p className="mt-3 flex max-w-xs items-center gap-2 text-xs text-muted-foreground">
+              <span className="shrink-0">房间配额 {formatBytes(roomUsed)} / {formatBytes(quotaBytes)}</span>
+              <span className="h-1 min-w-16 flex-1 bg-secondary" role="progressbar" aria-label="房间配额" aria-valuemin={0} aria-valuemax={100} aria-valuenow={ratio} data-quota-tone={tone}>
+                <span className={`block h-full ${quotaBar}`} style={{ width: `${ratio}%` }} />
+              </span>
             </p>
           ) : null}
         </header>
@@ -543,11 +621,6 @@ export function ClipboardBoard({
             <p className="border-2 border-primary bg-background px-6 py-4 text-sm font-extrabold tracking-widest uppercase">松开以上传</p>
           </div>
         ) : null}
-        <div className="mt-8 hidden grid-cols-[90px_1fr_90px] border-t-2 border-foreground py-2 text-[11px] font-extrabold tracking-widest text-muted-foreground uppercase sm:grid">
-          <span>类型</span>
-          <span>内容</span>
-          <span className="text-right">操作</span>
-        </div>
         {channel.status === 'connecting' || channel.status === 'reconnecting' ? (
           <p className="border-t border-foreground py-8 text-sm text-muted-foreground" role="status">
             {channel.status === 'reconnecting' ? '连接中断，正在重连并补拉…' : '正在同步…'}
@@ -564,9 +637,18 @@ export function ClipboardBoard({
         {visible.length > 0 && shown.length === 0 ? (
           <p className="border-t border-foreground py-8 text-sm text-muted-foreground">没有匹配的内容。</p>
         ) : null}
-        <ul>
-          {shown.map((item) => (
-            <li id={`clip-${item.id}`} tabIndex={-1} key={item.id} data-interactive-card="" className="border-b border-foreground px-3 py-4">
+        <ul className={grid ? 'clip-board mt-4 columns-1 gap-3 sm:columns-2 xl:columns-3' : 'mt-4 grid gap-3'} data-layout={layout}>
+          {shown.map((item) => {
+            const compactFile = item.kind === 'file' && !item.hasThumbnail && mediaKind(item) === null
+            const textOpen = expandedText[item.id] === true
+            const textLong = item.kind === 'text' && textOverflows(item.text ?? '')
+            return (
+            <li id={`clip-${item.id}`} tabIndex={-1} key={item.id} data-interactive-card="" data-clip-card="" className={`border-2 border-foreground bg-card px-3 py-3 ${grid ? 'mb-3 break-inside-avoid' : ''} ${compactFile ? 'flex min-h-16 items-center gap-3 py-2' : ''}`}>
+              {compactFile ? (
+                <span className="grid size-10 shrink-0 place-items-center bg-foreground text-[10px] font-extrabold text-background">
+                  {extension(item.filename || 'file')}
+                </span>
+              ) : (
               <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
                 <span className="bg-foreground px-2 py-0.5 font-extrabold tracking-wider text-background uppercase">{sender(item)}</span>
                 <span className="text-muted-foreground">{formatWhen(item.createdAt, now)}</span>
@@ -574,6 +656,7 @@ export function ClipboardBoard({
                 {item.updatedAt > item.createdAt ? <span className="text-muted-foreground">已编辑</span> : null}
                 <span className="text-muted-foreground">剩余 {formatRemain(item.expiresAt - now)}</span>
               </div>
+              )}
               {item.kind === 'text' && editing === item.id ? (
                 <form
                   onSubmit={(event) => {
@@ -600,7 +683,24 @@ export function ClipboardBoard({
                   </div>
                 </form>
               ) : item.kind === 'text' ? (
-                <MarkdownText text={item.text ?? ''} />
+                <div>
+                  <MarkdownText text={item.text ?? ''} collapsed={!textOpen} />
+                  {textLong ? (
+                    <button
+                      type="button"
+                      className="mt-1 min-h-10 text-xs font-extrabold tracking-wider uppercase"
+                      aria-expanded={textOpen}
+                      onClick={() => setExpandedText((current) => ({ ...current, [item.id]: !textOpen }))}
+                    >
+                      {textOpen ? '收起' : '展开'}
+                    </button>
+                  ) : null}
+                </div>
+              ) : compactFile ? (
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-bold">{item.filename}</p>
+                  <p className="text-xs text-muted-foreground">{formatBytes(item.size)} · {sender(item)}</p>
+                </div>
               ) : (
                 <div>
                   {item.hasThumbnail ? (
@@ -610,14 +710,14 @@ export function ClipboardBoard({
                       className="mb-2 block max-w-full border-0 bg-transparent p-0 text-left"
                       onClick={() => setOpenId(item.id)}
                     >
-                      <img src={`${base}/items/${item.id}/thumbnail`} alt="" className="max-h-80 max-w-full border border-foreground object-contain" />
+                      <img src={`${base}/items/${item.id}/thumbnail`} alt="" className="max-h-80 w-full border border-foreground object-contain" />
                     </button>
                   ) : mediaKind(item) === 'video' ? (
                     <video controls preload="metadata" src={`${base}/items/${item.id}/media`} className="mb-2 max-h-80 w-full bg-foreground" />
                   ) : mediaKind(item) === 'audio' ? (
                     <audio controls preload="metadata" src={`${base}/items/${item.id}/media`} className="mb-2 w-full" />
                   ) : (
-                    <span className="mb-2 grid size-16 place-items-center bg-foreground text-xs font-extrabold text-background">
+                    <span className="mb-2 grid size-10 place-items-center bg-foreground text-[10px] font-extrabold text-background">
                       {extension(item.filename || 'file')}
                     </span>
                   )}
@@ -625,7 +725,7 @@ export function ClipboardBoard({
                   <p className="text-xs text-muted-foreground">{formatBytes(item.size)}</p>
                 </div>
               )}
-              <div className="mt-3 flex flex-wrap items-center gap-2">
+              <div className={`${compactFile ? 'ml-auto shrink-0' : 'mt-3'} flex flex-wrap items-center gap-2`}>
                 {item.kind === 'text' || item.kind === 'file' ? (
                   <IconAction
                     label="复制"
@@ -765,30 +865,10 @@ export function ClipboardBoard({
               ) : null}
               {shareFor === item.id && base ? <SharePanel base={base} itemId={item.id} now={now} onClose={() => setShareFor(null)} /> : null}
             </li>
-          ))}
+            )
+          })}
         </ul>
       </div>
-      <aside className="border border-foreground bg-card">
-        <div className="border-b border-foreground p-4">
-          <h2 className="text-xs font-extrabold tracking-widest uppercase">配额</h2>
-          <p className="mt-3 text-[22px] font-black tracking-tight">
-            {formatBytes(roomUsed)}
-            <span className="text-sm font-bold text-muted-foreground"> / {formatBytes(quotaBytes)}</span>
-          </p>
-          <div className="mt-3 h-1.5 bg-secondary">
-            <div className="h-full bg-primary" style={{ width: `${ratio}%` }} />
-          </div>
-          <p className="mt-2 text-xs text-muted-foreground">单文件上限 {formatBytes(maxFileBytes)}</p>
-        </div>
-        <div className="p-4">
-          <h2 className="text-xs font-extrabold tracking-widest uppercase">在线</h2>
-          <p className="mt-3 text-sm" role="status">
-            本机 · {connectionText[channel.status]}
-            {channel.devices > 0 ? ` · ${channel.devices} 台设备` : ''}
-          </p>
-          <p className="mt-2 text-xs text-muted-foreground">打开同一空间的设备会实时收到新条目。断线后会自动重连并补拉。Ctrl 或 ⌘ K 可搜索当前内容。</p>
-        </div>
-      </aside>
       {openIndex >= 0 ? (
         <ImageLightbox
           slides={slides}

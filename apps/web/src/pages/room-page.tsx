@@ -16,7 +16,7 @@ export function RoomPage() {
   const { me } = useSession()
   const [scope, setScope] = useState<ScopeInfo | null>(null)
   const [missing, setMissing] = useState(false)
-  const [connection, setConnection] = useState<ConnectionStatus>('idle')
+  const [, setConnection] = useState<ConnectionStatus>('idle')
   const [qr, setQr] = useState<string | null>(null)
   const [qrOpen, setQrOpen] = useState(false)
   const [qrLarge, setQrLarge] = useState(false)
@@ -92,7 +92,7 @@ export function RoomPage() {
 
   if (missing) {
     return (
-      <Shell connection="stopped">
+      <Shell>
         <h1 className="border-l-[14px] border-primary pl-4 text-4xl font-black">房间不存在或已过期</h1>
         <p className="mt-4 text-sm text-muted-foreground">临时房间不会出现在任何列表里。可以新建一个再把链接发给对方。</p>
         <Button type="button" className="mt-6" asChild>
@@ -103,7 +103,7 @@ export function RoomPage() {
   }
 
   return (
-    <Shell connection={connection}>
+    <Shell>
       {scope ? (
         <>
           <div ref={qrRootRef} className="relative mb-4 flex flex-wrap items-center gap-2 border border-foreground px-3 py-2">
