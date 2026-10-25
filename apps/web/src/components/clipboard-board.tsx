@@ -7,6 +7,7 @@ import { SharePanel } from '@/components/share-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
 import { useChannel } from '@/lib/channel.ts'
+import { createUploadQueue, type UploadQueue, type UploadRow } from '@/lib/upload-queue.ts'
 import { connectionText, copyText, formatBytes, formatRemain, formatWhen, useClock, utf8Size } from '@/lib/format.ts'
 import { MarkdownText } from '@/lib/markdown.tsx'
 import { mediaKind } from '@/lib/media.ts'
@@ -50,6 +51,14 @@ function IconAction({
   )
 }
 
+const uploadStatusLabel: Record<UploadRow['status'], string> = {
+  queued: '排队中',
+  uploading: '上传中',
+  done: '完成',
+  failed: '失败',
+  cancelled: '已取消',
+}
+
 function extension(name: string): string {
   const dot = name.lastIndexOf('.')
   if (dot <= 0) return 'FILE'
@@ -72,6 +81,9 @@ export function ClipboardBoard({
   onActivity,
   onAuthLost,
   onStatus,
+  onBusyChange,
+  onBindCancel,
+  upload = uploadFile,
 }: {
   base: string | null
   title: string
@@ -88,6 +100,9 @@ export function ClipboardBoard({
   onActivity?: () => void
   onAuthLost?: () => void
   onStatus?: (status: ConnectionStatus) => void
+  onBusyChange?: (busy: boolean) => void
+  onBindCancel?: (cancel: () => void) => void
+  upload?: typeof uploadFile
 }) {
   const channel = useChannel(base)
   const now = useClock(channel.offset)
@@ -101,12 +116,19 @@ export function ClipboardBoard({
   const [tagFor, setTagFor] = useState<string | null>(null)
   const [tagDraft, setTagDraft] = useState('')
   const [activeTag, setActiveTag] = useState<string | null>(null)
-  const [progress, setProgress] = useState<{ name: string; ratio: number } | null>(null)
+  const [rows, setRows] = useState<UploadRow[]>([])
   const [dragOver, setDragOver] = useState(false)
   const [sending, setSending] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   const seenAuth = useRef(0)
-  const sendFilesRef = useRef<(files: File[]) => Promise<void>>(async () => {})
+  const sendFilesRef = useRef<(files: File[]) => void>(() => {})
+  const queueRef = useRef<UploadQueue | null>(null)
+  const baseRef = useRef(base)
+  const maxFileRef = useRef(maxFileBytes)
+  const channelRef = useRef(channel)
+  const onActivityRef = useRef(onActivity)
+  const onAuthLostRef = useRef(onAuthLost)
+  const uploadRef = useRef(upload)
   const visible = channel.items.filter((item) => item.expiresAt > now)
   const needle = query.trim().toLowerCase()
   const shown = visible.filter((item) => {
@@ -178,30 +200,59 @@ export function ClipboardBoard({
     }
   }, [])
 
-  async function sendFiles(files: File[]) {
-    if (!base) return
-    for (const file of files) {
-      if (file.size > maxFileBytes) {
-        toast.error(`${file.name || '文件'}超过大小上限（${formatBytes(maxFileBytes)}）`)
-        continue
-      }
-      setProgress({ name: file.name || '截图', ratio: 0 })
-      try {
-        const result = await uploadFile(base, file, (ratio) => setProgress({ name: file.name || '截图', ratio }))
-        channel.upsert(result.item)
-        onActivity?.()
-      } catch (error) {
-        toast.error(errorText(error))
-        if (error instanceof ApiError && error.status === 401) onAuthLost?.()
-      } finally {
-        setProgress(null)
-      }
-    }
+  function sendFiles(files: File[]) {
+    if (!baseRef.current) return
+    queueRef.current?.enqueue(files, maxFileRef.current)
   }
 
   useEffect(() => {
+    baseRef.current = base
+    maxFileRef.current = maxFileBytes
+    channelRef.current = channel
+    onActivityRef.current = onActivity
+    onAuthLostRef.current = onAuthLost
+    uploadRef.current = upload
     sendFilesRef.current = sendFiles
   })
+
+  useEffect(() => {
+    const queue = createUploadQueue({
+      upload: (file, onProgress, signal) => uploadRef.current(baseRef.current ?? '', file, onProgress, signal),
+      onItem: (item) => {
+        channelRef.current.upsert(item)
+        onActivityRef.current?.()
+      },
+      onAuthLost: () => onAuthLostRef.current?.(),
+      onChange: setRows,
+      onOversize: (name) => toast.error(`${name}超过大小上限（${formatBytes(maxFileRef.current)}）`),
+      onFailed: (message) => toast.error(message),
+    })
+    queueRef.current = queue
+    return () => {
+      queue.dispose()
+      if (queueRef.current === queue) queueRef.current = null
+    }
+  }, [])
+
+  const uploadBusy = rows.some((row) => row.status === 'queued' || row.status === 'uploading')
+
+  useEffect(() => {
+    onBusyChange?.(uploadBusy)
+  }, [onBusyChange, uploadBusy])
+
+  useEffect(() => {
+    onBindCancel?.(() => queueRef.current?.cancelAll())
+  }, [onBindCancel])
+
+  useEffect(() => {
+    if (!uploadBusy) return
+    const onLeave = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', onLeave)
+    return () => window.removeEventListener('beforeunload', onLeave)
+  }, [uploadBusy])
 
   async function sendText() {
     const text = draft.trim()
@@ -347,14 +398,66 @@ export function ClipboardBoard({
             />
             <span className="text-xs text-muted-foreground">拖入文件，或直接粘贴截图 · Ctrl/⌘ Enter 发送</span>
           </div>
-          {progress ? (
-            <div className="mt-3">
-              <p className="mb-1 text-xs text-muted-foreground">
-                正在上传 {progress.name} · {Math.round(progress.ratio * 100)}%
-              </p>
-              <div className="h-1.5 bg-secondary">
-                <div className="h-full bg-primary" style={{ width: `${Math.round(progress.ratio * 100)}%` }} />
+          {rows.length > 0 ? (
+            <div className="mt-3 max-w-full border-2 border-foreground" role="region" aria-label="上传队列">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-foreground px-3 py-2">
+                <p className="text-xs font-extrabold tracking-widest uppercase">上传</p>
+                {uploadBusy ? (
+                  <button
+                    type="button"
+                    className="inline-flex min-h-10 items-center border-2 border-foreground bg-background px-2 text-xs font-extrabold tracking-wider uppercase focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                    onClick={() => queueRef.current?.cancelAll()}
+                  >
+                    全部取消
+                  </button>
+                ) : null}
               </div>
+              <ul>
+                {rows.map((row) => (
+                  <li key={row.id} className="border-t border-foreground px-3 py-2 first:border-t-0">
+                    <div className="flex min-w-0 items-start justify-between gap-2">
+                      <p className="min-w-0 truncate text-sm font-medium">{row.name}</p>
+                      <div className="flex shrink-0 gap-2">
+                        {row.status === 'failed' ? (
+                          <button
+                            type="button"
+                            className="inline-flex min-h-10 items-center border-2 border-foreground bg-background px-2 text-xs font-extrabold tracking-wider uppercase focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                            aria-label={`重试 ${row.name}`}
+                            onClick={() => queueRef.current?.retry(row.id)}
+                          >
+                            重试
+                          </button>
+                        ) : null}
+                        {row.status === 'queued' || row.status === 'uploading' ? (
+                          <button
+                            type="button"
+                            className="inline-flex min-h-10 items-center border-2 border-foreground bg-background px-2 text-xs font-extrabold tracking-wider uppercase focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                            aria-label={`取消 ${row.name}`}
+                            onClick={() => queueRef.current?.cancel(row.id)}
+                          >
+                            取消
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {formatBytes(row.size)} · {uploadStatusLabel[row.status]}
+                      {row.status === 'uploading' || row.status === 'done' ? ` · ${Math.round(row.ratio * 100)}%` : ''}
+                    </p>
+                    {row.status === 'failed' && row.error ? <p className="mt-1 text-xs break-words text-destructive">{row.error}</p> : null}
+                    <div
+                      className="mt-2 h-1.5 bg-secondary"
+                      role="progressbar"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={Math.round(row.ratio * 100)}
+                      aria-label={row.name}
+                    >
+                      <div className="h-full bg-primary" style={{ width: `${Math.round(row.ratio * 100)}%` }} />
+                    </div>
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : null}
         </form>

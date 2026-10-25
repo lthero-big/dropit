@@ -31,6 +31,8 @@ const FAILURES: Record<string, string> = {
   EMPTY_TEXT: '文本是空的',
   EMPTY_FILE: '文件是空的',
   RATE_LIMITED: '请求过于频繁',
+  UPLOAD_BUSY: '服务器正在处理其他上传',
+  UPLOAD_INCOMPLETE: '上传已中断',
   INVALID_FILENAME: '文件名无效',
   INVALID_INPUT: '请求参数无效',
   ORIGIN_REJECTED: '服务器拒绝了匿名来源。请先登录，或让 DROPIT_URL 与服务器的 APP_ORIGIN 一致',
@@ -109,7 +111,7 @@ export class Client {
     return headers;
   }
 
-  private open(method: string, path: string, init: { json?: unknown; body?: Buffer | Readable; headers?: Record<string, string>; machine?: boolean } = {}): Promise<RawResponse> {
+  private open(method: string, path: string, init: { json?: unknown; body?: Buffer | Readable; headers?: Record<string, string>; machine?: boolean; signal?: AbortSignal } = {}): Promise<RawResponse> {
     const url = new URL(this.base + path);
     const headers = this.headers(method, init.headers, init.machine);
     let body = init.body;
@@ -123,20 +125,45 @@ export class Client {
     const secure = url.protocol === 'https:';
     const lib = secure ? httpsRequest : httpRequest;
     return new Promise((resolve, reject) => {
-      const req = lib({
+      if (init.signal?.aborted) {
+        reject(new CliError('INTERRUPTED', '已取消上传', 130));
+        return;
+      }
+      let settled = false;
+      let req: ReturnType<typeof httpRequest> | undefined;
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        if (body && !Buffer.isBuffer(body)) body.destroy();
+        req?.destroy();
+        reject(new CliError('INTERRUPTED', '已取消上传', 130));
+      };
+      const request = req = lib({
         protocol: url.protocol, hostname: url.hostname, port: url.port,
         path: `${url.pathname}${url.search}`, method, headers, timeout: 120_000,
         agent: secure ? httpsAgent : httpAgent,
-      }, (stream) => resolve({ status: stream.statusCode ?? 0, headers: stream.headers, stream }));
-      let settled = false;
-      req.on('response', () => { settled = true; });
-      req.on('timeout', () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
-      req.on('error', (error) => { if (!settled) reject(error); });
-      if (!body) req.end();
-      else if (Buffer.isBuffer(body)) req.end(body);
+      }, (stream) => {
+        if (settled) {
+          stream.resume();
+          return;
+        }
+        settled = true;
+        init.signal?.removeEventListener('abort', onAbort);
+        resolve({ status: stream.statusCode ?? 0, headers: stream.headers, stream });
+      });
+      init.signal?.addEventListener('abort', onAbort, { once: true });
+      request.on('timeout', () => request.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
+      request.on('error', (error) => {
+        if (settled) return;
+        settled = true;
+        init.signal?.removeEventListener('abort', onAbort);
+        reject(error);
+      });
+      if (!body) request.end();
+      else if (Buffer.isBuffer(body)) request.end(body);
       else {
-        body.on('error', (error) => req.destroy(error));
-        body.pipe(req);
+        body.on('error', (error) => request.destroy(error));
+        body.pipe(request);
       }
     });
   }
@@ -181,7 +208,8 @@ export class Client {
     return (body.body as { item: Item }).item;
   }
 
-  async upload(target: Target, file: string, onProgress?: (sent: number, total: number) => void): Promise<Item> {
+  async upload(target: Target, file: string, onProgress?: (sent: number, total: number) => void, signal?: AbortSignal): Promise<Item> {
+    if (signal?.aborted) throw new CliError('INTERRUPTED', '已取消上传', 130);
     let info;
     try { info = statSync(file); }
     catch (error) {
@@ -200,6 +228,7 @@ export class Client {
     try {
       response = await this.open('POST', `${targetPath(target)}/items/file`, {
         body: stream,
+        signal,
         headers: {
           'content-type': mimeFor(file),
           'content-length': String(info.size),
@@ -215,7 +244,10 @@ export class Client {
     try { body = JSON.parse(buffer.toString('utf8')) as unknown; } catch { body = null; }
     if (response.status !== 201) {
       const code = errorCode(response.status, body).code;
-      throw new CliError(code, `${basename(file)}：${FAILURES[code] ?? '上传失败'}`);
+      const failure = new CliError(code, `${basename(file)}：${FAILURES[code] ?? '上传失败'}`);
+      const retry = headerValue(response.headers, 'retry-after');
+      if (retry && /^\d+$/.test(retry)) failure.retryAfter = Number(retry);
+      throw failure;
     }
     return (body as { item: Item }).item;
   }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { LoginPage } from './login-page.tsx'
 import { ClipboardBoard } from '@/components/clipboard-board.tsx'
@@ -18,6 +18,8 @@ export function HomePage() {
   const [spaces, setSpaces] = useState<SpaceSummary[]>([])
   const [spaceId, setSpaceId] = useState<string | null>(null)
   const [connection, setConnection] = useState<ConnectionStatus>('idle')
+  const uploadBusy = useRef(false)
+  const cancelUploads = useRef<() => void>(() => {})
 
   useEffect(() => {
     if (!me) return
@@ -44,10 +46,19 @@ export function HomePage() {
     }
   }, [me])
 
+  const onBusyChange = useCallback((busy: boolean) => {
+    uploadBusy.current = busy
+  }, [])
+  const onBindCancel = useCallback((cancel: () => void) => {
+    cancelUploads.current = cancel
+  }, [])
   const onSpace = useCallback((id: string) => {
+    if (id === spaceId) return
+    if (uploadBusy.current && !window.confirm('还有未完成的上传，离开会取消这些上传。')) return
+    cancelUploads.current()
     setSpaceId(id)
     sessionStorage.setItem(spaceKey, id)
-  }, [])
+  }, [spaceId])
 
   const onStatus = useCallback((next: ConnectionStatus) => setConnection(next), [])
   const onAuthLost = useCallback(() => {
@@ -87,6 +98,8 @@ export function HomePage() {
           onActivity={() => void refresh()}
           onAuthLost={onAuthLost}
           onStatus={onStatus}
+          onBusyChange={onBusyChange}
+          onBindCancel={onBindCancel}
         />
       ) : (
         <p className="text-sm text-muted-foreground">没有可用空间。</p>

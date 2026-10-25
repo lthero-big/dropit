@@ -4,7 +4,7 @@ import { mkdtemp, readdir, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import type { Server } from 'node:http';
+import { request as httpRequest, type Server } from 'node:http';
 import { Worker } from 'node:worker_threads';
 import Database from 'better-sqlite3';
 import { serve } from '@hono/node-server';
@@ -12,7 +12,7 @@ import WebSocket from 'ws';
 import sharp from 'sharp';
 import { createBackend } from '../src/backend.js';
 import { loadConfig, type Config } from '../src/config.js';
-import { hash, type Identity } from '../src/domain.js';
+import { ApiError, hash, type Identity } from '../src/domain.js';
 import { migration1, migration2, migration3 } from '../src/migrations.js';
 import type { OAuthProvider } from '../src/oauth.js';
 import { parseByteRange, sniffMedia } from '../src/media.js';
@@ -1181,4 +1181,53 @@ test('A2: production cookie has Secure and __Host prefix', async t => {
   assert.equal(response.status, 302);
   assert(cookieValue(response, '__Host-dropit_session'));
   assert.match(response.headers.getSetCookie().join(';'), /Secure/);
+});
+
+test('an aborted or short upload leaves no file and does not consume quota', { timeout: 15000 }, async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin();
+  const space = f.repo.space(admin.space.id);
+  assert.ok(space);
+  const body = new ReadableStream({ start(controller) {
+    controller.enqueue(new TextEncoder().encode('short'));
+    controller.close();
+  } });
+  await assert.rejects(
+    () => f.service.upload(space, undefined, body, 'short.bin', 'application/octet-stream', 64),
+    (error: unknown) => error instanceof ApiError && error.status === 400 && error.code === 'UPLOAD_INCOMPLETE',
+  );
+  assert.deepEqual(await readdir(join(f.directory, 'files')), []);
+  assert.equal(f.repo.usage(admin.user.id), 0);
+  assert.equal(f.repo.items(admin.space.id, Date.now()).length, 0);
+
+  const server = serve({ fetch: f.app.fetch, port: 0, hostname: '127.0.0.1', websocket: f.websocket }) as Server;
+  await once(server, 'listening');
+  t.after(() => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  await new Promise<void>((resolve) => {
+    const req = httpRequest({
+      hostname: '127.0.0.1', port: address.port, method: 'POST',
+      path: `/api/spaces/${admin.space.id}/items/file`,
+      headers: {
+        origin, cookie: admin.cookie, 'content-type': 'application/octet-stream',
+        'content-length': String(1024 * 1024), 'x-file-name': encodeURIComponent('cut.bin'),
+      },
+    }, (res) => { res.resume(); res.on('end', () => resolve()); });
+    req.on('error', () => resolve());
+    req.write(Buffer.alloc(64 * 1024, 7));
+    setTimeout(() => req.destroy(), 30);
+  });
+  let idle = 0;
+  const deadline = Date.now() + 4000;
+  while (Date.now() < deadline && idle < 5) {
+    const leftover = (await readdir(join(f.directory, 'files'))).length > 0
+      || f.repo.usage(admin.user.id) !== 0
+      || f.repo.items(admin.space.id, Date.now()).length !== 0;
+    idle = leftover ? 0 : idle + 1;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  assert.equal(idle >= 5, true);
+  assert.deepEqual(await readdir(join(f.directory, 'files')), []);
+  assert.equal(f.repo.usage(admin.user.id), 0);
 });
