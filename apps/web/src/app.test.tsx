@@ -61,6 +61,14 @@ const limits = {
   rateUpload: limitField(30, 1_000_000),
   rateRoom: limitField(10, 1_000_000),
   sessionMs: limitField(86_400_000, 365 * 86_400_000),
+  uploadChunkBytes: limitField(8388608, 25165824),
+  uploadChunkTimeoutMs: limitField(120000, 3600000),
+  rateChunk: limitField(2000, 1000000),
+  uploadChunksPerSession: limitField(3, 16),
+  uploadChunksPerUser: limitField(6, 64),
+  uploadChunksGlobal: limitField(16, 256),
+  uploadSessionsPerUser: limitField(8, 1000),
+  uploadSessionsGlobal: limitField(128, 10000),
 }
 
 function item(partial: Partial<Item> & Pick<Item, 'id' | 'text'>): Item {

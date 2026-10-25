@@ -34,7 +34,15 @@ at `APP_ORIGIN` (typically terminated by a trusted reverse proxy).
 | `RATE_INVITE` | 10 | Invite requests/IP and account/window; smaller than RATE_GENERAL |
 | `RATE_UPLOAD` | 30 | Upload/write requests/IP and account/window; also room access limit |
 | `RATE_ROOM` | 10 | Room creation/write requests/IP and account/window; smaller than RATE_UPLOAD |
-| `RATE_TOKEN` | 120 | Additional requests per PAT/window, alongside IP/account and write limits |
+| `RATE_TOKEN` | 120 | Additional ordinary requests per PAT/window; chunk PUT uses RATE_CHUNK instead |
+| `UPLOAD_CHUNK_BYTES` | 8388608 | New upload chunk size, 64 KiB–24 MiB; default 8 MiB fits nginx client_max_body_size 30m |
+| `UPLOAD_CHUNK_TIMEOUT_MS` | 120000 | Per-PUT body deadline; no whole-file deadline |
+| `UPLOAD_CHUNKS_PER_SESSION` | 3 | Concurrent chunk writes per upload |
+| `UPLOAD_CHUNKS_PER_USER` | 6 | Concurrent chunk writes per authenticated account (anonymous: per room) |
+| `UPLOAD_CHUNKS_GLOBAL` | 16 | Concurrent chunk writes in this process |
+| `UPLOAD_SESSIONS_PER_USER` | 8 | Unfinished sessions per account (anonymous: per room) |
+| `UPLOAD_SESSIONS_GLOBAL` | 128 | Unfinished sessions globally |
+| `RATE_CHUNK` | 2000 | Independent chunk PUT requests/IP/account/PAT/window; bypasses ordinary request/write buckets |
 
 Numeric settings are positive integers. Raising room limits above private-space
 limits or retention above 24 hours is rejected. Session/OAuth/room/invite secrets
@@ -65,7 +73,8 @@ Back up the database together with its audit trail. Deleting the volume removes
 overrides, audits and content. Run one server process; overrides are held in memory
 after loading and this is not a multi-instance synchronization mechanism.
 
-All editable values are positive safe integers, with minimum 1. The following
+All editable values are positive safe integers, with minimum 1 except
+`uploadChunkBytes` (minimum 65536). The following
 code-level ceilings apply to environment defaults **and** runtime overrides;
 they are fixed safeguards, not a measurement of available disk space. Operators
 must still provision enough disk and monitor usage. Cross-field constraints may
@@ -85,6 +94,14 @@ limits, sensitive rate limits strictly below general limits).
 | `rateWindowMs` | `RATE_WINDOW_MS` | 1 hour (3600000 ms) |
 | `rateGeneral`, `rateAuth`, `rateInvite`, `rateUpload`, `rateRoom` | Corresponding `RATE_*` variable | 1000000 each |
 | `sessionMs` | `SESSION_HOURS` × 3600000 | 365 days (31536000000 ms) |
+| `uploadChunkBytes` | `UPLOAD_CHUNK_BYTES` | 24 MiB (25165824 bytes); minimum 64 KiB |
+| `uploadChunkTimeoutMs` | `UPLOAD_CHUNK_TIMEOUT_MS` | 1 hour (3600000 ms) |
+| `uploadChunksPerSession` | `UPLOAD_CHUNKS_PER_SESSION` | 16 |
+| `uploadChunksPerUser` | `UPLOAD_CHUNKS_PER_USER` | 64 |
+| `uploadChunksGlobal` | `UPLOAD_CHUNKS_GLOBAL` | 256 |
+| `uploadSessionsPerUser` | `UPLOAD_SESSIONS_PER_USER` | 1000 |
+| `uploadSessionsGlobal` | `UPLOAD_SESSIONS_GLOBAL` | 10000 |
+| `rateChunk` | `RATE_CHUNK` | 1000000 |
 
 Startup fails if environment defaults or the merged persisted configuration
 violate policy. In particular, changing environment defaults can conflict with
@@ -107,3 +124,40 @@ Startup-only settings include `APP_ORIGIN`, `TRUST_PROXY`, `DATA_DIR`,
 other settings outside the editable list. Any externally managed
 `SESSION_SECRET` also remains outside this API; the backend uses random
 server-stored opaque sessions and has no editable session signing secret.
+
+## Upload sessions and cleanup
+
+Migration v8 adds `uploads` and `upload_chunks`. Sessions and received indices
+survive restart using the same DATA_DIR volume; disk chunks use opaque storage
+keys and are protected from orphan sweeping while referenced. No frontend change
+is required for the existing single-request endpoint. Clients can opt into the
+[session protocol](api.md#resumable-file-uploads).
+
+Creation reserves declared bytes and an item slot atomically. Reservations count
+against the same user/room quota as normal items. Thumbnails add actual bytes at
+complete, so a file that fills the quota exactly can still fail complete. `/me`
+adds `reservedBytes` separately from usedBytes. Cancellation, disable and room
+expiry release reservations and queue chunk deletion. Sessions expire after an
+absolute 24 hours (or earlier room expiry); activity does not extend the deadline.
+Maintenance runs every CLEANUP_INTERVAL_MS, removes expired sessions and retries
+queued file deletions. A process crash during a chunk write can leave an
+unreferenced file, reclaimed by the existing one-hour orphan sweep. Temporary
+assembly may need up to another file's size on disk; reservations are logical
+quota accounting, not filesystem capacity reservations.
+
+All eight new upload/rate controls are exposed in the existing admin limit editor,
+with the same persistence, reset and audit behavior. New chunk size applies to
+new sessions only. Timeout and concurrency changes apply to new PUTs; existing
+requests retain their deadlines, and reducing caps does not abort active work.
+Other current file/quota/item limits are rechecked at complete. The effective
+concurrency is bounded by every applicable cap; the caps are independent.
+
+The HTTP server's 120-second whole-request timeout is removed. Each chunk body
+has its own configured deadline. Reverse proxies can impose their own idle/body
+timeouts; keep nginx body size above the chunk size (the current 30m accommodates
+the 24 MiB hard ceiling). Do not increase the chunk size to the whole-file limit.
+Chunk PUTs have independent rate buckets, including a separate PAT bucket, so
+ordinary RATE_GENERAL/RATE_UPLOAD/RATE_ROOM/RATE_TOKEN thresholds do not cap the
+number of chunks. Control requests retain ordinary limits. Concurrency counters
+and runtime limit state are process-local; keep the documented single-process
+model.

@@ -92,6 +92,14 @@ export const LIMIT_KEYS = [
   'rateUpload',
   'rateRoom',
   'sessionMs',
+  'uploadChunkBytes',
+  'uploadChunkTimeoutMs',
+  'rateChunk',
+  'uploadChunksPerSession',
+  'uploadChunksPerUser',
+  'uploadChunksGlobal',
+  'uploadSessionsPerUser',
+  'uploadSessionsGlobal',
 ] as const
 
 export type LimitKey = (typeof LIMIT_KEYS)[number]

@@ -10,6 +10,15 @@ function ascii(bytes: Uint8Array, start: number, end: number) {
   return Buffer.from(bytes.subarray(start, end)).toString('ascii');
 }
 
+export function sniffRaster(bytes: Uint8Array): string | null {
+  if (Buffer.from(bytes.subarray(0, 8)).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return 'image/png';
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (['GIF87a', 'GIF89a'].includes(ascii(bytes, 0, 6))) return 'image/gif';
+  if (ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 12) === 'WEBP') return 'image/webp';
+  if (ascii(bytes, 4, 8) === 'ftyp' && ['avif', 'avis'].includes(ascii(bytes, 8, 12))) return 'image/avif';
+  return null;
+}
+
 function isMp3Frame(bytes: Uint8Array) {
   if (bytes.length < 2 || bytes[0] !== 0xff) return false;
   const next = bytes[1];

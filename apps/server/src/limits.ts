@@ -19,6 +19,14 @@ export const limitRanges = {
   rateUpload: { min: 1, max: 1000000 },
   rateRoom: { min: 1, max: 1000000 },
   sessionMs: { min: 1, max: 365 * 86400000 },
+  uploadChunkBytes: { min: 64 * 1024, max: 24 * 1024 ** 2 },
+  uploadChunkTimeoutMs: { min: 1, max: 3600000 },
+  rateChunk: { min: 1, max: 1000000 },
+  uploadChunksPerSession: { min: 1, max: 16 },
+  uploadChunksPerUser: { min: 1, max: 64 },
+  uploadChunksGlobal: { min: 1, max: 256 },
+  uploadSessionsPerUser: { min: 1, max: 1000 },
+  uploadSessionsGlobal: { min: 1, max: 10000 },
 } as const;
 export type LimitKey = keyof typeof limitRanges;
 export type LimitValues = Pick<Config, LimitKey>;

@@ -90,7 +90,7 @@ test('AC-O1: an override outranks the environment and is still there after the p
   const f = await fixture();
   t.after(() => f.dispose());
   const before = await bodyOf(await f.request('/api/admin/limits')) as Limits;
-  assert.equal(Object.keys(before).length, 15);
+  assert.equal(Object.keys(before).length, 23);
   assert.equal(before.maxTextBytes.overridden, false);
   assert.equal((await f.request('/api/admin/limits', 'PATCH', { maxTextBytes: 100, maxItems: 12 })).status, 200);
   await f.restart({ maxTextBytes: 200 });

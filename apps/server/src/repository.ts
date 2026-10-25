@@ -2,8 +2,8 @@ import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ApiError, type AccessToken, type DeviceAuthorization, type Flow, type Identity, type Invite, type Item, type Session, type ShareLink, type SharePublic, type Space, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7 } from './migrations.js';
+import { ApiError, type AccessToken, type DeviceAuthorization, type Flow, type Identity, type Invite, type Item, type Session, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8 } from './migrations.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
 type UserRow = User & { quotaBytes: number | null };
@@ -63,7 +63,15 @@ export interface Repository {
   usage(userId: string): number;
   items(spaceId: string, now: number): Item[];
   item(id: string, now: number): Item | undefined;
-  addItem(item: Item, quota: number, maxItems: number): void;
+  reservedBytes(userId: string, now: number): number;
+  createUpload(upload: UploadSession, quota: number, maxItems: number, perUser: number, global: number): void;
+  upload(id: string, now: number): UploadSession | undefined;
+  chunks(id: string): UploadChunk[];
+  saveChunk(chunk: UploadChunk, now: number): boolean;
+  deleteUpload(id: string): void;
+  deleteUserUploads(userId: string): string[];
+  expireUploads(now: number): string[];
+  addItem(item: Item, quota: number, maxItems: number, uploadId?: string): void;
   replaceText(id: string, text: string, size: number, quota: number, now: number): Item;
   deleteItem(id: string): Item | undefined;
   updateLabels(id: string, patch: { pinned?: 0 | 1; tags?: string[] }, now: number): Item;
@@ -89,15 +97,16 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 7) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 7) this.db.transaction(() => {
+    if (version > 8) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 8) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
       if (version < 4) this.db.exec(migration4);
       if (version < 5) this.db.exec(migration5);
       if (version < 6) this.db.exec(migration6);
-      this.db.exec(migration7);
+      if (version < 7) this.db.exec(migration7);
+      this.db.exec(migration8);
     })();
   }
   limitOverrides(): LimitOverrides {
@@ -330,20 +339,93 @@ export class SqliteRepository implements Repository {
     const row = this.db.prepare('SELECT * FROM items WHERE id=? AND expiresAt>?').get(id, now) as Item | undefined;
     return row ? mapItem(row) : undefined;
   }
-  addItem(item: Item, quota: number, maxItems: number) {
+  reservedBytes(userId: string, now: number) {
+    return (this.db.prepare('SELECT coalesce(sum(size),0) AS n FROM uploads WHERE userId=? AND expiresAt>?').get(userId, now) as { n: number }).n;
+  }
+  private roomReserved(spaceId: string, now: number) {
+    return (this.db.prepare('SELECT coalesce(sum(size),0) AS n FROM uploads WHERE spaceId=? AND expiresAt>?').get(spaceId, now) as { n: number }).n;
+  }
+  private checkWriter(spaceId: string, userId: string | null, now: number) {
+    const space = this.space(spaceId);
+    if (!space || (space.expiresAt !== null && space.expiresAt <= now)) throw new ApiError(404, 'NOT_FOUND');
+    if (userId) {
+      const user = this.db.prepare('SELECT disabled FROM users WHERE id=?').get(userId) as { disabled: number } | undefined;
+      if (!user || user.disabled || !this.isMember(spaceId, userId)) throw new ApiError(403, 'FORBIDDEN');
+    }
+  }
+  private checkCapacity(spaceId: string, userId: string | null, bytes: number, quota: number, maxItems: number, now: number) {
+    const used = userId ? this.usage(userId) + this.reservedBytes(userId, now) :
+      (this.db.prepare('SELECT coalesce(sum(storedBytes),0) AS n FROM items WHERE spaceId=?').get(spaceId) as { n: number }).n + this.roomReserved(spaceId, now);
+    const count = (this.db.prepare(`SELECT (SELECT count(*) FROM items WHERE spaceId=?) +
+      (SELECT count(*) FROM uploads WHERE spaceId=? AND expiresAt>?) AS n`).get(spaceId, spaceId, now) as { n: number }).n;
+    if (used + bytes > quota) throw new ApiError(413, 'QUOTA_EXCEEDED');
+    if (count >= maxItems) throw new ApiError(413, 'ITEM_LIMIT');
+  }
+  createUpload(upload: UploadSession, quota: number, maxItems: number, perUser: number, global: number) {
     this.db.transaction(() => {
-      const space = this.space(item.spaceId);
-      if (!space || (space.expiresAt !== null && space.expiresAt <= item.createdAt)) throw new ApiError(404, 'NOT_FOUND');
-      // Revalidate membership/disabled status after streaming, immediately before committing.
-      if (item.userId) {
-        const user = this.db.prepare('SELECT disabled FROM users WHERE id=?').get(item.userId) as { disabled: number } | undefined;
-        if (!user || user.disabled || !this.isMember(item.spaceId, item.userId)) throw new ApiError(403, 'FORBIDDEN');
+      this.checkWriter(upload.spaceId, upload.userId, upload.createdAt);
+      this.checkCapacity(upload.spaceId, upload.userId, upload.size, quota, maxItems, upload.createdAt);
+      const counts = this.db.prepare(`SELECT count(*) AS total, coalesce(sum(principal=?),0) AS own
+        FROM uploads WHERE expiresAt>?`).get(upload.principal, upload.createdAt) as { total: number; own: number };
+      if (counts.total >= global || counts.own >= perUser) throw new ApiError(429, 'UPLOAD_SESSION_LIMIT');
+      this.db.prepare(`INSERT INTO uploads (id,spaceId,userId,principal,filename,mime,size,chunkSize,createdAt,expiresAt)
+        VALUES (@id,@spaceId,@userId,@principal,@filename,@mime,@size,@chunkSize,@createdAt,@expiresAt)`).run(upload);
+    }).immediate();
+  }
+  upload(id: string, now: number) {
+    return this.db.prepare('SELECT * FROM uploads WHERE id=? AND expiresAt>?').get(id, now) as UploadSession | undefined;
+  }
+  chunks(id: string) {
+    return this.db.prepare('SELECT * FROM upload_chunks WHERE uploadId=? ORDER BY "index"').all(id) as UploadChunk[];
+  }
+  saveChunk(chunk: UploadChunk, now: number) {
+    return this.db.transaction(() => {
+      const upload = this.upload(chunk.uploadId, now);
+      if (!upload) throw new ApiError(404, 'NOT_FOUND');
+      this.checkWriter(upload.spaceId, upload.userId, now);
+      const existing = this.db.prepare('SELECT * FROM upload_chunks WHERE uploadId=? AND "index"=?').get(chunk.uploadId, chunk.index) as UploadChunk | undefined;
+      if (existing) {
+        if (existing.size !== chunk.size || existing.sha256 !== chunk.sha256) throw new ApiError(409, 'CHUNK_CONFLICT');
+        return false;
       }
-      const used = item.userId ? this.usage(item.userId) :
-        (this.db.prepare('SELECT coalesce(sum(storedBytes),0) AS n FROM items WHERE spaceId=?').get(item.spaceId) as { n: number }).n;
-      const count = (this.db.prepare('SELECT count(*) AS n FROM items WHERE spaceId=?').get(item.spaceId) as { n: number }).n;
-      if (used + item.storedBytes > quota) throw new ApiError(413, 'QUOTA_EXCEEDED');
-      if (count >= maxItems) throw new ApiError(413, 'ITEM_LIMIT');
+      this.db.prepare('INSERT INTO upload_chunks (uploadId,"index",key,size,sha256) VALUES (@uploadId,@index,@key,@size,@sha256)').run(chunk);
+      return true;
+    }).immediate();
+  }
+  deleteUpload(id: string) {
+    this.db.transaction(() => {
+      this.db.prepare('INSERT OR IGNORE INTO garbage SELECT key FROM upload_chunks WHERE uploadId=?').run(id);
+      this.db.prepare('DELETE FROM uploads WHERE id=?').run(id);
+    }).immediate();
+  }
+  deleteUserUploads(userId: string) {
+    return this.db.transaction(() => {
+      const rows = this.db.prepare("SELECT id FROM uploads WHERE userId=? OR principal=?").all(userId, `user:${userId}`) as { id: string }[];
+      for (const row of rows) this.deleteUpload(row.id);
+      return rows.map(row => row.id);
+    }).immediate();
+  }
+  expireUploads(now: number) {
+    return this.db.transaction(() => {
+      const rows = this.db.prepare(`SELECT id FROM uploads WHERE expiresAt<=?
+        OR spaceId IN (SELECT id FROM spaces WHERE expiresAt<=?)
+        OR userId IN (SELECT id FROM users WHERE disabled=1)
+        OR principal IN (SELECT 'user:' || id FROM users WHERE disabled=1)`).all(now, now) as { id: string }[];
+      for (const row of rows) this.deleteUpload(row.id);
+      return rows.map(row => row.id);
+    }).immediate();
+  }
+  addItem(item: Item, quota: number, maxItems: number, uploadId?: string) {
+    this.db.transaction(() => {
+      this.checkWriter(item.spaceId, item.userId, item.createdAt);
+      if (uploadId) {
+        const upload = this.upload(uploadId, item.createdAt);
+        if (!upload || upload.spaceId !== item.spaceId || upload.userId !== item.userId) throw new ApiError(404, 'NOT_FOUND');
+        // Release this reservation in the same transaction that inserts the final
+        // item. All other uploads' reservations still count, including thumbnails.
+        this.deleteUpload(uploadId);
+      }
+      this.checkCapacity(item.spaceId, item.userId, item.storedBytes, quota, maxItems, item.createdAt);
       this.db.prepare(`INSERT INTO items (id,spaceId,userId,kind,text,filename,mime,size,storedBytes,fileKey,thumbnailKey,createdAt,expiresAt,updatedAt)
         VALUES (@id,@spaceId,@userId,@kind,@text,@filename,@mime,@size,@storedBytes,@fileKey,@thumbnailKey,@createdAt,@expiresAt,@updatedAt)`).run(item);
     }).immediate();
@@ -360,8 +442,8 @@ export class SqliteRepository implements Repository {
       }
       const delta = size - current.storedBytes;
       if (delta > 0) {
-        const used = current.userId ? this.usage(current.userId) :
-          (this.db.prepare('SELECT coalesce(sum(storedBytes),0) AS n FROM items WHERE spaceId=?').get(current.spaceId) as { n: number }).n;
+        const used = current.userId ? this.usage(current.userId) + this.reservedBytes(current.userId, now) :
+          (this.db.prepare('SELECT coalesce(sum(storedBytes),0) AS n FROM items WHERE spaceId=?').get(current.spaceId) as { n: number }).n + this.roomReserved(current.spaceId, now);
         if (used + delta > quota) throw new ApiError(413, 'QUOTA_EXCEEDED');
       }
       this.db.prepare('UPDATE items SET text=?, size=?, storedBytes=?, updatedAt=? WHERE id=?').run(text, size, size, now, id);
@@ -441,6 +523,7 @@ export class SqliteRepository implements Repository {
   }
   expire(now: number) {
     return this.db.transaction(() => {
+      this.expireUploads(now);
       const items = (this.db.prepare('SELECT * FROM items WHERE expiresAt<=? OR spaceId IN (SELECT id FROM spaces WHERE expiresAt<=?)').all(now, now) as Item[]).map(mapItem);
       for (const item of items) this.deleteItem(item.id);
       this.db.prepare('DELETE FROM spaces WHERE expiresAt<=?').run(now);
@@ -455,7 +538,7 @@ export class SqliteRepository implements Repository {
   garbage() { return (this.db.prepare('SELECT key FROM garbage').all() as { key: string }[]).map(r => r.key); }
   forgetGarbage(key: string) { this.db.prepare('DELETE FROM garbage WHERE key=?').run(key); }
   fileKeys() {
-    return new Set((this.db.prepare('SELECT fileKey AS key FROM items WHERE fileKey IS NOT NULL UNION SELECT thumbnailKey AS key FROM items WHERE thumbnailKey IS NOT NULL').all() as { key: string }[]).map(r => r.key));
+    return new Set((this.db.prepare('SELECT fileKey AS key FROM items WHERE fileKey IS NOT NULL UNION SELECT thumbnailKey AS key FROM items WHERE thumbnailKey IS NOT NULL UNION SELECT key FROM upload_chunks').all() as { key: string }[]).map(r => r.key));
   }
   close() { this.db.close(); }
 }

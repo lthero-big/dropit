@@ -58,7 +58,7 @@ async function ok(response: Response, status = 200) {
 test('AC-O1/O3/O5: overrides and audits survive backend recreation; reset follows the current environment default', async t => {
   const f = await fixture(); t.after(() => f.dispose());
   const before = await ok(await f.request('/api/admin/limits'));
-  assert.equal(Object.keys(before).length, 15);
+  assert.equal(Object.keys(before).length, 23);
   assert.deepEqual(before.maxTextBytes, { value: 65536, default: 65536, overridden: false, min: 1, max: 1048576 });
   assert.equal('origin' in before, false);
   const saved = await ok(await f.patch({ maxTextBytes: 100, maxItems: 12 }));

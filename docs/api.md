@@ -6,7 +6,7 @@ sizes are bytes. Browsers use the server session cookie (`credentials: 'same-ori
 CLI clients use personal access tokens (PATs) in `Authorization: Bearer <token>`.
 There are no passwords, CORS origins or public mock logins.
 
-Cookie and anonymous POST/PATCH/DELETE requests require `Origin: <APP_ORIGIN>`
+Cookie and anonymous POST/PUT/PATCH/DELETE requests require `Origin: <APP_ORIGIN>`
 (also for rooms/logout). A valid Bearer token bypasses Origin checking, including
 WebSocket upgrades. Any Authorization header selects Bearer authentication: malformed,
 expired or revoked credentials return 401 even if a valid cookie is also present.
@@ -24,7 +24,7 @@ Missing/expired/revoked session returns `401 UNAUTHENTICATED`.
 | GET | `/auth/:provider?invite=:token` | Navigate the browser here; 302 to OAuth provider, sets flow-binding cookie. Optional invite is bound to this flow when it is still valid. Once any user exists, an invalid invite redirects to `{APP_ORIGIN}/login?error=INVITE_INVALID` and does not start a flow. While the users table is empty, an invalid invite is ignored and the flow starts without it, so the first sign-up can still proceed. Unknown provider names stay JSON `404`. Auth-start rate limits stay JSON `429` with `Retry-After`. |
 | GET | `/auth/:provider/callback` | OAuth-only callback; state, browser cookie and PKCE required; sets session and redirects to `{APP_ORIGIN}/`. Browser-visible failures redirect to `{APP_ORIGIN}/login?error=CODE`. The code is one of `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR`, `INVITE_INVALID`, `INVITATION_REQUIRED`, `USER_DISABLED`, `VERIFIED_EMAIL_REQUIRED`, `RATE_LIMITED`, `INTERNAL_ERROR`. Provider error text is not copied into the URL. |
 | POST | `/auth/logout` | 204; immediately revokes this session, closes its sockets and clears cookie |
-| GET | `/me` | `{user, usedBytes, quotaBytes, maxFileBytes, maxTextBytes, retentionMs}` |
+| GET | `/me` | `{user, usedBytes, reservedBytes, quotaBytes, maxFileBytes, maxTextBytes, retentionMs}` |
 | GET | `/invites/:token` | `{spaceName, expiresAt, remainingUses}`; invalid/revoked/used/expired: 404 |
 
 `User = {id, email, name, role: 'admin'|'user', disabled: 0|1, pending: 0|1, createdAt}`.
@@ -137,7 +137,7 @@ All paths here require an enabled admin, otherwise 401/403.
 | POST | `/admin/users` | `{email, name?: string, role?: 'admin' or 'user', quotaBytes?: number}` → 201, `User & {usedBytes, quotaBytes, quotaOverride}`. Pre-creates a pending account and its private space. No password and no invite token. The first later OAuth login whose **verified** email matches (case-insensitive) binds that identity, clears `pending`, and does not create a second user or space. A different provider subject with the same email is not linked and still needs an invite or admin bootstrap. Email must not already belong to any user (`409 EMAIL_IN_USE`). `ADMIN_EMAILS` matches are stored as `admin`. `quotaBytes` when omitted is the installation default (`quotaOverride: null`); when set, 1 byte through 100 GiB. |
 | PATCH | `/admin/users/:id` | At least one of `{disabled?: boolean, role?: 'admin'\|'user', name?: string, quotaBytes?: number\|null}` → 204. `quotaBytes: null` clears the override. Disabling immediately revokes every session/socket. Enabling requires a new login. Role and quota apply to the next request on existing sessions. The last enabled admin cannot be disabled or demoted (`409 LAST_ADMIN`). Email cannot be changed. |
 | POST | `/admin/users/:id/logout` | 204. Deletes every session for that user and closes their sockets. The account stays enabled; they can sign in again. Unknown id: `404`. |
-| GET | `/admin/limits` | `{key: {value, default, overridden, min, max}}` for each of the 15 runtime limits below. `default` is the environment-derived value at process startup; `overridden` means a SQLite override exists (even if equal to the default). |
+| GET | `/admin/limits` | `{key: {value, default, overridden, min, max}}` for each of the 23 runtime limits below. `default` is the environment-derived value at process startup; `overridden` means a SQLite override exists (even if equal to the default). |
 | PATCH | `/admin/limits` | Partial `{key: positiveInteger \| null}` → 200, same description map as GET. `null` removes that override. Requires an admin and browser Origin or a Bearer with `write` scope. The entire candidate is validated and all overrides/audit rows commit atomically. Empty objects, unknown/read-only keys, invalid types, ranges or cross-field policy → `400 INVALID_LIMITS`; no partial writes. |
 | GET | `/admin/limits/audit?limit=50&cursor=123` | `{entries: LimitAudit[], nextCursor: number \| null}`; newest first. `limit`: integer 1–100 (default 50); optional `cursor`: positive integer, exclusive audit id from the preceding page's `nextCursor`. Invalid pagination → `400 INVALID_INPUT`. Read-only admin Bearers may read limits and audits. |
 | GET | `/admin/invites` | `{invites: [Invite]}` (no secret token) |
@@ -154,7 +154,9 @@ by maintenance. There is no arbitrary member-join endpoint.
 Editable keys are `maxFileBytes`, `maxTextBytes`, `maxItems`, `userQuotaBytes`,
 `retentionMs`, `roomQuotaBytes`, `roomMaxFileBytes`, `roomRetentionMs`,
 `rateWindowMs`, `rateGeneral`, `rateAuth`, `rateInvite`, `rateUpload`, `rateRoom`,
-and `sessionMs`. All durations use milliseconds and sizes use bytes. See
+`sessionMs`, `uploadChunkBytes`, `uploadChunkTimeoutMs`, `rateChunk`,
+`uploadChunksPerSession`, `uploadChunksPerUser`, `uploadChunksGlobal`,
+`uploadSessionsPerUser`, and `uploadSessionsGlobal`. All durations use milliseconds and sizes use bytes. See
 [backend configuration](backend-config.md#runtime-overrides-and-hard-ceilings)
 for hard ceilings. `min`/`max` describe each key's absolute bounds; the complete
 effective configuration must also satisfy:
@@ -232,6 +234,79 @@ Space routes require membership; room routes require the unexpired capability.
 The raw token is returned only at creation (`url` is `{APP_ORIGIN}/s/{token}`). Only its SHA-256
 is stored. Unknown, expired, revoked, exhausted and malformed tokens are all `404 NOT_FOUND`.
 There is no list, search or enumeration endpoint for tokens.
+
+## Resumable file uploads
+
+Use the same `base` as items: `/spaces/:spaceId` or `/rooms/:roomToken`, under `/api`.
+Cookie/Origin and Bearer scope rules match the existing file endpoint (PUT requires
+`write`, GET requires `read`). Space sessions belong to their creating user, even
+in a shared space; another member or the space owner cannot read, write, complete
+or cancel them. Every holder of the current room capability may resume/cancel a
+room upload. Invalid, expired, completed, cancelled, cross-user or wrong-base
+upload ids return the same `404 NOT_FOUND`. There is no session-list endpoint.
+
+| Method | Path | Body / response |
+| --- | --- | --- |
+| POST | `base/uploads` | JSON `{filename,size,mime}` → 201 `{uploadId,chunkSize,expiresAt,received:[]}`. Positive safe integer size; filename 1–4096 characters, MIME 1–200 characters. Rejects declared sizes above the current member/room file limit. |
+| PUT | `base/uploads/:id/chunks/:index` | Raw bytes → 204. Zero-based integer index (no sign/leading zeros). Exactly `chunkSize` bytes, except the last chunk is exactly the remaining declared bytes. Any order; parallel requests allowed within limits. Optional `X-Chunk-SHA256` is 64 hexadecimal characters (case insensitive). |
+| GET | `base/uploads/:id` | `{size,chunkSize,expiresAt,received:[index,…]}`. Sorted committed indices only; query after interruption/restart and send only the missing chunks. |
+| POST | `base/uploads/:id/complete` | No body → 201 `{item:Item}` after all chunks, assembled length and media/quota validation. Creates exactly one ordinary item and broadcasts `item.created`. |
+| DELETE | `base/uploads/:id` | 204; aborts active work, releases reservation and removes temporary chunks. Subsequent requests return 404. |
+
+The default chunk size is **8 MiB**; it is fixed at creation for that upload.
+The final partial chunk can be smaller. Retrying identical bytes for an existing
+index succeeds without storing another copy. Different bytes for an existing
+index return `409 CHUNK_CONFLICT` and retain the first copy. Invalid checksums
+(`400 INVALID_CHECKSUM`), SHA mismatches (`400 CHECKSUM_MISMATCH`), short chunks
+(`400 CHUNK_SIZE_MISMATCH`), oversized chunks (`413 FILE_TOO_LARGE`), stream
+interruptions and `400 UPLOAD_TIMEOUT` leave the session available for retry;
+failed chunks never appear in `received`. Checksum validation precedes duplicate
+handling. Excess chunk concurrency returns `429 CHUNK_BUSY` with `Retry-After`.
+
+Creation reserves the declared bytes **and one item slot** in a SQLite immediate
+transaction. Pending bytes count against the creating user's aggregate quota
+(or the room's quota); ordinary text/file creates and text growth count these
+reservations too. They are not items and never appear in a board snapshot.
+`GET /me` reports `reservedBytes` separately from stored `usedBytes`; available
+bytes are `quotaBytes - usedBytes - reservedBytes`. Expiry is absolute 24 hours
+from creation, capped by room expiry, and is never extended by activity. Expired
+reservations stop counting immediately; maintenance queues/removes their files.
+Disable and explicit cancellation also discard unfinished sessions, including
+active writes. Restart retains sessions and received chunks on the data volume.
+
+Complete streams chunks in index order without buffering the whole file. It uses
+the same filename cleaning, raster decoder pixel ceiling (16 Mi pixels), thumbnail
+generation and atomic quota checks as ordinary uploads. Magic bytes also trigger
+raster validation in the session protocol even if MIME says octet-stream.
+Thumbnail bytes count at commit in addition to the declared size; the reservation
+is converted to actual storage atomically. Current quota/item/file limits apply
+at complete. The new session protocol rejects SVG (also SVG disguised as a PNG)
+and corrupt/oversized rasters with 415. Other unknown bytes remain download-only;
+inline audio/video continues to require its separate magic-byte allowlist.
+The legacy endpoint retains download-only SVG/HTML compatibility.
+
+Calling complete before all chunks arrive returns `400 UPLOAD_INCOMPLETE` and
+**discards the session**, as do assembled-size, decoder, quota and file-limit
+failures: no item remains. Create a new session after these failures. Concurrent
+complete/chunk work returns `409 UPLOAD_IN_PROGRESS` without discarding it; wait
+for those requests before completing. A successful complete consumes the id;
+query the ordinary item snapshot if its response was lost. A retry after success
+returns 404, preventing duplicate items.
+
+Each PUT has its own `uploadChunkTimeoutMs` deadline (default 120 seconds). There
+is no total file deadline; legacy streaming uploads also have no 120-second total
+request deadline. PUTs use independent `rateChunk` IP/account/PAT buckets (default
+2000/window); they do **not** consume general, ordinary upload, room-access,
+room-write or ordinary PAT request buckets. Thus a 100-chunk upload does not hit
+`rateUpload`/`rateToken`. Session creation/completion still use the ordinary write
+limits; session GET/DELETE use general (and room-access) limits.
+
+Runtime limits also bound simultaneous chunks per upload/account/global (defaults
+3/6/16) and unfinished sessions per account/global (8/128). Signed-in room users
+share their account bucket with spaces; anonymous holders share the room bucket.
+IP chunk rate and global concurrency/session caps also apply. Lowering caps keeps
+existing work and rejects new work until below the new thresholds. See the
+[configuration list](backend-config.md#runtime-overrides-and-hard-ceilings).
 
 ## Public share links
 
@@ -388,21 +463,21 @@ and auth-start rate limits still use JSON.
 
 | HTTP | Codes / frontend action |
 | --- | --- |
-| 400 | `INVALID_INPUT`, `INVALID_LIMITS`, `INVALID_JSON`, `JSON_REQUIRED`, `EMPTY_TEXT`, `EMPTY_FILE`, `UPLOAD_TIMEOUT`, `INVALID_FILENAME`, `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR` |
+| 400 | `INVALID_INPUT`, `INVALID_LIMITS`, `INVALID_JSON`, `JSON_REQUIRED`, `EMPTY_TEXT`, `EMPTY_FILE`, `UPLOAD_TIMEOUT`, `INVALID_FILENAME`, `INVALID_CHUNK_INDEX`, `INVALID_CHECKSUM`, `CHECKSUM_MISMATCH`, `CHUNK_SIZE_MISMATCH`, `UPLOAD_INCOMPLETE`, `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR` |
 | 401 | `UNAUTHENTICATED` → login |
 | 403 | `FORBIDDEN`, `ORIGIN_REJECTED`, `USER_DISABLED`, `INVITATION_REQUIRED`, `INVITE_INVALID`, `VERIFIED_EMAIL_REQUIRED` |
 | 403 | `INSUFFICIENT_SCOPE`, `BROWSER_SESSION_REQUIRED` for PATs |
 | 404 | `NOT_FOUND`, `PROVIDER_UNAVAILABLE` |
 | 416 | Download/media range unsatisfiable; Content-Range contains `bytes */SIZE` |
-| 409 | `LAST_ADMIN`, `EMAIL_IN_USE` |
+| 409 | `LAST_ADMIN`, `EMAIL_IN_USE`, `CHUNK_CONFLICT`, `UPLOAD_IN_PROGRESS` |
 | 413 | `BODY_TOO_LARGE`, `TEXT_TOO_LARGE`, `FILE_TOO_LARGE`, `QUOTA_EXCEEDED`, `ITEM_LIMIT` → show configured limit |
 | 415 | `INVALID_IMAGE` → unsupported/corrupt/too many pixels |
-| 429 | `RATE_LIMITED`, `UPLOAD_BUSY`, `SOCKET_LIMIT`; HTTP responses have integer `Retry-After` seconds |
+| 429 | `RATE_LIMITED`, `UPLOAD_BUSY`, `CHUNK_BUSY`, `UPLOAD_SESSION_LIMIT`, `SOCKET_LIMIT`; HTTP responses have integer `Retry-After` seconds |
 | 500 | `INTERNAL_ERROR` → retry/report; no secrets or internals returned |
 
 Rate windows default to 60s; limits are enforced separately by trusted client IP
 and authenticated account. General: 240; auth: 20; invite: 10; upload/write: 30;
-room create/write: 10; room access: 30. Auth also limits the verified provider identity across IPs. Limits are per process (MVP is one instance).
+room create/write: 10; room access: 30. Chunk PUT: 2000 in separate buckets as described above. Auth also limits the verified provider identity across IPs. Limits are per process (MVP is one instance).
 Missing Origin is rejected for cookie/anonymous writes; valid PATs and the two
 cookie-free device endpoints follow the machine rules above. PATs have an additional
 120 requests/token/window by default (`RATE_TOKEN`). With no
@@ -422,7 +497,8 @@ The server rejects expired content immediately even before periodic cleanup.
 Maintenance removes database entries and queues deletion of file/thumbnail keys
 transactionally. Failed deletions remain queued for retry. Unreferenced files from
 an interrupted upload are reclaimed after one hour, excluding active uploads.
-Normal failed uploads are removed immediately. Expired bytes are released from
+Normal failed writes are removed immediately. Committed chunks are referenced until
+complete/cancel/expiry, and use the same deletion retry queue. Expired item bytes are released from
 quota during cleanup. `/healthz` returns `{status:'ok'}`.
 
 OAuth setup: create a GitHub OAuth App (`read:user user:email`) and a Google OAuth
