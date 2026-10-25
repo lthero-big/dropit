@@ -17,7 +17,7 @@ export function HomePage() {
   const navigate = useNavigate()
   const [spaces, setSpaces] = useState<SpaceSummary[]>([])
   const [spaceId, setSpaceId] = useState<string | null>(null)
-  const [connection, setConnection] = useState<ConnectionStatus>('idle')
+  const [, setConnection] = useState<ConnectionStatus>('idle')
   const uploadBusy = useRef(false)
   const cancelUploads = useRef<() => void>(() => {})
 
@@ -81,7 +81,7 @@ export function HomePage() {
   const current = spaces.find((space) => space.id === spaceId) ?? null
 
   return (
-    <Shell connection={connection} spaces={spaces} spaceId={current?.id} onSpace={onSpace}>
+    <Shell spaces={spaces} spaceId={current?.id} onSpace={onSpace}>
       {current ? (
         <ClipboardBoard
           base={`/api/spaces/${current.id}`}

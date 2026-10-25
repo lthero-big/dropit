@@ -577,7 +577,7 @@ describe('dropit web', () => {
     expect(document.activeElement?.id).toBe('clip-b')
     expect(screen.queryByRole('dialog', { name: '命令面板' })).toBeNull()
     FakeSocket.instances.at(-1)?.emit({ type: 'presence', devices: 2 })
-    expect(await screen.findByText(/2 台设备/)).toBeTruthy()
+    expect(await screen.findByRole('status', { name: '2 台设备在线' })).toBeTruthy()
   })
 
   it('opens another temporary room from the room page', async () => {

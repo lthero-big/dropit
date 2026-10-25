@@ -224,7 +224,7 @@ function MarkdownBody({ source }: { source: string }) {
   return <div className="max-w-full min-w-0 text-[15px] [overflow-wrap:anywhere]">{blocks}</div>
 }
 
-export function MarkdownText({ text }: { text: string }) {
+export function MarkdownText({ text, collapsed = false }: { text: string; collapsed?: boolean }) {
   const markdown = looksLikeMarkdown(text)
   const [rendered, setRendered] = useState(false)
   return (
@@ -252,7 +252,7 @@ export function MarkdownText({ text }: { text: string }) {
       {rendered && markdown ? (
         <MarkdownBody source={text} />
       ) : (
-        <p className="max-w-full min-w-0 text-[15px] whitespace-pre-wrap [overflow-wrap:anywhere]">{linkifyNodes(text, 'plain')}</p>
+        <p className={`max-w-full min-w-0 text-[15px] whitespace-pre-wrap [overflow-wrap:anywhere] ${collapsed ? 'line-clamp-6' : ''}`}>{linkifyNodes(text, 'plain')}</p>
       )}
     </div>
   )
