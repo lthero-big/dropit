@@ -78,6 +78,7 @@ test('range plan resumes without replacing a partial file', () => {
   assert.equal(downloadPlan(200, 0, undefined), 'replace');
   assert.equal(downloadPlan(416, 20, 'bytes */20'), 'done');
   assert.throws(() => downloadPlan(416, 30, 'bytes */20'), (error: CliError) => error.code === 'RANGE');
+  assert.throws(() => downloadPlan(206, 10, 'bytes 9-19/20'), (error: CliError) => error.code === 'RANGE');
 });
 
 test('failed download removes the partial file', async () => {

@@ -1,13 +1,17 @@
 import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { createReadStream, statSync } from 'node:fs';
+import { lstat, realpath, rm } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 import { Readable } from 'node:stream';
 import WebSocket from 'ws';
+import { LARGE_FILE_BYTES, uploadChunked } from './chunk.js';
+import { downloadParallel } from './download.js';
 import { CliError } from './errors.js';
 import type { Item, SpaceInfo } from './items.js';
 import { interpretPoll, type AuthorizeResponse, type Poll } from './login.js';
-import { destination, downloadPlan, existingSize, prepareDirectory, saveStream } from './paths.js';
+import { contentRangeStart, contentRangeTotal, destination, downloadPlan, existingSize, prepareDirectory, rejectSymlink, saveStream } from './paths.js';
+import { loadSessions, removeSession, targetFromKey, targetKey } from './sessions.js';
 
 const MIME: Record<string, string> = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
@@ -32,7 +36,16 @@ const FAILURES: Record<string, string> = {
   EMPTY_FILE: '文件是空的',
   RATE_LIMITED: '请求过于频繁',
   UPLOAD_BUSY: '服务器正在处理其他上传',
-  UPLOAD_INCOMPLETE: '上传已中断',
+  UPLOAD_INCOMPLETE: '上传未完成，需要重新开始',
+  UPLOAD_IN_PROGRESS: '上传仍在进行',
+  UPLOAD_TIMEOUT: '分片上传超时',
+  CHUNK_BUSY: '分片并发已满',
+  CHUNK_CONFLICT: '分片内容冲突',
+  CHUNK_SIZE_MISMATCH: '分片长度不一致',
+  CHECKSUM_MISMATCH: '分片校验不一致',
+  INVALID_CHECKSUM: '分片校验格式无效',
+  INVALID_CHUNK_INDEX: '分片序号无效',
+  INVALID_IMAGE: '图片无法解码',
   INVALID_FILENAME: '文件名无效',
   INVALID_INPUT: '请求参数无效',
   ORIGIN_REJECTED: '服务器拒绝了匿名来源。请先登录，或让 DROPIT_URL 与服务器的 APP_ORIGIN 一致',
@@ -89,6 +102,24 @@ function errorCode(status: number, body: unknown): { code: string; retryAfter?: 
   return { code: `HTTP_${status}` };
 }
 
+function failureFrom(status: number, body: unknown, headers: IncomingMessage['headers'], fallback = '请求失败'): CliError {
+  const parsed = errorCode(status, body);
+  const failure = new CliError(parsed.code, FAILURES[parsed.code] ?? fallback, 1, status === 401 || status === 403 || status === 404);
+  const retry = headerValue(headers, 'retry-after');
+  if (retry && /^\d+$/.test(retry)) failure.retryAfter = Number(retry);
+  return failure;
+}
+
+async function isFile(path: string): Promise<boolean> {
+  try {
+    const info = await lstat(path);
+    return info.isFile();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 function socketText(data: WebSocket.RawData): string {
   if (typeof data === 'string') return data;
   if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
@@ -111,7 +142,7 @@ export class Client {
     return headers;
   }
 
-  private open(method: string, path: string, init: { json?: unknown; body?: Buffer | Readable; headers?: Record<string, string>; machine?: boolean; signal?: AbortSignal } = {}): Promise<RawResponse> {
+  private open(method: string, path: string, init: { json?: unknown; body?: Buffer | Readable; headers?: Record<string, string>; machine?: boolean; signal?: AbortSignal; timeoutMs?: number } = {}): Promise<RawResponse> {
     const url = new URL(this.base + path);
     const headers = this.headers(method, init.headers, init.machine);
     let body = init.body;
@@ -138,9 +169,11 @@ export class Client {
         req?.destroy();
         reject(new CliError('INTERRUPTED', '已取消上传', 130));
       };
+      const timeoutMs = init.timeoutMs === undefined ? 120_000 : init.timeoutMs;
       const request = req = lib({
         protocol: url.protocol, hostname: url.hostname, port: url.port,
-        path: `${url.pathname}${url.search}`, method, headers, timeout: 120_000,
+        path: `${url.pathname}${url.search}`, method, headers,
+        ...(timeoutMs > 0 ? { timeout: timeoutMs } : {}),
         agent: secure ? httpsAgent : httpAgent,
       }, (stream) => {
         if (settled) {
@@ -152,7 +185,7 @@ export class Client {
         resolve({ status: stream.statusCode ?? 0, headers: stream.headers, stream });
       });
       init.signal?.addEventListener('abort', onAbort, { once: true });
-      request.on('timeout', () => request.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
+      if (timeoutMs > 0) request.on('timeout', () => request.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
       request.on('error', (error) => {
         if (settled) return;
         settled = true;
@@ -168,7 +201,7 @@ export class Client {
     });
   }
 
-  private async send(method: string, path: string, init: { json?: unknown; headers?: Record<string, string>; accept?: number[]; machine?: boolean } = {}) {
+  private async send(method: string, path: string, init: { json?: unknown; headers?: Record<string, string>; accept?: number[]; machine?: boolean; timeoutMs?: number } = {}) {
     const response = await this.open(method, path, init);
     const buffer = await readBuffer(response.stream);
     const text = buffer.toString('utf8');
@@ -178,10 +211,7 @@ export class Client {
       catch { body = null; }
     }
     const ok = response.status >= 200 && response.status < 300;
-    if (!ok && !init.accept?.includes(response.status)) {
-      const parsed = errorCode(response.status, body);
-      throw new CliError(parsed.code, FAILURES[parsed.code] ?? '请求失败', 1, response.status === 401 || response.status === 403 || response.status === 404);
-    }
+    if (!ok && !init.accept?.includes(response.status)) throw failureFrom(response.status, body, response.headers);
     return { status: response.status, headers: response.headers, body, buffer, retryAfter: headerValue(response.headers, 'retry-after') };
   }
 
@@ -252,6 +282,107 @@ export class Client {
     return (body as { item: Item }).item;
   }
 
+  async uploadFile(options: {
+    target: Target;
+    file: string;
+    url: string;
+    sessionFile: string;
+    signal?: AbortSignal;
+    onProgress?: (sent: number, total: number, extra?: { speed?: number; eta?: number | null; report?: boolean }) => void;
+  }): Promise<Item> {
+    if (options.signal?.aborted) throw new CliError('INTERRUPTED', '已取消上传', 130);
+    let info;
+    try { info = statSync(options.file); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new CliError('NOT_FOUND', `找不到文件 ${options.file}`);
+      throw error;
+    }
+    if (!info.isFile()) throw new CliError('USAGE', `${options.file} 不是文件`, 2);
+    if (info.size < LARGE_FILE_BYTES) {
+      return this.upload(options.target, options.file, options.onProgress, options.signal);
+    }
+    const key = targetKey(options.target);
+    const signal = options.signal ?? new AbortController().signal;
+    return uploadChunked({
+      client: this,
+      target: options.target,
+      file: options.file,
+      mime: mimeFor(options.file),
+      url: options.url,
+      targetKey: key,
+      sessionFile: options.sessionFile,
+      signal,
+      findSession: async () => {
+        const path = await realpath(options.file);
+        const rows = await loadSessions(options.sessionFile);
+        return rows.find(row => row.url === options.url && row.targetKey === key && row.path === path);
+      },
+      onProgress: (sent, total, extra) => options.onProgress?.(sent, total, extra),
+    });
+  }
+
+  async createUpload(target: Target, filename: string, size: number, mime: string) {
+    const response = await this.send('POST', `${targetPath(target)}/uploads`, { json: { filename, size, mime } });
+    const body = response.body as { uploadId?: string; chunkSize?: number; expiresAt?: number; received?: number[] } | null;
+    if (!body?.uploadId || !body.chunkSize || !body.expiresAt) throw new CliError('INTERNAL', '创建上传会话的响应无效');
+    return { uploadId: body.uploadId, chunkSize: body.chunkSize, expiresAt: body.expiresAt, received: body.received ?? [] };
+  }
+
+  async getUpload(target: Target, uploadId: string) {
+    const response = await this.send('GET', `${targetPath(target)}/uploads/${encodeURIComponent(uploadId)}`);
+    const body = response.body as { size?: number; chunkSize?: number; expiresAt?: number; received?: number[] } | null;
+    if (!body || body.size == null || !body.chunkSize || !body.expiresAt) throw new CliError('INTERNAL', '上传会话响应无效');
+    return { uploadId, size: body.size, chunkSize: body.chunkSize, expiresAt: body.expiresAt, received: body.received ?? [] };
+  }
+
+  async putChunk(target: Target, uploadId: string, index: number, bytes: Buffer, sha256: string, signal: AbortSignal, onBytes: (sent: number) => void): Promise<void> {
+    if (signal.aborted) throw new CliError('INTERRUPTED', '已取消上传', 130);
+    const response = await this.open('PUT', `${targetPath(target)}/uploads/${encodeURIComponent(uploadId)}/chunks/${index}`, {
+      body: bytes,
+      signal,
+      timeoutMs: 0,
+      headers: { 'content-type': 'application/octet-stream', 'x-chunk-sha256': sha256 },
+    });
+    onBytes(bytes.length);
+    const buffer = await readBuffer(response.stream);
+    if (response.status === 204) return;
+    let body: unknown = null;
+    try { body = JSON.parse(buffer.toString('utf8')) as unknown; } catch { body = null; }
+    throw failureFrom(response.status, body, response.headers, '分片上传失败');
+  }
+
+  async completeUpload(target: Target, uploadId: string): Promise<Item> {
+    const response = await this.send('POST', `${targetPath(target)}/uploads/${encodeURIComponent(uploadId)}/complete`, { timeoutMs: 0 });
+    const item = (response.body as { item?: Item } | null)?.item;
+    if (!item) throw new CliError('INTERNAL', '完成响应无效');
+    return item;
+  }
+
+  async deleteUpload(target: Target, uploadId: string): Promise<void> {
+    await this.send('DELETE', `${targetPath(target)}/uploads/${encodeURIComponent(uploadId)}`, { accept: [404] });
+  }
+
+  async discardUploadSessions(sessionFile: string, url: string, key: string, files: string[]): Promise<void> {
+    let target: Target;
+    try { target = targetFromKey(key); }
+    catch { return; }
+    const wanted = new Set<string>();
+    for (const file of files) {
+      try { wanted.add(await realpath(file)); }
+      catch { /* missing file: nothing to match */ }
+    }
+    const records = await loadSessions(sessionFile).catch(() => []);
+    for (const record of records) {
+      if (record.url !== url || record.targetKey !== key || !wanted.has(record.path)) continue;
+      try {
+        await this.deleteUpload(target, record.uploadId);
+        await removeSession(sessionFile, record.uploadId);
+      } catch {
+        // A network failure leaves the local record so a later run can resume or cancel.
+      }
+    }
+  }
+
   async remove(target: Target, id: string): Promise<void> {
     await this.send('DELETE', `${targetPath(target)}/items/${encodeURIComponent(id)}`);
   }
@@ -301,20 +432,47 @@ export class Client {
     return buffer;
   }
 
-  async downloadTo(target: Target, id: string, dir: string, filename: string, options: { resume: boolean; force: boolean }): Promise<{ path: string; bytes: number }> {
-    await prepareDirectory(dir);
-    const dest = destination(dir, filename);
+  private downloadPath(target: Target, id: string): string {
+    return `${targetPath(target)}/items/${encodeURIComponent(id)}/download`;
+  }
+
+  private async throwDownload(response: RawResponse): Promise<never> {
+    const buffer = await readBuffer(response.stream);
+    let body: unknown = null;
+    try { body = JSON.parse(buffer.toString('utf8')) as unknown; } catch { body = null; }
+    const code = errorCode(response.status, body).code;
+    throw new CliError(code, FAILURES[code] ?? '下载失败');
+  }
+
+  private async probeSize(target: Target, id: string): Promise<number> {
+    const response = await this.open('GET', this.downloadPath(target, id), { headers: { range: 'bytes=0-0' } });
+    const total = contentRangeTotal(headerValue(response.headers, 'content-range'));
+    await readBuffer(response.stream);
+    if (response.status !== 206 || total == null || total < 1) throw new CliError('RANGE', '无法确认文件大小');
+    return total;
+  }
+
+  private async readRange(target: Target, id: string, start: number, endInclusive: number): Promise<Buffer> {
+    const response = await this.open('GET', this.downloadPath(target, id), {
+      headers: { range: `bytes=${start}-${endInclusive}` },
+    });
+    if (response.status !== 206) return this.throwDownload(response);
+    const header = headerValue(response.headers, 'content-range');
+    if (contentRangeStart(header) !== start) {
+      response.stream.resume();
+      throw new CliError('RANGE', '下载范围与请求不一致');
+    }
+    const buffer = await readBuffer(response.stream);
+    if (buffer.length !== endInclusive - start + 1) throw new CliError('RANGE', '下载分片长度与请求不一致');
+    return buffer;
+  }
+
+  private async downloadSequential(target: Target, id: string, dest: string, options: { resume: boolean; force: boolean }): Promise<{ path: string; bytes: number }> {
     const existing = await existingSize(dest, options.resume, options.force);
     const headers: Record<string, string> = {};
     if (existing > 0) headers.range = `bytes=${existing}-`;
-    const response = await this.open('GET', `${targetPath(target)}/items/${encodeURIComponent(id)}/download`, { headers });
-    if (response.status !== 200 && response.status !== 206 && response.status !== 416) {
-      const buffer = await readBuffer(response.stream);
-      let body: unknown = null;
-      try { body = JSON.parse(buffer.toString('utf8')) as unknown; } catch { body = null; }
-      const code = errorCode(response.status, body).code;
-      throw new CliError(code, FAILURES[code] ?? '下载失败');
-    }
+    const response = await this.open('GET', this.downloadPath(target, id), { headers });
+    if (response.status !== 200 && response.status !== 206 && response.status !== 416) return this.throwDownload(response);
     const plan = downloadPlan(response.status, existing, headerValue(response.headers, 'content-range'));
     if (plan === 'done') {
       response.stream.resume();
@@ -322,6 +480,42 @@ export class Client {
     }
     await saveStream(dest, response.stream, plan === 'append');
     return { path: dest, bytes: statSync(dest).size };
+  }
+
+  async downloadTo(target: Target, id: string, dir: string, filename: string, options: { resume: boolean; force: boolean; jobs?: number }): Promise<{ path: string; bytes: number }> {
+    const jobs = options.jobs ?? 1;
+    if (!Number.isInteger(jobs) || jobs < 1 || jobs > 8) throw new CliError('USAGE', '--jobs 必须在 1 到 8 之间', 2);
+    await prepareDirectory(dir);
+    const dest = destination(dir, filename);
+    const partial = `${dest}.dropit-partial`;
+    await rejectSymlink(dest);
+    await rejectSymlink(partial);
+    await rejectSymlink(`${partial}.json`);
+    if (!options.resume) {
+      await rm(partial, { force: true });
+      await rm(`${partial}.json`, { force: true });
+    }
+    let destInfo;
+    try { destInfo = await lstat(dest); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (destInfo && !destInfo.isFile()) throw new CliError('EXISTS', '目标已存在且不是文件');
+    const partialReady = options.resume && !destInfo && await isFile(partial);
+    if (jobs > 1 && destInfo && !options.force) {
+      if (options.resume && !await isFile(partial)) return this.downloadSequential(target, id, dest, options);
+      throw new CliError('EXISTS', options.resume ? '并行下载需要目标不存在，或加 --force' : '文件已存在，加 --force 覆盖');
+    }
+    if (jobs === 1 && !partialReady) return this.downloadSequential(target, id, dest, options);
+    const total = await this.probeSize(target, id);
+    return downloadParallel({
+      dest,
+      partial,
+      jobs,
+      resume: options.resume,
+      total,
+      fetchRange: (start, end) => this.readRange(target, id, start, end),
+    });
   }
 
   watchUrl(target: Target): string {

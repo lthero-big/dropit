@@ -42,14 +42,45 @@ export async function prepareDirectory(dir: string): Promise<void> {
   if (!info.isDirectory()) throw new CliError('USAGE', '-o 必须是目录', 2);
 }
 
+export async function rejectSymlink(path: string): Promise<void> {
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) throw new CliError('UNSAFE_PATH', '拒绝符号链接');
+  } catch (error) {
+    if (error instanceof CliError) throw error;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+}
+
+export function assertPartialSize(size: number, total: number): void {
+  if (!Number.isSafeInteger(size) || size < 0 || !Number.isSafeInteger(total) || total < 1) {
+    throw new CliError('RANGE', '本地 partial 大小无效');
+  }
+  if (size > total) throw new CliError('RANGE', '本地文件比服务器上的更大，无法续传');
+}
+
+export function contentRangeTotal(header: string | undefined): number | undefined {
+  const match = /\/(\d+)\s*$/.exec(header ?? '');
+  if (!match) return undefined;
+  const total = Number(match[1]);
+  return Number.isSafeInteger(total) ? total : undefined;
+}
+
+export function contentRangeStart(header: string | undefined): number | undefined {
+  const match = /^bytes (\d+)-/.exec(header ?? '');
+  if (!match) return undefined;
+  const start = Number(match[1]);
+  return Number.isSafeInteger(start) ? start : undefined;
+}
+
 export async function existingSize(dest: string, resume: boolean, force: boolean): Promise<number> {
   try {
     const link = await lstat(dest);
-    if (resume && link.isSymbolicLink()) throw new CliError('UNSAFE_PATH', '拒绝符号链接');
-    const info = link.isSymbolicLink() ? await stat(dest) : link;
-    if (!info.isFile()) throw new CliError('EXISTS', '目标已存在且不是文件');
+    if (link.isSymbolicLink()) throw new CliError('UNSAFE_PATH', '拒绝符号链接');
+    if (!link.isFile()) throw new CliError('EXISTS', '目标已存在且不是文件');
     if (!resume && !force) throw new CliError('EXISTS', '文件已存在，加 --force 覆盖');
-    return resume ? info.size : 0;
+    return resume ? link.size : 0;
   } catch (error) {
     if (error instanceof CliError) throw error;
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
@@ -65,7 +96,14 @@ export function downloadPlan(status: number, existing: number, contentRange: str
       ? '本地文件比服务器上的更大，无法续传'
       : '续传范围无效');
   }
-  if (status === 206 && existing > 0) return 'append';
+  if (status === 206 && existing > 0) {
+    const start = contentRangeStart(contentRange);
+    const total = contentRangeTotal(contentRange);
+    if (start === undefined || total === undefined) throw new CliError('RANGE', '续传响应缺少 Content-Range');
+    assertPartialSize(existing, total);
+    if (start !== existing) throw new CliError('RANGE', '本地 partial 大小与服务器范围不一致');
+    return 'append';
+  }
   if (status === 200 || status === 206) return 'replace';
   throw new CliError('HTTP_' + String(status), '下载失败');
 }
