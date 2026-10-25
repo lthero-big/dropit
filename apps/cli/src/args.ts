@@ -14,9 +14,9 @@ export type Command =
   | { kind: 'logout' }
   | { kind: 'whoami' }
   | { kind: 'send'; text?: string }
-  | { kind: 'push'; files: string[] }
+  | { kind: 'push'; files: string[]; keep: boolean }
   | { kind: 'ls' }
-  | { kind: 'get'; id: string; output?: string; resume: boolean; force: boolean }
+  | { kind: 'get'; id: string; output?: string; resume: boolean; force: boolean; jobs: number }
   | { kind: 'rm'; id: string }
   | { kind: 'share'; id: string; expires: '1h' | '1d' | '7d' | 'never'; maxViews: number | null }
   | { kind: 'watch'; exec?: string[] }
@@ -72,6 +72,8 @@ export function parseArgs(argv: string[]): Parsed {
     }
     if (arg === '-c' || arg === '--continue') { flags.set('continue', '1'); continue; }
     if (arg === '--force') { flags.set('force', '1'); continue; }
+    if (arg === '--keep') { flags.set('keep', '1'); continue; }
+    if (arg === '--jobs') { flags.set('jobs', take('--jobs', ++i)); continue; }
     if (arg === '-o' || arg === '--output') { flags.set('output', take(arg, ++i)); continue; }
     if (arg === '--name' || arg === '--scopes' || arg === '--expires-in-days' || arg === '--expires' || arg === '--max-views') {
       flags.set(arg.slice(2), take(arg, ++i));
@@ -126,16 +128,26 @@ export function parseArgs(argv: string[]): Parsed {
       extra([]);
       return { globals, command: { kind: 'send', text: positionals.length > 1 ? positionals.slice(1).join(' ') : undefined } };
     case 'push':
-      extra([]);
+      extra(['keep']);
       if (positionals.length < 2) throw new CliError('USAGE', 'push 至少需要一个文件', 2);
-      return { globals, command: { kind: 'push', files: positionals.slice(1) } };
+      return { globals, command: { kind: 'push', files: positionals.slice(1), keep: flags.has('keep') } };
     case 'ls':
       extra([]);
       if (positionals.length > 1) throw new CliError('USAGE', 'ls 不接受位置参数', 2);
       return { globals, command: { kind: 'ls' } };
     case 'get':
-      extra(['output', 'continue', 'force']);
-      return { globals, command: { kind: 'get', id: one('id'), output: flags.get('output'), resume: flags.has('continue'), force: flags.has('force') } };
+      extra(['output', 'continue', 'force', 'jobs']);
+      return {
+        globals,
+        command: {
+          kind: 'get',
+          id: one('id'),
+          output: flags.get('output'),
+          resume: flags.has('continue'),
+          force: flags.has('force'),
+          jobs: flags.has('jobs') ? integer(flags.get('jobs')!, '--jobs', 1, 8) : 1,
+        },
+      };
     case 'rm':
       extra([]);
       return { globals, command: { kind: 'rm', id: one('id') } };
@@ -177,9 +189,9 @@ export const usageText = `dropit — 云剪贴板命令行
   dropit logout
   dropit whoami
   dropit send [文本...]
-  dropit push <文件>...
+  dropit push <文件>... [--keep]
   dropit ls
-  dropit get <id|latest> [-o <目录>] [-c] [--force]
+  dropit get <id|latest> [-o <目录>] [-c] [--force] [--jobs <1-8>]
   dropit rm <id|latest>
   dropit share <id|latest> --expires <1h|1d|7d|never> [--max-views <次数>]
   dropit watch [--exec [--] <命令> [参数...]]
@@ -196,9 +208,10 @@ export const usageText = `dropit — 云剪贴板命令行
 环境变量优先于配置文件：DROPIT_URL、DROPIT_TOKEN。
 配置文件默认在 $XDG_CONFIG_HOME/dropit/config.json（否则 ~/.config/dropit/config.json），权限 0600。
 可用 DROPIT_CONFIG 指定配置文件路径。令牌不会打印到终端。
-退出码：0 成功，2 用法错误，其他非 0 为失败。错误写到 stderr。
+退出码：0 成功，2 用法错误，130 被中断，其他非 0 为失败。错误写到 stderr。
 没有 TTY 时不会询问输入。send 在没有参数时从 stdin 读取。
-get 不加 -o 时把内容写到 stdout。-c 对已有文件使用 Range 续传，符号链接会被拒绝。
+不小于 256 KiB 的 push 按分片上传，最多 3 个分片并行，失败分片会重试。再次执行同一命令会从配置目录的 uploads.json 续传。该文件权限 0600，不含令牌。Ctrl+C 删除未完成的服务器会话；--keep 保留它。
+get 不加 -o 时把内容写到 stdout。-c 续传已有文件。--jobs 大于 1 时并行 Range 下载到临时文件，完成后原子改名。符号链接一律拒绝，默认不覆盖已有文件。
 watch 断线后按指数退避重连，并用新的 snapshot 对账。
 --exec 不经过 shell；条目正文从 stdin 传入，元数据放在 DROPIT_ITEM_* 环境变量里。
 `;

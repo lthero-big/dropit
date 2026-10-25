@@ -5,5 +5,5 @@
     "rootDir": "."
   },
   "include": ["src", "test"],
-  "exclude": ["test/fixture-server.ts"]
+  "exclude": ["test/fixture-server.ts", "test/chunk-server.ts"]
 }

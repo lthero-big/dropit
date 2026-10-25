@@ -9,6 +9,7 @@ import { latestItem, pickSpace, type Item } from './items.js';
 import { deviceLogin } from './login.js';
 import { destination, existingSize, prepareDirectory, saveStream, withoutControls } from './paths.js';
 import { createPushWriter, pushFiles } from './push.js';
+import { targetKey, uploadSessionPath } from './sessions.js';
 import { watchLoop } from './watch.js';
 
 export { formatProgress } from './push.js';
@@ -216,18 +217,28 @@ async function dispatch(parsed: Parsed, env: NodeJS.ProcessEnv, io: Io, secrets:
     return;
   }
   if (command.kind === 'push') {
+    if (!base) throw new CliError('USAGE', '缺少服务地址。设置 DROPIT_URL，或执行 dropit login --url <url>。', 2);
     const controller = new AbortController();
     const onSigint = () => controller.abort();
     process.on('SIGINT', onSigint);
+    const sessionFile = uploadSessionPath(path);
     try {
       const result = await pushFiles({
         files: command.files,
         signal: controller.signal,
-        onEvent: createPushWriter(io),
-        upload: (file, onProgress, signal) => client.upload(target, file, onProgress, signal),
+        onEvent: createPushWriter({ ...io, json }),
+        upload: (file, onProgress, signal) => client.uploadFile({
+          target, file, url: base, sessionFile, signal, onProgress,
+        }),
       });
       if (result.items.length) emit(io, json, { items: result.items }, result.items.map(item => `${item.id}\t${item.filename ?? ''}`).join('\n'));
-      if (controller.signal.aborted || result.cancelled) throw new CliError('INTERRUPTED', '已取消上传', 130);
+      if (controller.signal.aborted || result.cancelled) {
+        if (!command.keep) {
+          try { await client.discardUploadSessions(sessionFile, base, targetKey(target), command.files); }
+          catch { /* exit 130 even if cleanup cannot reach the server */ }
+        }
+        throw new CliError('INTERRUPTED', '已取消上传', 130);
+      }
       if (result.failed) throw new CliError('UPLOAD_FAILED', result.errors[0] ?? `${result.failed} 个文件上传失败`);
     } finally {
       process.off('SIGINT', onSigint);
@@ -240,8 +251,10 @@ async function dispatch(parsed: Parsed, env: NodeJS.ProcessEnv, io: Io, secrets:
     return;
   }
   if (command.kind === 'get') {
+    if (command.jobs > 1 && !command.output) throw new CliError('USAGE', '并行下载需要 -o 目录', 2);
     if (command.resume && !command.output) throw new CliError('USAGE', '续传需要 -o 目录', 2);
     const item = await resolveItem(client, target, command.id);
+    if (item.kind === 'text' && command.jobs > 1) throw new CliError('USAGE', '并行下载只适用于文件', 2);
     if (!command.output) {
       const body = item.kind === 'text' ? Buffer.from(item.text ?? '', 'utf8') : await client.downloadBuffer(target, item.id);
       io.stdout.write(body);
@@ -257,7 +270,7 @@ async function dispatch(parsed: Parsed, env: NodeJS.ProcessEnv, io: Io, secrets:
       return;
     }
     const saved = await client.downloadTo(target, item.id, command.output, item.filename || 'download', {
-      resume: command.resume, force: command.force,
+      resume: command.resume, force: command.force, jobs: command.jobs,
     });
     emit(io, json, saved, saved.path);
     return;

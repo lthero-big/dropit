@@ -54,10 +54,12 @@ export DROPIT_TOKEN=...
 dropit send "一行文本"
 echo "来自管道" | dropit send
 dropit push ./notes.txt ./photo.png
+dropit push ./large.bin --keep
 dropit ls
 dropit get latest
 dropit get <id> -o ./downloads
 dropit get <id> -o ./downloads -c
+dropit get <id> -o ./downloads --jobs 4
 dropit get <id> -o ./downloads --force
 dropit rm latest
 dropit share latest --expires 1d --max-views 1
@@ -65,9 +67,13 @@ dropit share latest --expires 1d --max-views 1
 
 没有参数的 `send` 从 stdin 读取。没有 TTY 时不会询问，空文本会失败。
 
-`push` 在 stderr 是 TTY 时显示进度。某个文件失败时，该文件不会变成条目，命令停在这个文件；前面已经传完的文件会保留。
+`push` 在 stderr 是 TTY 时用同一行刷新进度、速度和剩余时间。没有 TTY 时按分片边界逐行打印。某个文件失败时，该文件不会变成条目，命令停在这个文件；前面已经传完的文件会保留。
 
-`get` 不加 `-o` 时把内容写到 stdout，可以继续管道。`-o` 是目录。文件名用服务器返回的名字，只取安全的基名，不会写到目录外面，默认也不覆盖已有文件。`-c` 用单段 `Range` 接着已有的普通文件写；目标是符号链接时拒绝续传。文本不能续传。
+不小于 256 KiB 的文件走分片上传：最多 3 个分片并行，失败分片会重试。更小的文件仍是一次 `POST /items/file`。会话记录写在配置目录的 `uploads.json`，权限 `0600`，目录 `0700`，不含令牌。进程被杀掉之后，再执行同一条 `push` 会自动续传。Ctrl+C 退出码是 130，并删除服务器上的未完成会话；`--keep` 保留该会话，供下次续传。
+
+`get` 不加 `-o` 时把内容写到 stdout，可以继续管道。`-o` 是目录。文件名用服务器返回的名字，只取安全的基名，不会写到目录外面，默认也不覆盖已有文件。`-c` 用单段 `Range` 接着已有的普通文件写。符号链接一律拒绝，包括 `--force`。文本不能续传，也不能 `--jobs` 大于 1。
+
+`--jobs` 取 1 到 8，默认 1。大于 1 时把文件分成多段 `Range` 并行写入 `${目标}.dropit-partial`，核对大小和进度后再原子改名。目标已存在时需要 `--force`；若同时有 `-c` 且没有这份临时文件，则仍按单段续传。不加 `-c` 会丢掉上次留下的临时文件并重新下载。
 
 `share` 打印的 URL 是能力凭据。拿到链接的人就能读，直到过期、次数用尽或被撤销。
 
@@ -106,6 +112,6 @@ dropit room join 'http://127.0.0.1:8787/rooms/<token>'
 
 ## 机器可读输出
 
-`--json` 时，成功结果写到 stdout，错误写到 stderr，形如 `{"error":{"code":"...","message":"..."}}`。`get` 不加 `-o` 时 stdout 仍是原始内容。`login --json` 先输出一行验证信息（不含设备码），批准后再输出一行登录结果（不含令牌）。
+`--json` 时，成功结果写到 stdout，错误写到 stderr，形如 `{"error":{"code":"...","message":"..."}}`。`push --json` 的进度也是 stderr 上的 JSON 行，只含状态、文件名、字节、速度和剩余秒数，不含令牌、路径或上传会话号。`get` 不加 `-o` 时 stdout 仍是原始内容。`login --json` 先输出一行验证信息（不含设备码），批准后再输出一行登录结果（不含令牌）。
 
-退出码：`0` 成功，`2` 用法错误，`130` 监听被中断，其他非 0 为失败。错误在 stderr。
+退出码：`0` 成功，`2` 用法错误，`130` 被中断，其他非 0 为失败。错误在 stderr。令牌不会打印到终端。
