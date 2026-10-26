@@ -85,6 +85,15 @@ importers:
       '@fontsource-variable/geist':
         specifier: ^5.3.0
         version: 5.3.0
+      '@fontsource-variable/geist-mono':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource-variable/noto-sans-sc':
+        specifier: ^5.3.1
+        version: 5.3.1
+      '@fontsource-variable/noto-serif-sc':
+        specifier: ^5.3.1
+        version: 5.3.1
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -94,6 +103,9 @@ importers:
       lucide-react:
         specifier: ^1.61.0
         version: 1.61.0(@types/react@19.3.0)(react@19.3.1)
+      motion:
+        specifier: ^14.6.0
+        version: 14.6.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
@@ -475,8 +487,17 @@ packages:
   '@floating-ui/utils@0.2.12':
     resolution: {integrity: sha512-HpCo8tmWzLVad5s2d19EhAz5zqrrQ6s69qd6moPMQvkOuSwDT1YgRfWSVuc4ennqrgv3OHppiOGMQ7oC13yIww==}
 
+  '@fontsource-variable/geist-mono@5.3.0':
+    resolution: {integrity: sha512-vBbuwDEo9AkrqADMXOrlAR3DFcJi4/JxeuU43FoiQERnNwsfXNnvxvReZG02cQKmyk4DZkZdBZX3oTDvy2zBAw==}
+
   '@fontsource-variable/geist@5.3.0':
     resolution: {integrity: sha512-j0m+vLQuG5XAYoHtGCVu0spvlGreR3EzpECUVzkFmI1mTVnAO38l/NEPDCFgZ177JxzYJCLSmTQibIiYPilGrA==}
+
+  '@fontsource-variable/noto-sans-sc@5.3.1':
+    resolution: {integrity: sha512-UB96JJ17HyD5ehEU7Em0hDdh7fvTMB4B4Hzmq5c4QaNwwSLqTrdM2S+coySeBqCkXwh0DxqXT0b0wMrmzorFpQ==}
+
+  '@fontsource-variable/noto-serif-sc@5.3.1':
+    resolution: {integrity: sha512-aIHcBaL13QctVaJFeT6wqfgO9Rq/cNtD5g2ob4ze59fYPYwacGthnIrHBe83kDpMEB/k6VGtGc6fS99RImcoSQ==}
 
   '@hono/node-server@2.1.5':
     resolution: {integrity: sha512-MgP/I06GdvsilDspMk/qmRzpk8LOUStP6jFAbSRi40W09DhoyUn+Mj7eyKICPqeYKybOjVFLVIAQzvu1bfIa7Q==}
@@ -2292,6 +2313,17 @@ packages:
     resolution: {integrity: sha512-buRG0fpBtRHSTCOASe6hD258tEubFoRLb4ZNA6NxMVHNw2gOcwHo9wyablzMzOA5z9xA9L1KNjk/Nt6MT9aYow==}
     engines: {node: '>= 0.6'}
 
+  framer-motion@14.6.0:
+    resolution: {integrity: sha512-MzBgZxGgoHPfSLEXmo4o5XlZvb+nVRFdHtGjVhm6LMIEJKTt/8hNO023euL5mYyzc8llV/hQTfjnN68tNRHalw==}
+    peerDependencies:
+      react: ^18.0.0 || ^19.0.0
+      react-dom: ^18.0.0 || ^19.0.0
+    peerDependenciesMeta:
+      react:
+        optional: true
+      react-dom:
+        optional: true
+
   fresh@2.0.0:
     resolution: {integrity: sha512-Rx/WycZ60HOaqLKAi6cHRKKI7zxWbJ31MhntmtwMoaTeF7XFH9hhBp8vITaMidfljRQ6eYWCKkaTK+ykVJHP2A==}
     engines: {node: '>= 0.8'}
@@ -2781,6 +2813,23 @@ packages:
 
   mkdirp-classic@0.5.3:
     resolution: {integrity: sha512-gKLcREMhtuZRwRAfqP3RFW+TK4JqApVBtOIftVgjuABpAtpxhPGaDcfvbhNvD0B8iD1oUr/txX35NjcaY6Ns/A==}
+
+  motion-dom@14.6.0:
+    resolution: {integrity: sha512-lIojTl9aYSPIkeOOSzBliy1nNvpdO3JtVzW2WgTXQlOP4ZMuJhtWO3fP7OD4TVFwlRucdvxlDSMkL+fEQnQ52A==}
+
+  motion-utils@14.6.0:
+    resolution: {integrity: sha512-bZJo2AmQ2aOFkaato6VXrTbkPG0XhMzivWUWSaI59pxyllj8QMQUFZ84MYRQnPkK+7dr4KldyJwF2+RM0sdq/w==}
+
+  motion@14.6.0:
+    resolution: {integrity: sha512-qqaZbyubgk7x3zxjPgP1l3Br/KQXol/IIV1uqb358SoN4ApcqNuV7+wyDPg/XLErmuyQL5lL8JVI/fOmDsmBKQ==}
+    peerDependencies:
+      react: ^18.0.0 || ^19.0.0
+      react-dom: ^18.0.0 || ^19.0.0
+    peerDependenciesMeta:
+      react:
+        optional: true
+      react-dom:
+        optional: true
 
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
@@ -3893,7 +3942,13 @@ snapshots:
 
   '@floating-ui/utils@0.2.12': {}
 
+  '@fontsource-variable/geist-mono@5.3.0': {}
+
   '@fontsource-variable/geist@5.3.0': {}
+
+  '@fontsource-variable/noto-sans-sc@5.3.1': {}
+
+  '@fontsource-variable/noto-serif-sc@5.3.1': {}
 
   '@hono/node-server@2.1.5(hono@4.13.13)':
     dependencies:
@@ -5606,6 +5661,15 @@ snapshots:
 
   forwarded@0.2.0: {}
 
+  framer-motion@14.6.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1):
+    dependencies:
+      motion-dom: 14.6.0
+      motion-utils: 14.6.0
+      tslib: 2.8.1
+    optionalDependencies:
+      react: 19.3.1
+      react-dom: 19.3.1(react@19.3.1)
+
   fresh@2.0.0: {}
 
   fs-constants@1.0.0: {}
@@ -5959,6 +6023,20 @@ snapshots:
   minimist@1.2.8: {}
 
   mkdirp-classic@0.5.3: {}
+
+  motion-dom@14.6.0:
+    dependencies:
+      motion-utils: 14.6.0
+
+  motion-utils@14.6.0: {}
+
+  motion@14.6.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1):
+    dependencies:
+      framer-motion: 14.6.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+      tslib: 2.8.1
+    optionalDependencies:
+      react: 19.3.1
+      react-dom: 19.3.1(react@19.3.1)
 
   ms@2.1.3: {}
 
