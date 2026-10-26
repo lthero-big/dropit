@@ -279,7 +279,7 @@ function ConfirmRetract({ onConfirm }: { onConfirm: () => void }) {
       animate={{ opacity: 1, scale: 1, transition: springBounce }}
       exit={{ opacity: 0, scale: 0.8, transition: { duration: dur.fast, ease: easeIn } }}
       onClick={onConfirm}
-      className="absolute inset-y-1.5 right-1.5 z-0 flex w-[80px] flex-col items-center justify-center gap-1 rounded-[var(--radius-sm)] bg-[var(--accent)] text-[11.5px] font-medium text-white"
+      className="absolute inset-y-1.5 right-1.5 z-20 flex w-[80px] flex-col items-center justify-center gap-1 rounded-[var(--radius-sm)] bg-[var(--accent)] text-[11.5px] font-medium text-white"
     >
       <Undo2Icon className="size-4" />
       确认撤回

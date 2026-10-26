@@ -212,6 +212,13 @@
   transform: none;
   transition-timing-function: var(--ease-out);
 }
+/* Touch screens have no hover: keep the actions visible so hold-to-retract is reachable. */
+@media (hover: none) {
+  .dd-card .dd-card-actions {
+    opacity: 1;
+    transform: none;
+  }
+}
 /* near-expiry: fade + a slight curl of the bottom-right corner */
 .dd-card[data-aging="true"] {
   clip-path: polygon(0 0, 100% 0, 100% calc(100% - var(--curl) * 22px), calc(100% - var(--curl) * 22px) 100%, 0 100%);

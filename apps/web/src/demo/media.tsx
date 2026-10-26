@@ -9,6 +9,10 @@ import { dur, easeIn, easeOut, springBounce, springSettle } from './motion-token
  * inside a card must keep their pointer events to themselves, otherwise a
  * press on "play" starts a drag or copies the clip. Motion listens with
  * native listeners on the card, so React's stopPropagation is too late.
+ *
+ * The native stop also hides pointerdown from React's root listener, so a
+ * control inside an isolated subtree must use onPointerDownCapture (React runs
+ * capture handlers from the root before the event reaches this element).
  */
 export function useIsolatePointer<T extends HTMLElement>(): RefObject<T | null> {
   const ref = useRef<T | null>(null)
@@ -80,7 +84,8 @@ export function HoldToConfirm(props: { label: string; onConfirm: () => void; chi
       title={`按住 ${label}`}
       data-holding={holding || undefined}
       className={`dd-hold relative grid place-items-center ${className ?? ''}`}
-      onPointerDown={(e) => {
+      style={{ touchAction: 'none', WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
+      onPointerDownCapture={(e) => {
         if (e.button !== 0) return
         e.currentTarget.setPointerCapture?.(e.pointerId)
         start()
@@ -153,11 +158,24 @@ export function AudioPlayer({ src, name, color, compact = false }: { src: string
     if (el.paused) void el.play().catch(() => undefined)
     else el.pause()
   }
+  const scrubbing = useRef(false)
   const seek = (clientX: number, target: HTMLElement) => {
     const el = audio.current
-    if (!el || !total) return
+    if (!el) return
+    const len = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : total
+    if (!len) {
+      // Metadata not loaded yet (iOS ignores preload): load, then seek.
+      const r = target.getBoundingClientRect()
+      const at = Math.max(0, Math.min(1, (clientX - r.left) / r.width))
+      el.addEventListener('loadedmetadata', () => {
+        el.currentTime = at * el.duration
+        setT(el.currentTime)
+      }, { once: true })
+      el.load()
+      return
+    }
     const r = target.getBoundingClientRect()
-    el.currentTime = Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * total
+    el.currentTime = Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * len
     setT(el.currentTime)
   }
 
@@ -195,7 +213,18 @@ export function AudioPlayer({ src, name, color, compact = false }: { src: string
         aria-valuemax={Math.round(total)}
         aria-valuenow={Math.round(t)}
         className={`flex flex-1 cursor-pointer items-center gap-[2px] ${compact ? 'h-5' : 'h-7'}`}
-        onPointerDown={(e) => seek(e.clientX, e.currentTarget)}
+        style={{ touchAction: 'none' }}
+        onPointerDownCapture={(e) => {
+          if (e.button !== 0) return
+          scrubbing.current = true
+          e.currentTarget.setPointerCapture?.(e.pointerId)
+          seek(e.clientX, e.currentTarget)
+        }}
+        onPointerMove={(e) => {
+          if (scrubbing.current) seek(e.clientX, e.currentTarget)
+        }}
+        onPointerUp={() => (scrubbing.current = false)}
+        onPointerCancel={() => (scrubbing.current = false)}
         onKeyDown={(e) => {
           const el = audio.current
           if (!el) return
