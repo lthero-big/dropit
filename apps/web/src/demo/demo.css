@@ -1,0 +1,319 @@
+/*
+ * RHEA-191 UI demo tokens. Everything is scoped to `.dd` so the live app keeps
+ * its current look. Two directions × two modes:
+ *   data-dir="paper" 纸感：暖灰、Geist + Noto Sans SC、6px 圆角
+ *   data-dir="ink"   墨刊：石墨暖灰、Noto Serif SC 标题 + Geist Mono 元信息、3px 圆角
+ */
+@layer base {
+  .dd *,
+  .dd *::before,
+  .dd *::after {
+    border-color: var(--line-1);
+  }
+  .dd :where(button, a[href], [role="button"], [data-pressable]):hover {
+    background-color: transparent;
+  }
+  .dd :where(button, a[href], [role="button"], [data-pressable]):active {
+    transform: none;
+  }
+}
+
+@layer components {
+.dd {
+  /* motion tokens */
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in: cubic-bezier(0.55, 0, 1, 0.45);
+
+  --font-ui: "Geist Variable", "Noto Sans SC Variable", "PingFang SC", system-ui, sans-serif;
+  --font-display: var(--font-ui);
+  --font-mono: "Geist Mono Variable", ui-monospace, "SFMono-Regular", monospace;
+
+  --radius-xs: 3px;
+  --radius-sm: 5px;
+  --radius-md: 7px;
+  --radius-lg: 10px;
+
+  /* paper · light */
+  --bg: #f4f2ee;
+  --surface-0: #faf9f7;
+  --surface-1: #ffffff;
+  --surface-2: #f0ede8;
+  --surface-sunken: #ebe8e2;
+  --line-1: #e7e3dc;
+  --line-2: #d9d4cb;
+  --line-3: #bdb6aa;
+  --fg: #1d1b18;
+  --fg-2: #4a4640;
+  --fg-3: #7d776d;
+  --fg-4: #a59f94;
+  --accent: #d0021b;
+  --accent-soft: color-mix(in oklab, var(--accent) 10%, transparent);
+  --accent-fg: #ffffff;
+  --ok: #2f7d4f;
+  --ok-soft: color-mix(in oklab, var(--ok) 14%, transparent);
+  --code-bg: #f6f4f0;
+  --shadow-1: 0 1px 0 rgb(29 27 24 / 0.04), 0 1px 2px rgb(29 27 24 / 0.05);
+  --shadow-2: 0 1px 0 rgb(29 27 24 / 0.04), 0 4px 12px -2px rgb(29 27 24 / 0.08), 0 2px 4px -2px rgb(29 27 24 / 0.06);
+  --shadow-3: 0 18px 40px -12px rgb(29 27 24 / 0.22), 0 6px 14px -6px rgb(29 27 24 / 0.12);
+  --ring: color-mix(in oklab, var(--accent) 55%, transparent);
+  --dev-mac: #6b6a8f;
+  --dev-phone: #3f7f74;
+  --dev-pad: #a86b2d;
+  --dev-pc: #4d6f9c;
+
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  color-scheme: light;
+}
+
+.dd[data-mode="dark"] {
+  --bg: #121110;
+  --surface-0: #171615;
+  --surface-1: #1d1c1a;
+  --surface-2: #252321;
+  --surface-sunken: #0e0d0c;
+  --line-1: #2a2826;
+  --line-2: #36332f;
+  --line-3: #4d4943;
+  --fg: #eeebe6;
+  --fg-2: #c7c2ba;
+  --fg-3: #958f85;
+  --fg-4: #6c675f;
+  --accent: #f0434f;
+  --accent-fg: #160707;
+  --ok: #5cc28a;
+  --code-bg: #151413;
+  --shadow-1: 0 1px 0 rgb(255 255 255 / 0.03) inset, 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-2: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 6px 16px -4px rgb(0 0 0 / 0.55);
+  --shadow-3: 0 1px 0 rgb(255 255 255 / 0.05) inset, 0 22px 48px -12px rgb(0 0 0 / 0.7);
+  --dev-mac: #a3a1d6;
+  --dev-phone: #6cc4b4;
+  --dev-pad: #e0a165;
+  --dev-pc: #86a9d8;
+  color-scheme: dark;
+}
+
+/* ink direction: editorial serif display, tighter radii, cooler stone */
+.dd[data-dir="ink"] {
+  --font-ui: "Geist Variable", "Noto Serif SC Variable", "Songti SC", serif;
+  --font-display: "Noto Serif SC Variable", "Songti SC", Georgia, serif;
+  --radius-xs: 2px;
+  --radius-sm: 3px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --bg: #ecebe6;
+  --surface-0: #f3f2ed;
+  --surface-1: #f8f7f3;
+  --surface-2: #e5e3dc;
+  --surface-sunken: #e0ded6;
+  --line-1: #d8d5cc;
+  --line-2: #c4c0b5;
+  --line-3: #8f8a7e;
+  --fg: #1a1916;
+  --fg-2: #3f3c36;
+  --fg-3: #6f6a60;
+  --accent: #b3121f;
+  --code-bg: #efeee8;
+  --shadow-1: none;
+  --shadow-2: 0 1px 0 var(--line-2);
+  --shadow-3: 0 14px 30px -14px rgb(26 25 22 / 0.35);
+}
+.dd[data-dir="ink"][data-mode="dark"] {
+  --bg: #0f0f0e;
+  --surface-0: #141413;
+  --surface-1: #181817;
+  --surface-2: #20201e;
+  --surface-sunken: #0a0a09;
+  --line-1: #2a2a27;
+  --line-2: #3a3935;
+  --line-3: #5e5c55;
+  --fg: #e9e7e1;
+  --fg-2: #c3c0b8;
+  --fg-3: #8e8b82;
+  --accent: #e5484d;
+  --code-bg: #121211;
+  --shadow-1: none;
+  --shadow-2: 0 1px 0 var(--line-2);
+  --shadow-3: 0 18px 40px -14px rgb(0 0 0 / 0.8);
+}
+
+
+:where(.dd) :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.dd-display {
+  font-family: var(--font-display);
+}
+.dd-mono {
+  font-family: var(--font-mono);
+  font-feature-settings: "zero";
+}
+
+.dd-surface {
+  background: var(--surface-1);
+  border: 1px solid var(--line-1);
+  box-shadow: var(--shadow-1);
+}
+.dd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 1.75rem;
+  padding: 0 0.625rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-1);
+  background: var(--surface-1);
+  color: var(--fg-2);
+  font-size: 12px;
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.dd-chip:hover {
+  background: var(--surface-2);
+  border-color: var(--line-2);
+  color: var(--fg);
+}
+.dd-chip[aria-pressed="true"] {
+  background: var(--fg);
+  border-color: var(--fg);
+  color: var(--bg);
+}
+
+/* ---------- clip card ---------- */
+.dd-card {
+  position: relative;
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  border: 1px solid var(--line-1);
+  box-shadow: var(--shadow-1);
+  transition: box-shadow var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out);
+  /* --life: 1 = fresh, 0 = expired; --curl: 0..1 */
+  --life: 1;
+  --curl: 0;
+}
+.dd-card:hover {
+  border-color: var(--line-2);
+  box-shadow: var(--shadow-2);
+}
+.dd-card[data-copied="true"] {
+  border-color: color-mix(in oklab, var(--ok) 55%, var(--line-2));
+}
+/*
+ * Actions (置顶 / 撤回 / 复制) stay hidden until the card is tapped open, so a
+ * stray tap never copies. Hidden buttons take no pointer events: a tap on
+ * where they would be just opens the card. Desktop hover and keyboard focus
+ * still reveal them.
+ */
+.dd-card .dd-card-actions > * {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(3px) scale(0.86);
+  transition: opacity var(--dur-fast) var(--ease-in), transform var(--dur-fast) var(--ease-in);
+}
+.dd-card[data-open] .dd-card-actions > *,
+.dd-card:focus-visible .dd-card-actions > *,
+.dd-card:has(:focus-visible) .dd-card-actions > * {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  transition: opacity var(--dur-base) var(--ease-out), transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* hover only in the mouse gesture mode (same switch as pin-drag vs swipe),
+   so a touch tap never leaves a sticky :hover reveal behind */
+.dd[data-gesture="pin-drag"] .dd-card:hover .dd-card-actions > * {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  transition: opacity var(--dur-base) var(--ease-out), transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* stagger right-to-left: copy first, it sits nearest the thumb */
+.dd-card .dd-card-actions > :nth-last-child(2) { transition-delay: 30ms; }
+.dd-card .dd-card-actions > :nth-last-child(3) { transition-delay: 60ms; }
+.dd-card[data-open] {
+  border-color: var(--line-3);
+}
+.dd-card[data-open]::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--fg) 9%, transparent);
+  pointer-events: none;
+  animation: dd-open-ring var(--dur-slow) var(--ease-out);
+}
+@keyframes dd-open-ring {
+  from { box-shadow: 0 0 0 0 color-mix(in oklab, var(--fg) 16%, transparent); }
+}
+/* the "+ 分组" hint on ungrouped cards follows the same reveal */
+.dd-card .dd-reveal {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-in);
+}
+.dd-card[data-open] .dd-reveal,
+.dd-card:has(:focus-visible) .dd-reveal {
+  opacity: 1;
+  pointer-events: auto;
+}
+.dd[data-gesture="pin-drag"] .dd-card:hover .dd-reveal { opacity: 1; pointer-events: auto; }
+@media (prefers-reduced-motion: reduce) {
+  .dd-card .dd-card-actions > * { transform: none !important; transition-delay: 0ms !important; }
+  .dd-card[data-open]::before { animation: none; }
+}
+.dd[data-reduced="true"] .dd-card .dd-card-actions > * { transform: none; transition-delay: 0ms; }
+.dd[data-reduced="true"] .dd-card[data-open]::before { animation: none; }
+/* near-expiry: fade + a slight curl of the bottom-right corner */
+.dd-card[data-aging="true"] {
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - var(--curl) * 22px), calc(100% - var(--curl) * 22px) 100%, 0 100%);
+}
+.dd-card[data-aging="true"]::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: calc(var(--curl) * 22px);
+  height: calc(var(--curl) * 22px);
+  border-top-left-radius: 3px;
+  background: linear-gradient(135deg, var(--surface-2) 0%, var(--surface-2) 48%, color-mix(in oklab, var(--fg) 14%, var(--surface-2)) 52%, transparent 54%);
+  box-shadow: -2px -2px 5px rgb(0 0 0 / 0.08);
+  pointer-events: none;
+}
+.dd-card-body {
+  opacity: calc(0.38 + var(--life) * 0.62);
+  filter: saturate(calc(0.35 + var(--life) * 0.65));
+  transition: opacity 1s linear, filter 1s linear;
+}
+
+.dd-skel {
+  background: linear-gradient(90deg, var(--surface-2) 0%, var(--surface-sunken) 40%, var(--surface-2) 80%);
+  background-size: 300% 100%;
+  animation: dd-shimmer 1.4s var(--ease-in) infinite;
+  border-radius: var(--radius-xs);
+}
+@keyframes dd-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -50% 0; }
+}
+
+.dd-scroll-x {
+  scrollbar-width: none;
+}
+.dd-scroll-x::-webkit-scrollbar {
+  display: none;
+}
+
+.dd-grid-bg {
+  background-image: radial-gradient(color-mix(in oklab, var(--fg) 7%, transparent) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dd-skel { animation: none; }
+  .dd-card-body { transition: none; }
+}
+.dd[data-reduced="true"] .dd-skel { animation: none; }
+
+}
