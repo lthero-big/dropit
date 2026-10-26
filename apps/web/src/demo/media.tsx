@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
-import { AnimatePresence, animate, motion, useMotionValue, useTransform, type AnimationPlaybackControls } from 'motion/react'
+import { AnimatePresence, animate, motion, useMotionValue, useTransform, type AnimationPlaybackControls, type MotionValue } from 'motion/react'
 import { MaximizeIcon, MinusIcon, PauseIcon, PlayIcon, PlusIcon, XIcon } from 'lucide-react'
 import { dur, easeIn, easeOut, springBounce, springSettle } from './motion-tokens.ts'
 
@@ -48,9 +48,20 @@ export function HoldToConfirm(props: { label: string; onConfirm: () => void; chi
   const run = useRef<AnimationPlaybackControls | null>(null)
   const [holding, setHolding] = useState(false)
   const [done, setDone] = useState(false)
+  // Where the progress bubble goes. It is portalled out of the card: the card
+  // clips its overflow, and on a phone the finger covers the button's ring,
+  // so the only visible progress has to sit above the finger, outside the card.
+  const [anchor, setAnchor] = useState<{ host: HTMLElement; x: number; y: number } | null>(null)
+  const fill = useTransform(progress, [0, 1], ['0%', '100%'])
 
   const start = useCallback(() => {
     if (run.current) return
+    const el = ref.current
+    if (el) {
+      const r = el.getBoundingClientRect()
+      const host = (el.closest('.dd') as HTMLElement | null) ?? document.body
+      setAnchor({ host, x: r.left + r.width / 2, y: r.top })
+    }
     setHolding(true)
     run.current = animate(progress, 1, {
       duration: (HOLD_MS / 1000) * (1 - progress.get()),
@@ -63,7 +74,7 @@ export function HoldToConfirm(props: { label: string; onConfirm: () => void; chi
         onConfirm()
       },
     })
-  }, [onConfirm, progress])
+  }, [onConfirm, progress, ref])
 
   const cancel = useCallback(() => {
     if (!run.current) return
@@ -111,22 +122,48 @@ export function HoldToConfirm(props: { label: string; onConfirm: () => void; chi
       <motion.span animate={holding ? { scale: 0.86 } : { scale: 1 }} transition={springBounce} className="relative grid place-items-center">
         {children}
       </motion.span>
-      <AnimatePresence>
-        {holding && !done ? (
-          <motion.span
-            role="status"
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0, transition: { duration: dur.fast, ease: easeOut } }}
-            exit={{ opacity: 0, transition: { duration: dur.fast, ease: easeIn } }}
-            className="pointer-events-none absolute -top-2 right-0 z-30 -translate-y-full whitespace-nowrap rounded-[var(--radius-sm)] bg-[var(--fg)] px-2 py-1 text-[11px] text-[var(--bg)] shadow-[var(--shadow-2)]"
-          >
-            继续按住{label}
-          </motion.span>
-        ) : null}
-      </AnimatePresence>
+      {anchor
+        ? createPortal(
+            <AnimatePresence onExitComplete={() => setAnchor(null)}>
+              {holding && !done ? <HoldBubble key="hold" label={label} x={anchor.x} y={anchor.y} fill={fill} /> : null}
+            </AnimatePresence>,
+            anchor.host,
+          )
+        : null}
     </button>
   )
 }
+/**
+ * Floating "keep holding" bubble with a filling bar. Fixed-positioned above the
+ * press point, higher on touch so it clears the thumb, and clamped to the
+ * viewport so a button near the screen edge still shows the whole bubble.
+ */
+function HoldBubble(props: { label: string; x: number; y: number; fill: MotionValue<string> }) {
+  const { label, x, y, fill } = props
+  const W = 156
+  const coarse = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches
+  const gap = coarse ? 44 : 10
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1024
+  const left = Math.min(Math.max(8, x - W / 2), vw - W - 8)
+  const bottom = Math.max(8 + 44, y - gap)
+  return (
+    <motion.div
+      role="status"
+      aria-live="polite"
+      initial={{ opacity: 0, y: 6, scale: 0.96 }}
+      animate={{ opacity: 1, y: 0, scale: 1, transition: { duration: dur.fast, ease: easeOut } }}
+      exit={{ opacity: 0, y: 4, transition: { duration: dur.fast, ease: easeIn } }}
+      style={{ position: 'fixed', left, top: bottom, width: W, translateY: '-100%', zIndex: 60 }}
+      className="pointer-events-none rounded-[var(--radius-md)] bg-[var(--fg)] px-3 py-2 text-[var(--bg)] shadow-[var(--shadow-2)]"
+    >
+      <div className="text-[12px] font-medium leading-none">继续按住{label}</div>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[color-mix(in_oklab,var(--bg)_25%,transparent)]">
+        <motion.div className="h-full rounded-full bg-[var(--accent)]" style={{ width: fill }} />
+      </div>
+    </motion.div>
+  )
+}
+
 const R = 12
 const CIRC = 2 * Math.PI * R
 
