@@ -60,6 +60,54 @@ function useGestureMode(): GestureMode {
   return coarse ? 'swipe' : 'pin-drag'
 }
 
+/** Phone-width layout: the composer docks to the bottom edge instead of sitting above the board. */
+function useDockedComposer() {
+  const query = '(max-width: 640px)'
+  const [docked, setDocked] = useState(() => typeof window !== 'undefined' && window.matchMedia(query).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(query)
+    const on = () => setDocked(mq.matches)
+    mq.addEventListener('change', on)
+    return () => mq.removeEventListener('change', on)
+  }, [])
+  return docked
+}
+
+/**
+ * Scroll-aware collapse for the docked composer: shrinks to a pill while the
+ * reader scrolls down through the board, comes back on scroll up, at the end
+ * of the page, or when tapped. Never collapses while focused or holding a draft.
+ */
+function useScrollCollapse(enabled: boolean, hold: boolean) {
+  const [collapsed, setCollapsed] = useState(false)
+  useEffect(() => {
+    if (!enabled) {
+      setCollapsed(false)
+      return
+    }
+    let last = window.scrollY
+    let frame = 0
+    const onScroll = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        const y = window.scrollY
+        const delta = y - last
+        const atEnd = window.innerHeight + y >= document.documentElement.scrollHeight - 8
+        if (y < 48 || atEnd) setCollapsed(false)
+        else if (delta > 6) setCollapsed(true)
+        else if (delta < -10) setCollapsed(false)
+        if (Math.abs(delta) > 6) last = y
+      })
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('scroll', onScroll)
+    }
+  }, [enabled])
+  return [collapsed && enabled && !hold, setCollapsed] as const
+}
+
 export function UiDemoPage() {
   const [direction, setDirection] = useState<Direction>(() => readParam('dir', ['paper', 'ink'] as const, 'paper'))
   const [mode, setMode] = useState<Mode>(() =>
@@ -70,6 +118,7 @@ export function UiDemoPage() {
   const systemReduced = useReducedMotion() ?? false
   const reduced = simReduced || systemReduced
   const gesture = useGestureMode()
+  const docked = useDockedComposer()
   const now = useNow()
 
   const [clips, setClips] = useState<Clip[]>(() => (readParam('empty', ['1', '0'] as const, '0') === '1' ? [] : seedClips(Date.now())))
@@ -178,8 +227,8 @@ export function UiDemoPage() {
           onMode={setMode}
           onReduced={() => setSimReduced((v) => !v)}
         />
-        <main className="mx-auto flex max-w-[1120px] flex-col gap-4 px-4 pb-10 pt-5 sm:px-6">
-          <Composer reduced={reduced} onAdd={add} onPasteShot={simulatePaste} />
+        <main className={`mx-auto flex max-w-[1120px] flex-col gap-4 px-4 pt-5 sm:px-6 ${docked ? 'pb-[calc(112px+env(safe-area-inset-bottom))]' : 'pb-10'}`}>
+          {docked ? null : <Composer reduced={reduced} docked={false} onAdd={add} onPasteShot={simulatePaste} />}
           <LayoutGroup>
             <PinBar
               barRef={pinBarRef}
@@ -224,7 +273,8 @@ export function UiDemoPage() {
             )}
           </LayoutGroup>
         </main>
-        <ToastHost toast={toast} onClose={() => setToast(null)} />
+        {docked ? <Composer reduced={reduced} docked onAdd={add} onPasteShot={simulatePaste} /> : null}
+        <ToastHost toast={toast} docked={docked} onClose={() => setToast(null)} />
         <p className="mx-auto hidden max-w-[1120px] px-4 pb-8 text-[11px] text-[var(--fg-4)] sm:block sm:px-6">
           快捷键：N 模拟新内容 · D 切换风格 · M 切换明暗 · {gesture === 'swipe' ? '右滑复制 / 左滑再点确认撤回' : '点卡片复制 · 拖到置顶栏 · 长按 ↶ 撤回'}
         </p>
@@ -402,9 +452,17 @@ function IconToggle({ label, onClick, pressed, children }: { label: string; onCl
 
 /* ---------------------------------------------------------------- composer */
 
-function Composer({ reduced, onAdd, onPasteShot }: { reduced: boolean; onAdd: (c: Clip) => void; onPasteShot: () => void }) {
+function Composer({ reduced, docked, onAdd, onPasteShot }: { reduced: boolean; docked: boolean; onAdd: (c: Clip) => void; onPasteShot: () => void }) {
   const [text, setText] = useState('')
   const [dragging, setDragging] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const [collapsed, setCollapsed] = useScrollCollapse(docked, focused || text.trim().length > 0 || dragging)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  const expand = () => {
+    setCollapsed(false)
+    // Wait for the pill to morph back before raising the keyboard.
+    window.setTimeout(() => inputRef.current?.focus(), reduced ? 0 : 120)
+  }
   const [absorbing, setAbsorbing] = useState(false)
   const depth = useRef(0)
   const zoneRef = useRef<HTMLDivElement | null>(null)
@@ -501,19 +559,26 @@ function Composer({ reduced, onAdd, onPasteShot }: { reduced: boolean; onAdd: (c
     setText('')
   }
 
-  return (
+  const section = (
     <motion.section
       ref={zoneRef}
       layout={!reduced}
       aria-label="投放区"
       data-dragging={dragging || undefined}
-      className="relative overflow-hidden rounded-[var(--radius-lg)] border bg-[var(--surface-1)]"
+      data-docked={docked || undefined}
+      data-collapsed={collapsed || undefined}
+      style={{ borderRadius: docked ? (collapsed ? 999 : 20) : undefined }}
+      className={`relative overflow-hidden border ${
+        docked
+          ? `pointer-events-auto bg-[color-mix(in_oklab,var(--surface-1)_88%,transparent)] backdrop-blur-xl ${collapsed ? 'w-auto' : 'w-full'}`
+          : 'rounded-[var(--radius-lg)] bg-[var(--surface-1)]'
+      }`}
       animate={
         dragging
           ? { borderColor: 'var(--accent)', boxShadow: '0 0 0 4px var(--accent-soft), var(--shadow-3)', scale: reduced ? 1 : 1.01 }
           : absorbing
             ? { scale: [1.01, 0.985, 1], borderColor: 'var(--line-2)', boxShadow: 'var(--shadow-2)' }
-            : { borderColor: 'var(--line-2)', boxShadow: 'var(--shadow-1)', scale: 1 }
+            : { borderColor: 'var(--line-2)', boxShadow: docked ? 'var(--shadow-3)' : 'var(--shadow-1)', scale: 1 }
       }
       transition={{ ...springSettle, borderColor: { duration: dur.base }, boxShadow: { duration: dur.base } }}
     >
@@ -538,8 +603,25 @@ function Composer({ reduced, onAdd, onPasteShot }: { reduced: boolean; onAdd: (c
               <span className="text-[11px] text-[var(--fg-3)]">图片会落进列表，其他文件按类型归档</span>
             </motion.div>
           </motion.div>
+        ) : collapsed ? (
+          <motion.button
+            key="pill"
+            type="button"
+            layout="position"
+            onClick={expand}
+            aria-label="展开输入框"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1, transition: { duration: dur.base, ease: easeOut } }}
+            exit={{ opacity: 0, transition: { duration: dur.fast, ease: easeIn } }}
+            className="flex h-11 items-center gap-2 pl-4 pr-1.5 text-[13px] text-[var(--fg-3)]"
+          >
+            <span className="whitespace-nowrap">粘贴或输入…</span>
+            <span className="grid size-8 place-items-center rounded-full bg-[var(--accent)] text-[var(--accent-fg)]">
+              <ArrowUpIcon className="size-3.5" />
+            </span>
+          </motion.button>
         ) : (
-          <motion.div key="input" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, transition: { duration: dur.fast } }} className="flex items-end gap-2 p-2.5">
+          <motion.div key="input" layout="position" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, transition: { duration: dur.fast } }} className="flex items-end gap-2 p-2.5">
             <button
               type="button"
               aria-label="添加附件"
@@ -551,7 +633,10 @@ function Composer({ reduced, onAdd, onPasteShot }: { reduced: boolean; onAdd: (c
             </button>
             <input ref={fileRef} type="file" multiple hidden onChange={(e) => ingest(Array.from(e.target.files ?? []))} />
             <textarea
+              ref={inputRef}
               value={text}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
               rows={1}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => {
@@ -586,6 +671,12 @@ function Composer({ reduced, onAdd, onPasteShot }: { reduced: boolean; onAdd: (c
         )}
       </AnimatePresence>
     </motion.section>
+  )
+  if (!docked) return section
+  return (
+    <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center px-3 pb-[max(12px,env(safe-area-inset-bottom))]">
+      {section}
+    </div>
   )
 }
 
@@ -900,9 +991,11 @@ function EmptyState({ onReset, onArrive }: { onReset: () => void; onArrive: () =
   )
 }
 
-function ToastHost({ toast, onClose }: { toast: Toast | null; onClose: () => void }) {
+function ToastHost({ toast, docked, onClose }: { toast: Toast | null; docked: boolean; onClose: () => void }) {
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
+    <div
+      className={`pointer-events-none fixed inset-x-0 z-50 flex justify-center px-4 ${docked ? 'bottom-[calc(76px+env(safe-area-inset-bottom))]' : 'bottom-5'}`}
+    >
       <AnimatePresence mode="popLayout">
         {toast ? (
           <motion.div
