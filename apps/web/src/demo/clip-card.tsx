@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import type { TrashHandle } from './trash-anchor.ts'
 
 function preHide(node: HTMLElement, transform?: string) {
@@ -11,6 +11,7 @@ import { deviceById, formatAgo, formatLeft, formatSize, hexToRgb, readableOn, ty
 import { DeviceGlyph } from './icons.tsx'
 import { deviceColor, fileType, labelFor, mediaOf } from './visuals.ts'
 import { AudioPlayer, HoldToConfirm, InlineVideo, MediaViewer, useIsolatePointer, type ViewerMedia } from './media.tsx'
+import { GroupBadge } from './groups.tsx'
 import { dur, easeIn, easeOut, enter, springBounce, springSettle } from './motion-tokens.ts'
 
 const AGING_WINDOW = 20 * 60_000
@@ -33,6 +34,17 @@ type Props = {
   onPin: (clip: Clip) => void
   onPinHover: (over: boolean) => void
   onArrived: (clip: Clip) => void
+  /** actions (置顶 / 撤回 / 复制) are hidden until the card is tapped open */
+  open: boolean
+  onOpen: (clip: Clip | null) => void
+  groups: string[]
+  onMoveGroup: (clip: Clip, group: string | undefined) => void
+  /**
+   * pin-drag only: report the pointer over the group chips while dragging.
+   * Returns the group key under the pointer ('' = 未分组) or null; with
+   * `drop` set it also moves the clip and returns whether it was consumed.
+   */
+  onGroupDrag?: (clip: Clip, x: number, y: number, drop: boolean) => string | null
   /** pin-drag only: the drag-to-delete bin that appears next to a dragged card */
   trashRef?: RefObject<TrashHandle | null>
   onDragPhase?: (phase: { clip: Clip; rect: DOMRect } | { clip: Clip; end: 'cancel' | 'deleted' }) => void
@@ -45,7 +57,7 @@ function inside(el: HTMLElement | null, x: number, y: number, pad = 24) {
 }
 
 export function ClipCard(props: Props) {
-  const { clip, now, variant, gesture, reduced, copied, pinBarRef, deviceDot, onCopy, onRetract, onPin, onPinHover, onArrived, trashRef, onDragPhase } = props
+  const { clip, now, variant, gesture, reduced, copied, pinBarRef, deviceDot, onCopy, onRetract, onPin, onPinHover, onArrived, trashRef, onDragPhase, open, onOpen, groups, onMoveGroup, onGroupDrag } = props
   const [hover, setHover] = useState(false)
   const [scope, animate] = useAnimate<HTMLDivElement>()
   const x = useMotionValue(0)
@@ -121,7 +133,8 @@ export function ClipCard(props: Props) {
     const target = event.target as HTMLElement | null
     if (target?.closest('[data-action]') || dragged.current) return
     if (armed) return setArmed(false)
-    onCopy(clip)
+    // A tap only reveals the actions; copying is a deliberate second tap on 复制.
+    onOpen(open ? null : clip)
   }
 
   const handleDrag = (_: unknown, info: PanInfo) => {
@@ -135,7 +148,8 @@ export function ClipCard(props: Props) {
       const el = cardRef.current
       if (el && !reduced) void animate(el, trash ? { scale: 0.62, rotate: 4, opacity: 0.86 } : { scale: 1.04, rotate: -1.5, opacity: 1 }, springBounce)
     }
-    onPinHover(!trash && inside(pinBarRef.current, px, py))
+    const overGroup = !trash && (onGroupDrag?.(clip, px, py, false) ?? null) !== null
+    onPinHover(!trash && !overGroup && inside(pinBarRef.current, px, py))
   }
 
   // The article is a layout-animated (transformed) stacking context, so the
@@ -181,6 +195,7 @@ export function ClipCard(props: Props) {
     onDragPhase?.({ clip, end: 'cancel' })
     window.clearTimeout(liftTimer.current)
     liftTimer.current = window.setTimeout(() => setLifted(false), 600)
+    if ((onGroupDrag?.(clip, px, py, true) ?? null) !== null) return
     const over = inside(pinBarRef.current, px, py)
     if (over && !clip.pinned) onPin(clip)
   }
@@ -232,8 +247,10 @@ export function ClipCard(props: Props) {
           ref={cardRef}
           role="button"
           tabIndex={0}
-          aria-label={`复制：${labelFor(clip)}`}
+          aria-label={`${labelFor(clip)}，点按显示操作`}
+          aria-expanded={open}
           data-card
+          data-open={open || undefined}
           className="dd-card flex h-full cursor-pointer select-none flex-col outline-none"
           data-aging={aging || undefined}
           data-copied={copied || undefined}
@@ -260,10 +277,11 @@ export function ClipCard(props: Props) {
           onDragEnd={handleDragEnd}
           onTap={handleTap}
           onKeyDown={(e) => {
+            if (e.target !== e.currentTarget) return
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault()
-              onCopy(clip)
-            }
+              onOpen(open ? null : clip)
+            } else if (e.key === 'Escape' && open) onOpen(null)
           }}
         >
           <div className="dd-card-body flex-1">
@@ -276,30 +294,31 @@ export function ClipCard(props: Props) {
             </span>
             <span aria-hidden>·</span>
             <span>{formatAgo(now - clip.createdAt)}</span>
+            <GroupBadge group={clip.group} groups={groups} onMove={(g) => onMoveGroup(clip, g)} />
             <span className={`dd-mono ml-auto tabular-nums ${aging ? 'text-[var(--accent)]' : ''}`}>{shortLeft(remaining)}</span>
           </footer>
           <div className="dd-card-actions absolute right-2 top-2 flex gap-1">
             {!clip.pinned ? (
-              <button type="button" data-action aria-label="置顶" title="置顶" onClick={() => onPin(clip)} className="grid size-7 place-items-center rounded-[var(--radius-sm)] border border-[var(--line-2)] bg-[var(--surface-1)] text-[var(--fg-2)] hover:text-[var(--fg)]">
+              <ActionButton label="置顶" onClick={() => onPin(clip)} className="hover:text-[var(--fg)]">
                 <PinIcon className="size-3.5" />
-              </button>
+              </ActionButton>
             ) : null}
             <HoldToConfirm label="撤回" onConfirm={() => onRetract(clip)} className="size-7 rounded-[var(--radius-sm)] border border-[var(--line-2)] bg-[var(--surface-1)] text-[var(--fg-2)] hover:text-[var(--accent)]">
               <Undo2Icon className="size-3.5" />
             </HoldToConfirm>
-            <span className="grid size-7 place-items-center rounded-[var(--radius-sm)] border border-[var(--line-2)] bg-[var(--surface-1)] text-[var(--fg-2)]" aria-hidden>
+            <ActionButton label={copied ? '已复制' : '复制'} onClick={() => onCopy(clip)} className={copied ? 'text-[var(--ok)]' : 'hover:text-[var(--fg)]'}>
               <AnimatePresence mode="popLayout" initial={false}>
                 {copied ? (
-                  <motion.span key="ok" initial={{ scale: 0.4, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.4, opacity: 0 }} transition={springBounce} className="text-[var(--ok)]">
+                  <motion.span key="ok" initial={{ scale: 0.4, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.4, opacity: 0 }} transition={springBounce} className="grid place-items-center">
                     <CheckIcon className="size-3.5" />
                   </motion.span>
                 ) : (
-                  <motion.span key="cp" initial={{ scale: 0.4, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.4, opacity: 0 }} transition={{ duration: dur.fast }}>
+                  <motion.span key="cp" initial={{ scale: 0.4, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.4, opacity: 0 }} transition={{ duration: dur.fast }} className="grid place-items-center">
                     <CopyIcon className="size-3.5" />
                   </motion.span>
                 )}
               </AnimatePresence>
-            </span>
+            </ActionButton>
           </div>
         </motion.div>
         <AnimatePresence>
@@ -393,6 +412,16 @@ function ConfirmRetract({ onConfirm }: { onConfirm: () => void }) {
       <Undo2Icon className="size-4" />
       确认撤回
     </motion.button>
+  )
+}
+
+/** Card action: keeps its press away from the card's drag / tap handlers. */
+function ActionButton({ label, onClick, className, children }: { label: string; onClick: () => void; className?: string; children: ReactNode }) {
+  const ref = useIsolatePointer<HTMLButtonElement>()
+  return (
+    <button ref={ref} type="button" data-action aria-label={label} title={label} onClick={onClick} className={`grid size-7 place-items-center rounded-[var(--radius-sm)] border border-[var(--line-2)] bg-[var(--surface-1)] text-[var(--fg-2)] ${className ?? ''}`}>
+      {children}
+    </button>
   )
 }
 

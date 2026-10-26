@@ -14,6 +14,8 @@ type Base = {
   createdAt: number
   expiresAt: number
   pinned?: boolean
+  /** user-defined group (分组); undefined = 未分组 */
+  group?: string
   /** set when the item arrived live so it flies in from its device dot */
   arrived?: boolean
   /** set when the item was pasted/dropped into the composer */
@@ -57,50 +59,53 @@ ${bars}
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
 }
 
+/** Groups the board starts with, same as the earlier dropit demo (工作 / 个人). */
+export const seedGroups = ['工作', '个人']
+
 export function seedClips(now: number): Clip[] {
   const at = (ago: number, ttl: number) => ({ createdAt: now - ago, expiresAt: now - ago + ttl })
   return [
     {
       id: 'c1', kind: 'link', deviceId: 'iphone', ...at(2 * MIN, 24 * HOUR),
-      url: 'https://landing-ideas.pages.dev/playlist/', title: 'Playlist — 一页歌单式的落地页灵感', site: 'landing-ideas.pages.dev',
+      url: 'https://landing-ideas.pages.dev/playlist/', title: 'Playlist — 一页歌单式的落地页灵感', site: 'landing-ideas.pages.dev', group: '个人',
     },
     {
-      id: 'c2', kind: 'code', deviceId: 'mbp', ...at(6 * MIN, 2 * HOUR), lang: 'tsx', pinned: true,
+      id: 'c2', kind: 'code', deviceId: 'mbp', ...at(6 * MIN, 2 * HOUR), lang: 'tsx', pinned: true, group: '工作',
       code: "const clip = await drop(text, {\n  ttl: '2h',\n  to: 'all-devices',\n})",
     },
     { id: 'c3', kind: 'color', deviceId: 'desk', ...at(11 * MIN, 6 * HOUR), value: '#D0021B', name: 'dropit red' },
-    { id: 'c4', kind: 'text', deviceId: 'iphone', ...at(15 * MIN, 30 * MIN + 50_000), text: '取件码 7342，丰巢 3 号柜' },
+    { id: 'c4', kind: 'text', deviceId: 'iphone', ...at(15 * MIN, 30 * MIN + 50_000), text: '取件码 7342，丰巢 3 号柜', group: '个人' },
     {
       id: 'c5', kind: 'image', deviceId: 'iphone', ...at(26 * MIN, 12 * HOUR),
-      name: 'IMG_2041.PNG', w: 1179, h: 2556, tone: '#4f6d7a', src: fakeShot('#4f6d7a', 'IMG_2041.PNG', 1),
+      name: 'IMG_2041.PNG', w: 1179, h: 2556, tone: '#4f6d7a', src: fakeShot('#4f6d7a', 'IMG_2041.PNG', 1), group: '个人',
     },
-    { id: 'c6', kind: 'file', deviceId: 'mbp', ...at(48 * MIN, 24 * HOUR), name: '季度复盘-v3.pdf', size: 2_840_000 },
+    { id: 'c6', kind: 'file', deviceId: 'mbp', ...at(48 * MIN, 24 * HOUR), name: '季度复盘-v3.pdf', size: 2_840_000, group: '工作' },
     { id: 'c7', kind: 'color', deviceId: 'mbp', ...at(55 * MIN, 59 * MIN + 30_000), value: '#3F7F74', name: 'phone teal' },
     {
       id: 'c8', kind: 'link', deviceId: 'desk', ...at(3 * HOUR, 24 * HOUR),
-      url: 'https://github.com/lthero-big/dropit/pulls', title: 'Pull requests · lthero-big/dropit', site: 'github.com', pinned: true,
+      url: 'https://github.com/lthero-big/dropit/pulls', title: 'Pull requests · lthero-big/dropit', site: 'github.com', pinned: true, group: '工作',
     },
     { id: 'c9', kind: 'file', deviceId: 'desk', ...at(5 * HOUR, 24 * HOUR), name: 'dropit-backup.tar.zst', size: 184_500_000 },
-    { id: 'c10', kind: 'text', deviceId: 'mbp', ...at(26 * HOUR, 72 * HOUR), text: '周五前把暗色模式的边框对比度再降一档' },
+    { id: 'c10', kind: 'text', deviceId: 'mbp', ...at(26 * HOUR, 72 * HOUR), text: '周五前把暗色模式的边框对比度再降一档', group: '工作' },
     {
       id: 'c11', kind: 'code', deviceId: 'desk', ...at(27 * HOUR, 72 * HOUR), lang: 'bash',
-      code: 'pnpm --filter @dropit/web dev\nopen http://localhost:5173/demo/ui',
+      code: 'pnpm --filter @dropit/web dev\nopen http://localhost:5173/demo/ui', group: '工作',
     },
-    { id: 'c12', kind: 'file', deviceId: 'iphone', ...at(28 * HOUR, 28 * HOUR + 75_000), name: '语音备忘录 0412.m4a', size: 3_120_000, src: voiceMemo },
+    { id: 'c12', kind: 'file', deviceId: 'iphone', ...at(28 * HOUR, 28 * HOUR + 75_000), name: '语音备忘录 0412.m4a', size: 3_120_000, src: voiceMemo, group: '个人' },
     {
       id: 'c13', kind: 'file', deviceId: 'iphone', ...at(40 * MIN, 24 * HOUR),
-      name: '屏幕录制 10-26.mp4', size: 18_600_000, src: screenRec, poster: screenRecPoster,
+      name: '屏幕录制 10-26.mp4', size: 18_600_000, src: screenRec, poster: screenRecPoster, group: '工作',
     },
   ]
 }
 
 let seq = 100
 const incoming: Array<(now: number) => Clip> = [
-  (now) => ({ id: `n${seq++}`, kind: 'text', deviceId: 'iphone', createdAt: now, expiresAt: now + 2 * HOUR, text: '晚上 8 点，老地方见' }),
-  (now) => ({ id: `n${seq++}`, kind: 'link', deviceId: 'desk', createdAt: now, expiresAt: now + 24 * HOUR, url: 'https://motion.dev/docs/react-layout-animations', title: 'Layout animations · Motion', site: 'motion.dev' }),
+  (now) => ({ id: `n${seq++}`, kind: 'text', deviceId: 'iphone', createdAt: now, expiresAt: now + 2 * HOUR, text: '晚上 8 点，老地方见', group: '个人' }),
+  (now) => ({ id: `n${seq++}`, kind: 'link', deviceId: 'desk', createdAt: now, expiresAt: now + 24 * HOUR, url: 'https://motion.dev/docs/react-layout-animations', title: 'Layout animations · Motion', site: 'motion.dev', group: '工作' }),
   (now) => ({ id: `n${seq++}`, kind: 'color', deviceId: 'mbp', createdAt: now, expiresAt: now + 6 * HOUR, value: '#A86B2D', name: 'pad amber' }),
-  (now) => ({ id: `n${seq++}`, kind: 'code', deviceId: 'mbp', createdAt: now, expiresAt: now + 2 * HOUR, lang: 'json', code: '{\n  "ttl": "15m",\n  "burn": true\n}' }),
-  (now) => ({ id: `n${seq++}`, kind: 'file', deviceId: 'desk', createdAt: now, expiresAt: now + 24 * HOUR, name: 'design-tokens.fig', size: 12_400_000 }),
+  (now) => ({ id: `n${seq++}`, kind: 'code', deviceId: 'mbp', createdAt: now, expiresAt: now + 2 * HOUR, lang: 'json', code: '{\n  "ttl": "15m",\n  "burn": true\n}', group: '工作' }),
+  (now) => ({ id: `n${seq++}`, kind: 'file', deviceId: 'desk', createdAt: now, expiresAt: now + 24 * HOUR, name: 'design-tokens.fig', size: 12_400_000, group: '工作' }),
 ]
 let turn = 0
 export function nextIncoming(now: number): Clip {

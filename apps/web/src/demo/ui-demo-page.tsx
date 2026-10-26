@@ -9,11 +9,16 @@ import { AnimatePresence, LayoutGroup, MotionConfig, motion, useMotionValue, use
 import {
   ArrowUpIcon,
   CalendarDaysIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  CopyIcon,
+  FolderIcon,
   ClipboardPasteIcon,
   LayoutGridIcon,
   MoonIcon,
   PaperclipIcon,
   PinIcon,
+  PinOffIcon,
   RotateCcwIcon,
   SparklesIcon,
   SunIcon,
@@ -23,15 +28,17 @@ import {
 } from 'lucide-react'
 import { ClipCard, type GestureMode } from './clip-card.tsx'
 import { TrashBin } from './trash-bin.tsx'
+import { useIsolatePointer } from './media.tsx'
 import { trashAnchorFor, type TrashAnchor, type TrashHandle } from './trash-anchor.ts'
-import { clipCopyText, dayLabel, deviceById, devices, droppedFile, nextIncoming, pastedShot, seedClips, textClip, type Clip } from './data.ts'
+import { clipCopyText, dayLabel, deviceById, devices, droppedFile, nextIncoming, pastedShot, seedClips, seedGroups, textClip, type Clip } from './data.ts'
+import { GroupBar, GroupDot, GroupTarget, type GroupFilter } from './groups.tsx'
 import { DeviceGlyph } from './icons.tsx'
-import { deviceColor, labelFor } from './visuals.ts'
+import { deviceColor, groupColor, groupName, labelFor } from './visuals.ts'
 import { dur, easeIn, easeOut, enter, springBounce, springSettle, springTether } from './motion-tokens.ts'
 
 type Direction = 'paper' | 'ink'
 type Mode = 'light' | 'dark'
-type View = 'grid' | 'date' | 'device'
+type View = 'grid' | 'group' | 'date' | 'device'
 
 type Toast = { id: number; text: string; undo?: () => void }
 
@@ -115,7 +122,7 @@ export function UiDemoPage() {
   const [mode, setMode] = useState<Mode>(() =>
     readParam('mode', ['light', 'dark'] as const, typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
   )
-  const [view, setView] = useState<View>(() => readParam('view', ['grid', 'date', 'device'] as const, 'grid'))
+  const [view, setView] = useState<View>(() => readParam('view', ['grid', 'group', 'date', 'device'] as const, 'grid'))
   const [simReduced, setSimReduced] = useState(() => readParam('reduced', ['1', '0'] as const, '0') === '1')
   const systemReduced = useReducedMotion() ?? false
   const reduced = simReduced || systemReduced
@@ -135,8 +142,10 @@ export function UiDemoPage() {
   const trashRef = useRef<TrashHandle | null>(null)
   const [trash, setTrash] = useState<{ anchor: TrashAnchor; gulp: boolean } | null>(null)
   const gulpTimer = useRef(0)
+  const [dragging, setDragging] = useState(false)
   const onDragPhase = useCallback((phase: { clip: Clip; rect: DOMRect } | { clip: Clip; end: 'cancel' | 'deleted' }) => {
     window.clearTimeout(gulpTimer.current)
+    setDragging('rect' in phase)
     if ('rect' in phase) return setTrash({ anchor: trashAnchorFor(phase.rect), gulp: false })
     if (phase.end === 'cancel') return setTrash(null)
     setTrash((t) => (t ? { ...t, gulp: true } : t))
@@ -151,9 +160,48 @@ export function UiDemoPage() {
     return () => window.clearTimeout(t)
   }, [loading, holdSkeleton])
 
+  // 分组: user-defined groups, a filter over the board, and the composer's target.
+  const [groups, setGroups] = useState<string[]>(() => [...seedGroups])
+  const [filter, setFilterRaw] = useState<GroupFilter>(null)
+  const [target, setTarget] = useState<string>(seedGroups[0])
+  const setFilter = useCallback((f: GroupFilter) => {
+    setFilterRaw(f)
+    // New clips follow the group you're looking at.
+    if (f !== null) setTarget(f)
+  }, [])
+  const [groupHover, setGroupHover] = useState<string | null>(null)
+  const [groupPulse, setGroupPulse] = useState<Record<string, number>>({})
+  const chipEls = useRef(new Map<string, HTMLElement>())
+  const pulseGroup = useCallback((g: string | undefined) => setGroupPulse((p) => ({ ...p, [g ?? '']: (p[g ?? ''] ?? 0) + 1 })), [])
+
+  // Tap-to-reveal: one card at a time shows 置顶 / 撤回 / 复制.
+  const [openId, setOpenId] = useState<string | null>(null)
+  const onOpen = useCallback((c: Clip | null) => setOpenId(c ? c.id : null), [])
+  useEffect(() => {
+    if (!openId) return
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t?.closest(`[data-clip-id="${openId}"], [data-keep-open]`)) return
+      setOpenId(null)
+    }
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpenId(null)
+    document.addEventListener('pointerdown', onDown, true)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [openId])
+
   const live = useMemo(() => clips.filter((c) => c.expiresAt > now), [clips, now])
   const pinned = live.filter((c) => c.pinned)
-  const board = live.filter((c) => !c.pinned)
+  const unpinned = live.filter((c) => !c.pinned)
+  const board = filter === null ? unpinned : unpinned.filter((c) => (c.group ?? '') === filter)
+  const groupCounts = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const c of unpinned) m.set(c.group ?? '', (m.get(c.group ?? '') ?? 0) + 1)
+    return m
+  }, [unpinned])
 
   const showToast = useCallback((text: string, undo?: () => void) => {
     setToast({ id: Date.now(), text, undo })
@@ -169,6 +217,8 @@ export function UiDemoPage() {
       void navigator.clipboard?.writeText(clipCopyText(clip)).catch(() => undefined)
       setCopiedId(clip.id)
       window.setTimeout(() => setCopiedId((id) => (id === clip.id ? null : id)), 1400)
+      // Let the 已复制 check register, then fold the actions away again.
+      window.setTimeout(() => setOpenId((id) => (id === clip.id ? null : id)), 900)
       showToast(`已复制 · ${labelFor(clip)}`)
     },
     [showToast],
@@ -200,14 +250,103 @@ export function UiDemoPage() {
     setClips((list) => list.map((c) => (c.id === clip.id ? { ...c, arrived: false, landed: false } : c)))
   }, [])
 
+  const moveToGroup = useCallback(
+    (clip: Clip, group: string | undefined) => {
+      if ((clip.group ?? '') === (group ?? '')) return
+      const before = clip.group
+      setClips((list) => list.map((c) => (c.id === clip.id ? { ...c, group } : c)))
+      pulseGroup(group)
+      showToast(group ? `已移到「${group}」` : '已移出分组', () => setClips((list) => list.map((c) => (c.id === clip.id ? { ...c, group: before } : c))))
+    },
+    [pulseGroup, showToast],
+  )
+
+  // Desktop: drop a dragged card on a group chip to file it there.
+  const onGroupDrag = useCallback(
+    (clip: Clip, x: number, y: number, drop: boolean) => {
+      let hit: string | null = null
+      for (const [key, el] of chipEls.current) {
+        const r = el.getBoundingClientRect()
+        if (x >= r.left - 4 && x <= r.right + 4 && y >= r.top - 6 && y <= r.bottom + 6) hit = key
+      }
+      setGroupHover(drop ? null : hit)
+      if (drop && hit !== null) moveToGroup(clip, hit || undefined)
+      return hit
+    },
+    [moveToGroup],
+  )
+
+  const createGroup = useCallback(
+    (name: string) => {
+      if (groups.includes(name) || name === '未分组') {
+        showToast(`已有「${name}」`)
+        return false
+      }
+      setGroups((g) => [...g, name])
+      setFilter(name)
+      showToast(`已新建分组「${name}」`)
+      return true
+    },
+    [groups, setFilter, showToast],
+  )
+  const renameGroup = useCallback(
+    (from: string, to: string) => {
+      if (groups.includes(to) || to === '未分组') {
+        showToast(`已有「${to}」`)
+        return false
+      }
+      setGroups((g) => g.map((x) => (x === from ? to : x)))
+      setClips((list) => list.map((c) => (c.group === from ? { ...c, group: to } : c)))
+      setFilterRaw((f) => (f === from ? to : f))
+      setTarget((t) => (t === from ? to : t))
+      return true
+    },
+    [groups, showToast],
+  )
+  const deleteGroup = useCallback(
+    (name: string) => {
+      const prevGroups = groups
+      let moved: string[] = []
+      setClips((list) => {
+        moved = list.filter((c) => c.group === name).map((c) => c.id)
+        return list.map((c) => (c.group === name ? { ...c, group: undefined } : c))
+      })
+      setGroups((g) => g.filter((x) => x !== name))
+      setFilterRaw((f) => (f === name ? null : f))
+      setTarget((t) => (t === name ? '' : t))
+      showToast(`已删除「${name}」，内容移到未分组`, () => {
+        setGroups(prevGroups)
+        setClips((list) => list.map((c) => (moved.includes(c.id) ? { ...c, group: name } : c)))
+        setFilterRaw(name)
+      })
+    },
+    [groups, showToast],
+  )
+
   const add = useCallback((clip: Clip) => setClips((list) => [clip, ...list]), [])
+  // Composer / paste: the clip goes to the composer's target group.
+  const addToTarget = useCallback(
+    (clip: Clip) => {
+      const g = target || undefined
+      add({ ...clip, group: g })
+      if (filter !== null && filter !== (g ?? '')) pulseGroup(g)
+    },
+    [add, filter, pulseGroup, target],
+  )
   const simulateArrival = useCallback(() => {
     const clip = nextIncoming(Date.now())
     // Ripple the source device's dot the moment the item leaves it.
     setRipples((r) => ({ ...r, [clip.deviceId]: (r[clip.deviceId] ?? 0) + 1 }))
+    // Arriving into a group that's filtered out: no flight, just pulse its chip.
+    if (filter !== null && filter !== (clip.group ?? '')) {
+      pulseGroup(clip.group)
+      add({ ...clip, arrived: false })
+      showToast(`新内容进了「${groupName(clip.group)}」`)
+      return
+    }
     add(clip)
-  }, [add])
-  const simulatePaste = useCallback(() => add(pastedShot(Date.now())), [add])
+  }, [add, filter, pulseGroup, showToast])
+  const simulatePaste = useCallback(() => addToTarget(pastedShot(Date.now())), [addToTarget])
 
   const deviceDot = useCallback((id: string) => dotRefs.current.get(id) ?? null, [])
 
@@ -225,7 +364,7 @@ export function UiDemoPage() {
 
   return (
     <MotionConfig reducedMotion={simReduced ? 'always' : 'user'} transition={enter}>
-      <div className="dd min-h-dvh overflow-x-clip" data-dir={direction} data-mode={mode} data-reduced={reduced || undefined}>
+      <div className="dd min-h-dvh overflow-x-clip" data-dir={direction} data-mode={mode} data-reduced={reduced || undefined} data-gesture={gesture}>
         <TopBar
           direction={direction}
           mode={mode}
@@ -241,7 +380,7 @@ export function UiDemoPage() {
           onReduced={() => setSimReduced((v) => !v)}
         />
         <main className={`mx-auto flex max-w-[1120px] flex-col gap-4 px-4 pt-5 sm:px-6 ${docked ? 'pb-[calc(112px+env(safe-area-inset-bottom))]' : 'pb-10'}`}>
-          {docked ? null : <Composer reduced={reduced} docked={false} onAdd={add} onPasteShot={simulatePaste} />}
+          {docked ? null : <Composer reduced={reduced} docked={false} onAdd={addToTarget} onPasteShot={simulatePaste} groups={groups} target={target} onTarget={setTarget} />}
           <LayoutGroup>
             <PinBar
               barRef={pinBarRef}
@@ -250,6 +389,27 @@ export function UiDemoPage() {
               reduced={reduced}
               onUnpin={(c) => setPinned(c, false)}
               onCopy={copy}
+              openId={openId}
+              onOpen={onOpen}
+              copiedId={copiedId}
+            />
+            <GroupBar
+              groups={groups}
+              filter={filter}
+              counts={groupCounts}
+              total={unpinned.length}
+              reduced={reduced}
+              dragging={dragging && gesture === 'pin-drag'}
+              dropHover={groupHover}
+              pulse={groupPulse}
+              chipRef={(key, el) => {
+                if (el) chipEls.current.set(key, el)
+                else chipEls.current.delete(key)
+              }}
+              onFilter={setFilter}
+              onCreate={createGroup}
+              onRename={renameGroup}
+              onDelete={deleteGroup}
             />
             <Toolbar
               view={view}
@@ -261,12 +421,16 @@ export function UiDemoPage() {
               onEmpty={() => setClips([])}
               onReset={() => {
                 setClips(seedClips(Date.now()))
+                setGroups([...seedGroups])
+                setFilterRaw(null)
               }}
             />
             {loading ? (
               <Skeletons view={view} />
-            ) : board.length === 0 && pinned.length === 0 ? (
+            ) : unpinned.length === 0 && pinned.length === 0 ? (
               <EmptyState onReset={() => setClips(seedClips(Date.now()))} onArrive={simulateArrival} />
+            ) : board.length === 0 && view !== 'group' ? (
+              <GroupEmpty group={filter ?? ''} onAll={() => setFilter(null)} />
             ) : (
               <Board
                 view={view}
@@ -284,15 +448,21 @@ export function UiDemoPage() {
                 onArrived={arrivedDone}
                 trashRef={trashRef}
                 onDragPhase={onDragPhase}
+                openId={openId}
+                onOpen={onOpen}
+                groups={groups}
+                filter={filter}
+                onMoveGroup={moveToGroup}
+                onGroupDrag={gesture === 'pin-drag' ? onGroupDrag : undefined}
               />
             )}
           </LayoutGroup>
         </main>
-        {docked ? <Composer reduced={reduced} docked onAdd={add} onPasteShot={simulatePaste} /> : null}
+        {docked ? <Composer reduced={reduced} docked onAdd={addToTarget} onPasteShot={simulatePaste} groups={groups} target={target} onTarget={setTarget} /> : null}
         {gesture === 'pin-drag' ? <TrashBin handle={trashRef} anchor={trash?.anchor ?? null} gulp={trash?.gulp ?? false} reduced={reduced} /> : null}
         <ToastHost toast={toast} docked={docked} onClose={() => setToast(null)} />
         <p className="mx-auto hidden max-w-[1120px] px-4 pb-8 text-[11px] text-[var(--fg-4)] sm:block sm:px-6">
-          快捷键：N 模拟新内容 · D 切换风格 · M 切换明暗 · {gesture === 'swipe' ? '右滑复制 / 左滑再点确认撤回' : '点卡片复制 · 拖到置顶栏 · 拖到旁边的垃圾桶或长按 ↶ 撤回'}
+          快捷键：N 模拟新内容 · D 切换风格 · M 切换明暗 · {gesture === 'swipe' ? '点卡片显示操作 · 右滑复制 / 左滑再点确认撤回' : '点卡片显示操作（悬停也会显示）· 拖到置顶栏或分组标签 · 拖到旁边的垃圾桶或长按 ↶ 撤回'}
         </p>
       </div>
     </MotionConfig>
@@ -468,7 +638,8 @@ function IconToggle({ label, onClick, pressed, children }: { label: string; onCl
 
 /* ---------------------------------------------------------------- composer */
 
-function Composer({ reduced, docked, onAdd, onPasteShot }: { reduced: boolean; docked: boolean; onAdd: (c: Clip) => void; onPasteShot: () => void }) {
+function Composer(props: { reduced: boolean; docked: boolean; onAdd: (c: Clip) => void; onPasteShot: () => void; groups: string[]; target: string; onTarget: (g: string) => void }) {
+  const { reduced, docked, onAdd, onPasteShot, groups, target, onTarget } = props
   const [text, setText] = useState('')
   const [dragging, setDragging] = useState(false)
   const [focused, setFocused] = useState(false)
@@ -648,6 +819,7 @@ function Composer({ reduced, docked, onAdd, onPasteShot }: { reduced: boolean; d
               <PaperclipIcon className="size-4" />
             </button>
             <input ref={fileRef} type="file" multiple hidden onChange={(e) => ingest(Array.from(e.target.files ?? []))} />
+            <GroupTarget groups={groups} value={target} onChange={onTarget} compact={docked} />
             <textarea
               ref={inputRef}
               value={text}
@@ -661,7 +833,7 @@ function Composer({ reduced, docked, onAdd, onPasteShot }: { reduced: boolean; d
                   send()
                 }
               }}
-              placeholder="粘贴、输入，或把文件拖到这里…"
+              placeholder={docked ? "粘贴或输入…" : "粘贴、输入，或把文件拖到这里…"}
               className="min-h-9 flex-1 resize-none bg-transparent py-2 text-[14px] text-[var(--fg)] outline-none placeholder:text-[var(--fg-4)]"
             />
             <button
@@ -698,8 +870,20 @@ function Composer({ reduced, docked, onAdd, onPasteShot }: { reduced: boolean; d
 
 /* ---------------------------------------------------------------- pin bar */
 
-function PinBar(props: { barRef: RefObject<HTMLElement | null>; pinned: Clip[]; hover: boolean; reduced: boolean; onUnpin: (c: Clip) => void; onCopy: (c: Clip) => void }) {
-  const { barRef, pinned, hover, reduced, onUnpin, onCopy } = props
+type PinBarProps = {
+  barRef: RefObject<HTMLElement | null>
+  pinned: Clip[]
+  hover: boolean
+  reduced: boolean
+  onUnpin: (c: Clip) => void
+  onCopy: (c: Clip) => void
+  openId: string | null
+  onOpen: (c: Clip | null) => void
+  copiedId: string | null
+}
+
+function PinBar(props: PinBarProps) {
+  const { barRef, pinned, hover, reduced, onUnpin, onCopy, openId, onOpen, copiedId } = props
   return (
     <motion.section
       ref={barRef}
@@ -722,7 +906,7 @@ function PinBar(props: { barRef: RefObject<HTMLElement | null>; pinned: Clip[]; 
       </span>
       <AnimatePresence initial={false} mode="popLayout">
         {pinned.map((c) => (
-          <PinChip key={c.id} clip={c} reduced={reduced} onUnpin={onUnpin} onCopy={onCopy} />
+          <PinChip key={c.id} clip={c} reduced={reduced} onUnpin={onUnpin} onCopy={onCopy} open={openId === c.id} onOpen={onOpen} copied={copiedId === c.id} />
         ))}
       </AnimatePresence>
       {pinned.length === 0 ? <span className="text-[12px] text-[var(--fg-4)]">把卡片拖到这里置顶</span> : null}
@@ -742,7 +926,8 @@ function PinBar(props: { barRef: RefObject<HTMLElement | null>; pinned: Clip[]; 
   )
 }
 
-function PinChip({ clip, reduced, onUnpin, onCopy }: { clip: Clip; reduced: boolean; onUnpin: (c: Clip) => void; onCopy: (c: Clip) => void }) {
+function PinChip(props: { clip: Clip; reduced: boolean; onUnpin: (c: Clip) => void; onCopy: (c: Clip) => void; open: boolean; onOpen: (c: Clip | null) => void; copied: boolean }) {
+  const { clip, reduced, onUnpin, onCopy, open, onOpen, copied } = props
   const [pull, setPull] = useState(0)
   const dragged = useRef(false)
   const threshold = 56
@@ -773,23 +958,72 @@ function PinChip({ clip, reduced, onUnpin, onCopy }: { clip: Clip; reduced: bool
       }}
       onDrag={onDrag}
       onDragEnd={onDragEnd}
-      onTap={() => {
-        if (!dragged.current) onCopy(clip)
+      onTap={(e) => {
+        if (dragged.current || (e.target as HTMLElement | null)?.closest('[data-action]')) return
+        onOpen(open ? null : clip)
+      }}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onOpen(open ? null : clip)
+        }
       }}
       role="button"
       tabIndex={0}
-      title="点击复制；向下拖离取消置顶"
-      className="relative flex h-9 shrink-0 cursor-grab touch-none select-none items-center gap-2 rounded-[var(--radius-md)] border border-[var(--line-2)] bg-[var(--surface-1)] px-2.5 text-[12.5px] text-[var(--fg)] shadow-[var(--shadow-1)]"
-      style={{ borderColor: pull > 0.98 ? 'var(--accent)' : undefined }}
+      aria-expanded={open}
+      data-clip-id={clip.id}
+      data-open={open || undefined}
+      title="点按显示操作；向下拖离取消置顶"
+      className="relative flex h-9 shrink-0 cursor-grab touch-none select-none items-center gap-2 rounded-[var(--radius-md)] border border-[var(--line-2)] bg-[var(--surface-1)] pl-2.5 pr-1 text-[12.5px] text-[var(--fg)] shadow-[var(--shadow-1)]"
+      style={{ borderColor: pull > 0.98 ? 'var(--accent)' : open ? 'var(--line-3)' : undefined }}
     >
       <span className="size-1.5 rounded-full" style={{ background: deviceColor(d.kind) }} />
       <ChipPreview clip={clip} />
+      <AnimatePresence initial={false}>
+        {open ? (
+          <motion.span
+            key="acts"
+            initial={{ width: 0, opacity: 0 }}
+            animate={{ width: 'auto', opacity: 1 }}
+            exit={{ width: 0, opacity: 0, transition: { duration: dur.fast, ease: easeIn } }}
+            transition={springBounce}
+            className="flex items-center gap-0.5 overflow-hidden"
+          >
+            <ChipAction label={copied ? '已复制' : '复制'} onClick={() => onCopy(clip)}>
+              {copied ? <CheckIcon className="size-3.5 text-[var(--ok)]" /> : <CopyIcon className="size-3.5" />}
+            </ChipAction>
+            <ChipAction label="取消置顶" onClick={() => onUnpin(clip)}>
+              <PinOffIcon className="size-3.5" />
+            </ChipAction>
+          </motion.span>
+        ) : (
+          <motion.span key="pad" className="w-1.5" />
+        )}
+      </AnimatePresence>
       {pull > 0 ? (
         <span className="dd-mono absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] text-[var(--accent)]" style={{ opacity: pull }}>
           {pull > 0.98 ? '松手取消置顶' : '继续拖…'}
         </span>
       ) : null}
     </motion.div>
+  )
+}
+
+function ChipAction({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
+  const ref = useIsolatePointer<HTMLButtonElement>()
+  return (
+    <button
+      ref={ref}
+      type="button"
+      data-action
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className="grid size-7 place-items-center rounded-[var(--radius-sm)] text-[var(--fg-3)] hover:bg-[var(--surface-2)] hover:text-[var(--fg)]"
+    >
+      {children}
+    </button>
   )
 }
 
@@ -819,6 +1053,7 @@ function Toolbar(props: { view: View; onView: (v: View) => void; count: number; 
         onChange={onView}
         options={[
           { value: 'grid', label: <><LayoutGridIcon className="size-3.5" /> 网格</> },
+          { value: 'group', label: <><FolderIcon className="size-3.5" /> 按分组</> },
           { value: 'date', label: <><CalendarDaysIcon className="size-3.5" /> 按日期</> },
           { value: 'device', label: <><TabletSmartphoneIcon className="size-3.5" /> 按设备</> },
         ]}
@@ -853,6 +1088,12 @@ type BoardProps = {
   onArrived: (c: Clip) => void
   trashRef: RefObject<TrashHandle | null>
   onDragPhase: (phase: { clip: Clip; rect: DOMRect } | { clip: Clip; end: 'cancel' | 'deleted' }) => void
+  openId: string | null
+  onOpen: (c: Clip | null) => void
+  groups: string[]
+  filter: GroupFilter
+  onMoveGroup: (c: Clip, g: string | undefined) => void
+  onGroupDrag?: (c: Clip, x: number, y: number, drop: boolean) => string | null
 }
 
 function Board(props: BoardProps) {
@@ -875,6 +1116,11 @@ function Board(props: BoardProps) {
       onArrived={props.onArrived}
       trashRef={props.trashRef}
       onDragPhase={props.onDragPhase}
+      open={props.openId === c.id}
+      onOpen={props.onOpen}
+      groups={props.groups}
+      onMoveGroup={props.onMoveGroup}
+      onGroupDrag={props.onGroupDrag}
     />
   )
 
@@ -885,6 +1131,8 @@ function Board(props: BoardProps) {
       </motion.div>
     )
   }
+
+  if (view === 'group') return <GroupedBoard clips={clips} groups={props.groups} filter={props.filter} reduced={props.reduced} card={card} />
 
   const groups = new Map<string, Clip[]>()
   for (const c of clips) {
@@ -926,6 +1174,84 @@ function Board(props: BoardProps) {
         })}
       </AnimatePresence>
     </div>
+  )
+}
+
+/** 按分组: one collapsible section per group (plus 未分组), cards in a grid. */
+function GroupedBoard(props: { clips: Clip[]; groups: string[]; filter: GroupFilter; reduced: boolean; card: (c: Clip, v: 'grid' | 'row') => ReactNode }) {
+  const { clips, groups, filter, reduced, card } = props
+  const [folded, setFolded] = useState<Record<string, boolean>>({})
+  const keys = filter !== null ? [filter] : [...groups, '']
+  return (
+    <div className="flex flex-col gap-3" data-view="group">
+      <AnimatePresence mode="popLayout" initial={false}>
+        {keys.map((key) => {
+          const list = clips.filter((c) => (c.group ?? '') === key)
+          if (key === '' && list.length === 0 && filter === null) return null
+          const isFolded = folded[key] ?? false
+          return (
+            <motion.section
+              key={`g-${key}`}
+              layout={!reduced}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, transition: { duration: dur.fast, ease: easeIn } }}
+              className="rounded-[var(--radius-lg)] border border-[var(--line-1)] bg-[color-mix(in_oklab,var(--surface-1)_45%,transparent)]"
+              style={{ borderLeft: `3px solid ${key ? groupColor(key) : 'var(--line-2)'}` }}
+              data-group-section={key || '-'}
+            >
+              <motion.button
+                layout="position"
+                type="button"
+                aria-expanded={!isFolded}
+                onClick={() => setFolded((f) => ({ ...f, [key]: !isFolded }))}
+                className="flex w-full items-center gap-2 px-3 py-2.5 text-left"
+              >
+                <motion.span animate={{ rotate: isFolded ? -90 : 0 }} transition={springBounce} className="text-[var(--fg-3)]">
+                  <ChevronDownIcon className="size-3.5" />
+                </motion.span>
+                <GroupDot group={key || undefined} className="size-2" />
+                <span className="dd-display text-[13px] font-semibold text-[var(--fg)]">{groupName(key)}</span>
+                <span className="dd-mono text-[11px] text-[var(--fg-3)]">{list.length}</span>
+              </motion.button>
+              <AnimatePresence initial={false}>
+                {!isFolded ? (
+                  <motion.div
+                    key="body"
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1, transition: { ...springSettle, opacity: { duration: dur.base } } }}
+                    exit={{ height: 0, opacity: 0, transition: { duration: dur.base, ease: easeIn } }}
+                    className="overflow-hidden"
+                  >
+                    {list.length ? (
+                      <div className="grid grid-cols-1 gap-3 px-3 pb-3 sm:grid-cols-2 lg:grid-cols-3">
+                        <AnimatePresence mode="popLayout">{list.map((c) => card(c, 'grid'))}</AnimatePresence>
+                      </div>
+                    ) : (
+                      <p className="m-0 px-3 pb-3 text-[12px] text-[var(--fg-4)]">还没有内容 · 在卡片上点分组标签，或把卡片拖到上方的分组上</p>
+                    )}
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+            </motion.section>
+          )
+        })}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+function GroupEmpty({ group, onAll }: { group: string; onAll: () => void }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="flex flex-col items-center gap-3 rounded-[var(--radius-lg)] border border-dashed border-[var(--line-2)] px-6 py-12 text-center"
+    >
+      <GroupDot group={group || undefined} className="size-3" />
+      <p className="m-0 text-[13px] text-[var(--fg-3)]">「{groupName(group)}」里还没有内容。发送时选这个分组，或在卡片上点分组标签移进来。</p>
+      <button type="button" className="dd-chip" onClick={onAll}>看全部</button>
+    </motion.div>
   )
 }
 

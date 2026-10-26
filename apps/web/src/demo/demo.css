@@ -201,24 +201,70 @@
 .dd-card[data-copied="true"] {
   border-color: color-mix(in oklab, var(--ok) 55%, var(--line-2));
 }
-.dd-card .dd-card-actions {
+/*
+ * Actions (置顶 / 撤回 / 复制) stay hidden until the card is tapped open, so a
+ * stray tap never copies. Hidden buttons take no pointer events: a tap on
+ * where they would be just opens the card. Desktop hover and keyboard focus
+ * still reveal them.
+ */
+.dd-card .dd-card-actions > * {
   opacity: 0;
-  transform: translateY(2px);
+  pointer-events: none;
+  transform: translateY(3px) scale(0.86);
   transition: opacity var(--dur-fast) var(--ease-in), transform var(--dur-fast) var(--ease-in);
 }
-.dd-card:hover .dd-card-actions,
-.dd-card:focus-within .dd-card-actions {
+.dd-card[data-open] .dd-card-actions > *,
+.dd-card:focus-visible .dd-card-actions > *,
+.dd-card:has(:focus-visible) .dd-card-actions > * {
   opacity: 1;
+  pointer-events: auto;
   transform: none;
-  transition-timing-function: var(--ease-out);
+  transition: opacity var(--dur-base) var(--ease-out), transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-/* Touch screens have no hover: keep the actions visible so hold-to-retract is reachable. */
-@media (hover: none) {
-  .dd-card .dd-card-actions {
-    opacity: 1;
-    transform: none;
-  }
+/* hover only in the mouse gesture mode (same switch as pin-drag vs swipe),
+   so a touch tap never leaves a sticky :hover reveal behind */
+.dd[data-gesture="pin-drag"] .dd-card:hover .dd-card-actions > * {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  transition: opacity var(--dur-base) var(--ease-out), transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
+/* stagger right-to-left: copy first, it sits nearest the thumb */
+.dd-card .dd-card-actions > :nth-last-child(2) { transition-delay: 30ms; }
+.dd-card .dd-card-actions > :nth-last-child(3) { transition-delay: 60ms; }
+.dd-card[data-open] {
+  border-color: var(--line-3);
+}
+.dd-card[data-open]::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--fg) 9%, transparent);
+  pointer-events: none;
+  animation: dd-open-ring var(--dur-slow) var(--ease-out);
+}
+@keyframes dd-open-ring {
+  from { box-shadow: 0 0 0 0 color-mix(in oklab, var(--fg) 16%, transparent); }
+}
+/* the "+ 分组" hint on ungrouped cards follows the same reveal */
+.dd-card .dd-reveal {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-in);
+}
+.dd-card[data-open] .dd-reveal,
+.dd-card:has(:focus-visible) .dd-reveal {
+  opacity: 1;
+  pointer-events: auto;
+}
+.dd[data-gesture="pin-drag"] .dd-card:hover .dd-reveal { opacity: 1; pointer-events: auto; }
+@media (prefers-reduced-motion: reduce) {
+  .dd-card .dd-card-actions > * { transform: none !important; transition-delay: 0ms !important; }
+  .dd-card[data-open]::before { animation: none; }
+}
+.dd[data-reduced="true"] .dd-card .dd-card-actions > * { transform: none; transition-delay: 0ms; }
+.dd[data-reduced="true"] .dd-card[data-open]::before { animation: none; }
 /* near-expiry: fade + a slight curl of the bottom-right corner */
 .dd-card[data-aging="true"] {
   clip-path: polygon(0 0, 100% 0, 100% calc(100% - var(--curl) * 22px), calc(100% - var(--curl) * 22px) 100%, 0 100%);
