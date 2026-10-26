@@ -22,6 +22,8 @@ import {
   UploadIcon,
 } from 'lucide-react'
 import { ClipCard, type GestureMode } from './clip-card.tsx'
+import { TrashBin } from './trash-bin.tsx'
+import { trashAnchorFor, type TrashAnchor, type TrashHandle } from './trash-anchor.ts'
 import { clipCopyText, dayLabel, deviceById, devices, droppedFile, nextIncoming, pastedShot, seedClips, textClip, type Clip } from './data.ts'
 import { DeviceGlyph } from './icons.tsx'
 import { deviceColor, labelFor } from './visuals.ts'
@@ -129,6 +131,17 @@ export function UiDemoPage() {
   const [toast, setToast] = useState<Toast | null>(null)
   const [ripples, setRipples] = useState<Record<string, number>>({})
   const pinBarRef = useRef<HTMLElement | null>(null)
+  // PC drag-to-delete: the bin parks next to whichever card is being dragged.
+  const trashRef = useRef<TrashHandle | null>(null)
+  const [trash, setTrash] = useState<{ anchor: TrashAnchor; gulp: boolean } | null>(null)
+  const gulpTimer = useRef(0)
+  const onDragPhase = useCallback((phase: { clip: Clip; rect: DOMRect } | { clip: Clip; end: 'cancel' | 'deleted' }) => {
+    window.clearTimeout(gulpTimer.current)
+    if ('rect' in phase) return setTrash({ anchor: trashAnchorFor(phase.rect), gulp: false })
+    if (phase.end === 'cancel') return setTrash(null)
+    setTrash((t) => (t ? { ...t, gulp: true } : t))
+    gulpTimer.current = window.setTimeout(() => setTrash(null), 560)
+  }, [])
   const dotRefs = useRef(new Map<string, HTMLElement>())
 
   useEffect(() => {
@@ -269,14 +282,17 @@ export function UiDemoPage() {
                 onPin={(c) => setPinned(c, true)}
                 onPinHover={setPinHover}
                 onArrived={arrivedDone}
+                trashRef={trashRef}
+                onDragPhase={onDragPhase}
               />
             )}
           </LayoutGroup>
         </main>
         {docked ? <Composer reduced={reduced} docked onAdd={add} onPasteShot={simulatePaste} /> : null}
+        {gesture === 'pin-drag' ? <TrashBin handle={trashRef} anchor={trash?.anchor ?? null} gulp={trash?.gulp ?? false} reduced={reduced} /> : null}
         <ToastHost toast={toast} docked={docked} onClose={() => setToast(null)} />
         <p className="mx-auto hidden max-w-[1120px] px-4 pb-8 text-[11px] text-[var(--fg-4)] sm:block sm:px-6">
-          快捷键：N 模拟新内容 · D 切换风格 · M 切换明暗 · {gesture === 'swipe' ? '右滑复制 / 左滑再点确认撤回' : '点卡片复制 · 拖到置顶栏 · 长按 ↶ 撤回'}
+          快捷键：N 模拟新内容 · D 切换风格 · M 切换明暗 · {gesture === 'swipe' ? '右滑复制 / 左滑再点确认撤回' : '点卡片复制 · 拖到置顶栏 · 拖到旁边的垃圾桶或长按 ↶ 撤回'}
         </p>
       </div>
     </MotionConfig>
@@ -835,6 +851,8 @@ type BoardProps = {
   onPin: (c: Clip) => void
   onPinHover: (over: boolean) => void
   onArrived: (c: Clip) => void
+  trashRef: RefObject<TrashHandle | null>
+  onDragPhase: (phase: { clip: Clip; rect: DOMRect } | { clip: Clip; end: 'cancel' | 'deleted' }) => void
 }
 
 function Board(props: BoardProps) {
@@ -855,6 +873,8 @@ function Board(props: BoardProps) {
       onPin={props.onPin}
       onPinHover={props.onPinHover}
       onArrived={props.onArrived}
+      trashRef={props.trashRef}
+      onDragPhase={props.onDragPhase}
     />
   )
 

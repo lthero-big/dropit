@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import type { TrashHandle } from './trash-anchor.ts'
 
 function preHide(node: HTMLElement, transform?: string) {
   node.style.opacity = '0'
@@ -32,6 +33,9 @@ type Props = {
   onPin: (clip: Clip) => void
   onPinHover: (over: boolean) => void
   onArrived: (clip: Clip) => void
+  /** pin-drag only: the drag-to-delete bin that appears next to a dragged card */
+  trashRef?: RefObject<TrashHandle | null>
+  onDragPhase?: (phase: { clip: Clip; rect: DOMRect } | { clip: Clip; end: 'cancel' | 'deleted' }) => void
 }
 
 function inside(el: HTMLElement | null, x: number, y: number, pad = 24) {
@@ -41,10 +45,15 @@ function inside(el: HTMLElement | null, x: number, y: number, pad = 24) {
 }
 
 export function ClipCard(props: Props) {
-  const { clip, now, variant, gesture, reduced, copied, pinBarRef, deviceDot, onCopy, onRetract, onPin, onPinHover, onArrived } = props
+  const { clip, now, variant, gesture, reduced, copied, pinBarRef, deviceDot, onCopy, onRetract, onPin, onPinHover, onArrived, trashRef, onDragPhase } = props
   const [hover, setHover] = useState(false)
   const [scope, animate] = useAnimate<HTMLDivElement>()
   const x = useMotionValue(0)
+  // pin-drag offsets, owned here so a drop on the bin can fly the card into it
+  const dragX = useMotionValue(0)
+  const dragY = useMotionValue(0)
+  const cardRef = useRef<HTMLDivElement | null>(null)
+  const overTrash = useRef(false)
   const copyHint = useTransform(x, [0, 72], [0, 1])
   const undoHint = useTransform(x, [-72, 0], [1, 0])
   const [viewer, setViewer] = useState<ViewerMedia | null>(null)
@@ -116,8 +125,25 @@ export function ClipCard(props: Props) {
   }
 
   const handleDrag = (_: unknown, info: PanInfo) => {
-    if (gesture === 'pin-drag') onPinHover(inside(pinBarRef.current, info.point.x - window.scrollX, info.point.y - window.scrollY))
+    if (gesture !== 'pin-drag') return
+    const px = info.point.x - window.scrollX
+    const py = info.point.y - window.scrollY
+    const trash = trashRef?.current?.track(px, py) ?? false
+    if (trash !== overTrash.current) {
+      overTrash.current = trash
+      // Shrink toward the bin while hovering it: "this will go away".
+      const el = cardRef.current
+      if (el && !reduced) void animate(el, trash ? { scale: 0.62, rotate: 4, opacity: 0.86 } : { scale: 1.04, rotate: -1.5, opacity: 1 }, springBounce)
+    }
+    onPinHover(!trash && inside(pinBarRef.current, px, py))
   }
+
+  // The article is a layout-animated (transformed) stacking context, so the
+  // card's own whileDrag zIndex can't lift it over later grid siblings.
+  // Raise the whole article while dragging and until the snap-back settles.
+  const [lifted, setLifted] = useState(false)
+  const liftTimer = useRef(0)
+  useEffect(() => () => window.clearTimeout(liftTimer.current), [])
 
   const handleDragEnd = (_: unknown, info: PanInfo) => {
     // A drag must never also count as a tap-to-copy on release.
@@ -134,8 +160,28 @@ export function ClipCard(props: Props) {
       animateValue(x, info.offset.x < -72 ? -REVEAL : 0, springBounce)
       return
     }
-    const over = inside(pinBarRef.current, info.point.x - window.scrollX, info.point.y - window.scrollY)
+    const px = info.point.x - window.scrollX
+    const py = info.point.y - window.scrollY
+    const trash = (trashRef?.current?.track(px, py) ?? false) || overTrash.current
+    overTrash.current = false
     onPinHover(false)
+    const mouth = trashRef?.current?.mouth()
+    const el = cardRef.current
+    if (trash && mouth && el) {
+      onDragPhase?.({ clip, end: 'deleted' })
+      // Fly into the bin's mouth and dissolve, then hand off to the normal
+      // retract path (same undo toast as every other delete).
+      const r = el.getBoundingClientRect()
+      const dx = mouth.x - (r.left + r.width / 2)
+      const dy = mouth.y - (r.top + r.height / 2)
+      if (reduced) return onRetract(clip)
+      void animate(el, { x: dragX.get() + dx, y: dragY.get() + dy, scale: 0.08, rotate: 14, opacity: 0, filter: 'blur(2px)' }, { duration: 0.28, ease: easeIn }).then(() => onRetract(clip))
+      return
+    }
+    onDragPhase?.({ clip, end: 'cancel' })
+    window.clearTimeout(liftTimer.current)
+    liftTimer.current = window.setTimeout(() => setLifted(false), 600)
+    const over = inside(pinBarRef.current, px, py)
     if (over && !clip.pinned) onPin(clip)
   }
 
@@ -153,6 +199,7 @@ export function ClipCard(props: Props) {
       exit={reduced ? { opacity: 0, transition: { duration: dur.fast } } : exitAnim}
       transition={{ ...enter, layout: springSettle }}
       className={variant === 'grid' ? 'relative h-full' : 'relative'}
+      style={lifted ? { zIndex: 40 } : undefined}
       data-clip-id={clip.id}
       data-kind={clip.kind}
       onHoverStart={() => setHover(true)}
@@ -182,6 +229,7 @@ export function ClipCard(props: Props) {
       ) : null}
       <motion.div ref={scope} className="relative h-full">
         <motion.div
+          ref={cardRef}
           role="button"
           tabIndex={0}
           aria-label={`复制：${labelFor(clip)}`}
@@ -189,7 +237,7 @@ export function ClipCard(props: Props) {
           className="dd-card flex h-full cursor-pointer select-none flex-col outline-none"
           data-aging={aging || undefined}
           data-copied={copied || undefined}
-          style={{ ['--life' as string]: life, ['--curl' as string]: curl, x: gesture === 'swipe' ? x : undefined, touchAction: gesture === 'swipe' ? 'pan-y' : 'none' }}
+          style={{ ['--life' as string]: life, ['--curl' as string]: curl, x: gesture === 'swipe' ? x : dragX, y: gesture === 'swipe' ? undefined : dragY, touchAction: gesture === 'swipe' ? 'pan-y' : 'none' }}
           drag={reduced ? false : gesture === 'swipe' ? 'x' : true}
           dragSnapToOrigin={gesture !== 'swipe'}
           dragMomentum={gesture !== 'swipe'}
@@ -201,6 +249,12 @@ export function ClipCard(props: Props) {
           onDragStart={() => {
             dragged.current = true
             setHover(false)
+            overTrash.current = false
+            if (gesture === 'pin-drag') {
+              window.clearTimeout(liftTimer.current)
+              setLifted(true)
+            }
+            if (gesture === 'pin-drag' && cardRef.current) onDragPhase?.({ clip, rect: cardRef.current.getBoundingClientRect() })
           }}
           onDrag={handleDrag}
           onDragEnd={handleDragEnd}
