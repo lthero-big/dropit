@@ -19,6 +19,13 @@ export function fileType(name: string) {
   return hit ? { ...hit, ext } : { icon: FileIcon, color: '#7d776d', label: 'FILE', ext }
 }
 
+/** audio / video files with a source play inline instead of showing a file icon */
+export function mediaOf(clip: Clip): 'audio' | 'video' | null {
+  if (clip.kind !== 'file' || !clip.src) return null
+  const t = fileType(clip.name).label
+  return t === 'AUDIO' ? 'audio' : t === 'VIDEO' ? 'video' : null
+}
+
 export function labelFor(clip: Clip) {
   switch (clip.kind) {
     case 'link': return clip.title

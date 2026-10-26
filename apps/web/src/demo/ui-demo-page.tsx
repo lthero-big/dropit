@@ -226,7 +226,7 @@ export function UiDemoPage() {
         </main>
         <ToastHost toast={toast} onClose={() => setToast(null)} />
         <p className="mx-auto hidden max-w-[1120px] px-4 pb-8 text-[11px] text-[var(--fg-4)] sm:block sm:px-6">
-          快捷键：N 模拟新内容 · D 切换风格 · M 切换明暗 · {gesture === 'swipe' ? '右滑复制 / 左滑撤回' : '点卡片复制 · 拖到置顶栏'}
+          快捷键：N 模拟新内容 · D 切换风格 · M 切换明暗 · {gesture === 'swipe' ? '右滑复制 / 左滑再点确认撤回' : '点卡片复制 · 拖到置顶栏 · 长按 ↶ 撤回'}
         </p>
       </div>
     </MotionConfig>
@@ -423,7 +423,9 @@ function Composer({ reduced, onAdd, onPasteShot }: { reduced: boolean; onAdd: (c
           reader.onload = () => onAdd(pastedShot(now + i, String(reader.result)))
           reader.readAsDataURL(file)
         } else {
-          onAdd(droppedFile(now + i, file.name, file.size))
+          // Real audio / video dropped in plays straight from the card.
+          const playable = /^(audio|video)\//.test(file.type) ? URL.createObjectURL(file) : undefined
+          onAdd(droppedFile(now + i, file.name, file.size, playable))
         }
       })
       if (files.length) {

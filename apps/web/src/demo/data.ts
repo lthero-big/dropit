@@ -1,4 +1,7 @@
 // Fake data for the RHEA-191 UI demo. Nothing here talks to the server.
+import voiceMemo from './media/voice-memo.mp3'
+import screenRec from './media/screen-rec.mp4'
+import screenRecPoster from './media/screen-rec-poster.jpg'
 
 export type DeviceKind = 'mac' | 'phone' | 'pad' | 'pc'
 export type Device = { id: string; name: string; kind: DeviceKind; online: boolean }
@@ -23,7 +26,7 @@ export type Clip =
   | (Base & { kind: 'color'; value: string; name?: string })
   | (Base & { kind: 'text'; text: string })
   | (Base & { kind: 'image'; name: string; w: number; h: number; tone: string; src: string })
-  | (Base & { kind: 'file'; name: string; size: number })
+  | (Base & { kind: 'file'; name: string; size: number; /** playable audio / video source */ src?: string; poster?: string })
 
 export const devices: Device[] = [
   { id: 'mbp', name: 'MacBook Pro', kind: 'mac', online: true },
@@ -83,7 +86,11 @@ export function seedClips(now: number): Clip[] {
       id: 'c11', kind: 'code', deviceId: 'desk', ...at(27 * HOUR, 72 * HOUR), lang: 'bash',
       code: 'pnpm --filter @dropit/web dev\nopen http://localhost:5173/demo/ui',
     },
-    { id: 'c12', kind: 'file', deviceId: 'iphone', ...at(28 * HOUR, 28 * HOUR + 75_000), name: '语音备忘录 0412.m4a', size: 3_120_000 },
+    { id: 'c12', kind: 'file', deviceId: 'iphone', ...at(28 * HOUR, 28 * HOUR + 75_000), name: '语音备忘录 0412.m4a', size: 3_120_000, src: voiceMemo },
+    {
+      id: 'c13', kind: 'file', deviceId: 'iphone', ...at(40 * MIN, 24 * HOUR),
+      name: '屏幕录制 10-26.mp4', size: 18_600_000, src: screenRec, poster: screenRecPoster,
+    },
   ]
 }
 
@@ -112,8 +119,8 @@ export function pastedShot(now: number, src?: string): Clip {
   }
 }
 
-export function droppedFile(now: number, name: string, size: number): Clip {
-  return { id: `f${seq++}`, kind: 'file', deviceId: 'mbp', createdAt: now, expiresAt: now + 24 * HOUR, name, size, landed: true }
+export function droppedFile(now: number, name: string, size: number, src?: string): Clip {
+  return { id: `f${seq++}`, kind: 'file', deviceId: 'mbp', createdAt: now, expiresAt: now + 24 * HOUR, name, size, src, landed: true }
 }
 
 export function textClip(now: number, text: string): Clip {
