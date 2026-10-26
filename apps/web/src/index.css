@@ -4,9 +4,16 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * Paper (纸感) design tokens, RHEA-190 step 1. Source of truth for the whole app.
+ * Raw tokens (--bg, --surface-*, --line-*, --fg-*, --brand, --elev-*, --dur-*, --ease-enter/exit)
+ * are defined once per mode; shadcn semantic vars and Tailwind theme keys alias them.
+ * `.dark` on <html> (theme-provider) and `[data-mode="dark"]` on a subtree both switch the palette.
+ */
 @theme inline {
     --font-heading: var(--font-sans);
-    --font-sans: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Noto Sans SC", sans-serif;
+    --font-sans: "Geist Variable", "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    --font-mono: "Geist Mono Variable", ui-monospace, "SFMono-Regular", Menlo, monospace;
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -38,8 +45,35 @@
     --color-card: var(--card);
     --color-foreground: var(--foreground);
     --color-background: var(--background);
-    --radius-sm: calc(var(--radius) * 0.6);
-    --radius-md: calc(var(--radius) * 0.8);
+    /* paper palette as utilities: bg-surface-1, border-line-2, text-fg-3, text-brand ... */
+    --color-surface-0: var(--surface-0);
+    --color-surface-1: var(--surface-1);
+    --color-surface-2: var(--surface-2);
+    --color-surface-sunken: var(--surface-sunken);
+    --color-line-1: var(--line-1);
+    --color-line-2: var(--line-2);
+    --color-line-3: var(--line-3);
+    --color-fg: var(--fg);
+    --color-fg-2: var(--fg-2);
+    --color-fg-3: var(--fg-3);
+    --color-fg-4: var(--fg-4);
+    --color-brand: var(--brand);
+    --color-brand-soft: var(--brand-soft);
+    --color-ok: var(--ok);
+    --color-ok-soft: var(--ok-soft);
+    --color-code: var(--code-bg);
+    --color-dev-mac: var(--dev-mac);
+    --color-dev-phone: var(--dev-phone);
+    --color-dev-pad: var(--dev-pad);
+    --color-dev-pc: var(--dev-pc);
+    --shadow-elev-1: var(--elev-1);
+    --shadow-elev-2: var(--elev-2);
+    --shadow-elev-3: var(--elev-3);
+    --ease-out: var(--ease-enter);
+    --ease-in: var(--ease-exit);
+    --radius-xs: calc(var(--radius) * 0.45);
+    --radius-sm: calc(var(--radius) * 0.7);
+    --radius-md: calc(var(--radius) * 0.85);
     --radius-lg: var(--radius);
     --radius-xl: calc(var(--radius) * 1.4);
     --radius-2xl: calc(var(--radius) * 1.8);
@@ -48,72 +82,110 @@
 }
 
 :root {
-    --background: #f3f3ef;
-    --foreground: #111111;
-    --card: #ffffff;
-    --card-foreground: #111111;
-    --popover: #ffffff;
-    --popover-foreground: #111111;
-    --primary: #d0021b;
-    --primary-foreground: #ffffff;
-    --secondary: #ecece6;
-    --secondary-foreground: #111111;
-    --muted: #ecece6;
-    --muted-foreground: #4d4d4d;
-    --accent: #ecece6;
-    --accent-foreground: #111111;
-    --destructive: #e30613;
-    --border: #111111;
-    --input: #111111;
-    --ring: #d0021b;
-    --chart-1: #d0021b;
-    --chart-2: #4d4d4d;
-    --chart-3: #111111;
-    --chart-4: #0a7a3d;
-    --chart-5: #b45309;
-    --radius: 0;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    /* motion: 120/200/320ms; enter ease-out, exit ease-in. JS mirror: src/lib/motion.ts */
+    --dur-fast: 120ms;
+    --dur-base: 200ms;
+    --dur-slow: 320ms;
+    --ease-enter: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-exit: cubic-bezier(0.55, 0, 1, 0.45);
+    --radius: 7px;
 }
 
-.dark {
-    --background: #0a0a0a;
-    --foreground: #f5f5f5;
-    --card: #0a0a0a;
-    --card-foreground: #f5f5f5;
-    --popover: #0a0a0a;
-    --popover-foreground: #f5f5f5;
-    --primary: #ff3b47;
-    --primary-foreground: #0a0a0a;
-    --secondary: #1a1a1a;
-    --secondary-foreground: #f5f5f5;
-    --muted: #1a1a1a;
-    --muted-foreground: #9a9a9a;
-    --accent: #1a1a1a;
-    --accent-foreground: #f5f5f5;
-    --destructive: #ff3b47;
-    --border: #f5f5f5;
-    --input: #f5f5f5;
-    --ring: #ff3b47;
-    --chart-1: #ff3b47;
-    --chart-2: #9a9a9a;
-    --chart-3: #f5f5f5;
-    --chart-4: #3dd68c;
-    --chart-5: #f5b942;
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+:root,
+[data-mode="light"] {
+    /* paper · light */
+    --bg: #f4f2ee;
+    --surface-0: #faf9f7;
+    --surface-1: #ffffff;
+    --surface-2: #f0ede8;
+    --surface-sunken: #ebe8e2;
+    --line-1: #e7e3dc;
+    --line-2: #d9d4cb;
+    --line-3: #bdb6aa;
+    --fg: #1d1b18;
+    --fg-2: #4a4640;
+    --fg-3: #7d776d;
+    --fg-4: #a59f94;
+    --brand: #d0021b;
+    --brand-fg: #ffffff;
+    --ok: #2f7d4f;
+    --code-bg: #f6f4f0;
+    --elev-1: 0 1px 0 rgb(29 27 24 / 0.04), 0 1px 2px rgb(29 27 24 / 0.05);
+    --elev-2: 0 1px 0 rgb(29 27 24 / 0.04), 0 4px 12px -2px rgb(29 27 24 / 0.08), 0 2px 4px -2px rgb(29 27 24 / 0.06);
+    --elev-3: 0 18px 40px -12px rgb(29 27 24 / 0.22), 0 6px 14px -6px rgb(29 27 24 / 0.12);
+    --dev-mac: #6b6a8f;
+    --dev-phone: #3f7f74;
+    --dev-pad: #a86b2d;
+    --dev-pc: #4d6f9c;
+    color-scheme: light;
+}
+
+.dark,
+[data-mode="dark"] {
+    /* paper · dark: warm charcoal, never pure black; borders are hairlines, not white rules */
+    --bg: #121110;
+    --surface-0: #171615;
+    --surface-1: #1d1c1a;
+    --surface-2: #252321;
+    --surface-sunken: #0e0d0c;
+    --line-1: #2a2826;
+    --line-2: #36332f;
+    --line-3: #4d4943;
+    --fg: #eeebe6;
+    --fg-2: #c7c2ba;
+    --fg-3: #958f85;
+    --fg-4: #6c675f;
+    --brand: #f0434f;
+    --brand-fg: #160707;
+    --ok: #5cc28a;
+    --code-bg: #151413;
+    --elev-1: 0 1px 0 rgb(255 255 255 / 0.03) inset, 0 1px 2px rgb(0 0 0 / 0.4);
+    --elev-2: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 6px 16px -4px rgb(0 0 0 / 0.55);
+    --elev-3: 0 1px 0 rgb(255 255 255 / 0.05) inset, 0 22px 48px -12px rgb(0 0 0 / 0.7);
+    --dev-mac: #a3a1d6;
+    --dev-phone: #6cc4b4;
+    --dev-pad: #e0a165;
+    --dev-pc: #86a9d8;
+    color-scheme: dark;
+}
+
+/* Semantic aliases. Declared on every palette scope so var() resolves against that scope's palette. */
+:root,
+.dark,
+[data-mode] {
+    --brand-soft: color-mix(in oklab, var(--brand) 10%, transparent);
+    --ok-soft: color-mix(in oklab, var(--ok) 14%, transparent);
+    --background: var(--bg);
+    --foreground: var(--fg);
+    --card: var(--surface-1);
+    --card-foreground: var(--fg);
+    --popover: var(--surface-1);
+    --popover-foreground: var(--fg);
+    --primary: var(--brand);
+    --primary-foreground: var(--brand-fg);
+    --secondary: var(--surface-2);
+    --secondary-foreground: var(--fg);
+    --muted: var(--surface-2);
+    --muted-foreground: var(--fg-3);
+    --accent: var(--surface-2);
+    --accent-foreground: var(--fg);
+    --destructive: var(--brand);
+    --border: var(--line-2);
+    --input: var(--line-2);
+    --ring: color-mix(in oklab, var(--brand) 55%, transparent);
+    --chart-1: var(--brand);
+    --chart-2: var(--fg-3);
+    --chart-3: var(--fg);
+    --chart-4: var(--ok);
+    --chart-5: var(--dev-pad);
+    --sidebar: var(--surface-0);
+    --sidebar-foreground: var(--fg);
+    --sidebar-primary: var(--fg);
+    --sidebar-primary-foreground: var(--bg);
+    --sidebar-accent: var(--surface-2);
+    --sidebar-accent-foreground: var(--fg);
+    --sidebar-border: var(--line-1);
+    --sidebar-ring: var(--ring);
 }
 
 @media (max-width: 767px) {
@@ -132,6 +204,12 @@
     }
   html {
     @apply font-sans;
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    }
+  code, kbd, samp, pre {
+    @apply font-mono;
     }
   :focus-visible {
     outline: 2px solid var(--ring);
@@ -140,8 +218,8 @@
   /* One press treatment for every control. Utilities still win on hover color. */
   :where(button, a[href], summary, [role="button"], [role="menuitem"], [data-pressable]) {
     transition-property: background-color, color, border-color, box-shadow, opacity, transform;
-    transition-duration: 150ms;
-    transition-timing-function: ease;
+    transition-duration: var(--dur-fast);
+    transition-timing-function: var(--ease-enter);
     }
   :where(button, a[href], summary, [role="button"], [role="menuitem"], [data-pressable]):hover {
     background-color: color-mix(in srgb, var(--foreground) 8%, transparent);
@@ -151,11 +229,12 @@
     }
   :where([data-interactive-card]) {
     transition-property: background-color, border-color, box-shadow, transform;
-    transition-duration: 150ms;
-    transition-timing-function: ease;
+    transition-duration: var(--dur-base);
+    transition-timing-function: var(--ease-enter);
     }
   :where([data-interactive-card]):hover {
-    box-shadow: inset 0 0 0 2px var(--primary);
+    border-color: var(--line-3);
+    box-shadow: var(--elev-2);
     }
   :where([data-interactive-card][data-pressable]):active {
     transform: scale(0.97);
@@ -170,7 +249,7 @@
 }
 
 .clip-board > [data-clip-card] {
-  animation: clip-enter 180ms ease;
+  animation: clip-enter var(--dur-base) var(--ease-enter);
 }
 
 @keyframes clip-enter {

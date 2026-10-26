@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { createPortal } from 'react-dom'
 import { AnimatePresence, animate, motion, useMotionValue, useTransform, type AnimationPlaybackControls, type MotionValue } from 'motion/react'
 import { MaximizeIcon, MinusIcon, PauseIcon, PlayIcon, PlusIcon, XIcon } from 'lucide-react'
-import { dur, easeIn, easeOut, springBounce, springSettle } from './motion-tokens.ts'
+import { dur, easeIn, easeOut, springBounce, springSettle } from '../lib/motion.ts'
 
 /**
  * Cards are draggable (swipe / pin-drag) and tap-to-copy. Controls that live
