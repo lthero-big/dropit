@@ -72,6 +72,7 @@ export function ClipCard(props: Props) {
   // Swipe-left no longer retracts on its own: it opens a confirm button and
   // waits for a second, deliberate tap. Tapping the card or waiting closes it.
   const [armed, setArmed] = useState(false)
+  const armedAtStart = useRef(false)
   useEffect(() => {
     if (gesture !== 'swipe') return
     const controls = animateValue(x, armed ? -REVEAL : 0, springBounce)
@@ -165,6 +166,16 @@ export function ClipCard(props: Props) {
       dragged.current = false
     }, 0)
     if (gesture === 'swipe') {
+      // Swiping right on an open retract confirm only cancels it. The offset is
+      // measured from the -REVEAL rest point, so treating it as a fresh swipe
+      // would turn the cancel into a copy.
+      if (armedAtStart.current) {
+        armedAtStart.current = false
+        const keep = info.offset.x < 24
+        setArmed(keep)
+        animateValue(x, keep ? -REVEAL : 0, springBounce)
+        return
+      }
       if (info.offset.x > 72) {
         setArmed(false)
         onCopy(clip)
@@ -265,6 +276,7 @@ export function ClipCard(props: Props) {
           transition={springBounce}
           onDragStart={() => {
             dragged.current = true
+            armedAtStart.current = armed
             setHover(false)
             overTrash.current = false
             if (gesture === 'pin-drag') {
