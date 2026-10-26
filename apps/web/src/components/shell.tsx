@@ -19,7 +19,9 @@ import type { SpaceSummary } from '@/lib/types.ts'
 import { useTheme } from './theme-provider.tsx'
 
 const themeIconClass = 'inline-flex size-10 shrink-0 items-center justify-center border-2 border-foreground bg-background text-foreground hover:bg-foreground hover:text-background focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary'
-const menuItemClass = 'min-h-10 rounded-none px-3 text-sm font-bold tracking-normal normal-case'
+const menuItemClass = 'min-h-10 min-w-10 rounded-none px-3 text-sm font-bold tracking-normal normal-case'
+const menuItemStyle = { minHeight: 40, minWidth: 40 }
+const hitTarget = { minHeight: 40, minWidth: 40 }
 
 export function Shell({
   spaces = [],
@@ -93,7 +95,7 @@ export function Shell({
           {me && current && onSpace ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button type="button" variant="outline" className="max-w-[9rem] truncate normal-case tracking-normal">
+                <Button type="button" variant="outline" className="h-10 min-h-10 min-w-10 max-w-[9rem] truncate normal-case tracking-normal" style={hitTarget}>
                   {spaceLabel(current, me.user.id, spaces)}
                 </Button>
               </DropdownMenuTrigger>
@@ -110,12 +112,12 @@ export function Shell({
             <Link to="/" className={location.pathname === '/' ? 'border-b-2 border-primary' : ''}>
               剪贴板
             </Link>
-            <button type="button" className="uppercase" onClick={() => void newRoom()}>
+            <button type="button" className="inline-flex min-h-10 min-w-10 items-center uppercase" style={hitTarget} onClick={() => void newRoom()}>
               临时房间
             </button>
           </nav>
           <div className="ml-auto flex shrink-0 items-center gap-2">
-            <button type="button" className={themeIconClass} aria-label="切换主题" title={theme === 'dark' ? '当前深色，点击切换到浅色' : theme === 'light' ? '当前浅色，点击切换到深色' : '跟随系统，点击切换'} onClick={cycleTheme}>
+            <button type="button" className={themeIconClass} style={hitTarget} aria-label="切换主题" title={theme === 'dark' ? '当前深色，点击切换到浅色' : theme === 'light' ? '当前浅色，点击切换到深色' : '跟随系统，点击切换'} onClick={cycleTheme}>
               {theme === 'dark' ? <SunIcon className="size-4" aria-hidden="true" /> : <MoonIcon className="size-4" aria-hidden="true" />}
             </button>
             {me ? (
@@ -126,7 +128,8 @@ export function Shell({
                     aria-label="账户菜单"
                     aria-expanded={menuOpen}
                     aria-haspopup="menu"
-                    className="inline-flex h-10 max-w-[11rem] items-center gap-2 border-2 border-foreground bg-background px-1.5 text-foreground hover:bg-foreground hover:text-background focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                    className="inline-flex h-10 min-h-10 min-w-10 max-w-[11rem] items-center gap-2 border-2 border-foreground bg-background px-1.5 text-foreground hover:bg-foreground hover:text-background focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                    style={hitTarget}
                     onClick={() => setMenuOpen(true)}
                   >
                     <span className="grid size-7 shrink-0 place-items-center bg-foreground text-xs font-black text-background" aria-hidden="true">
@@ -158,7 +161,8 @@ export function Shell({
                   <button
                     type="button"
                     aria-label="账户菜单"
-                    className="inline-flex h-10 max-w-[11rem] items-center gap-2 border-2 border-foreground bg-background px-1.5 text-foreground hover:bg-foreground hover:text-background focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                    className="inline-flex h-10 min-h-10 min-w-10 max-w-[11rem] items-center gap-2 border-2 border-foreground bg-background px-1.5 text-foreground hover:bg-foreground hover:text-background focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                    style={hitTarget}
                   >
                     <span className="grid size-7 shrink-0 place-items-center bg-foreground text-xs font-black text-background" aria-hidden="true">
                       {initial}
@@ -186,7 +190,7 @@ export function Shell({
               </DropdownMenu>
               )
             ) : (
-              <Button type="button" variant="outline" className="h-10" onClick={() => navigate('/login')}>
+              <Button type="button" variant="outline" className="h-10 min-h-10 min-w-10" style={hitTarget} onClick={() => navigate('/login')}>
                 登录
               </Button>
             )}
@@ -198,7 +202,7 @@ export function Shell({
         <Link to="/" className="flex min-h-11 items-center justify-center text-xs font-extrabold tracking-widest uppercase">
           剪贴板
         </Link>
-        <button type="button" className="min-h-11 text-xs font-extrabold tracking-widest uppercase" onClick={() => void newRoom()}>
+        <button type="button" className="min-h-11 min-w-10 text-xs font-extrabold tracking-widest uppercase" style={hitTarget} onClick={() => void newRoom()}>
           房间
         </button>
       </nav>
@@ -252,19 +256,19 @@ function AccountDrawer({
           </span>
         </div>
         <div className="mt-1 border-t-2 border-foreground pt-1">
-          <button type="button" className={`${menuItemClass} flex w-full items-center gap-1.5`} onClick={() => onNavigate('/settings')}>
+          <button type="button" className={`${menuItemClass} flex w-full items-center gap-1.5`} style={menuItemStyle} onClick={() => onNavigate('/settings')}>
             <SettingsIcon className="size-4" aria-hidden="true" />
             设置
           </button>
           {role === 'admin' ? (
-            <button type="button" className={`${menuItemClass} flex w-full items-center gap-1.5`} onClick={() => onNavigate('/admin')}>
+            <button type="button" className={`${menuItemClass} flex w-full items-center gap-1.5`} style={menuItemStyle} onClick={() => onNavigate('/admin')}>
               <ShieldIcon className="size-4" aria-hidden="true" />
               管理
             </button>
           ) : null}
         </div>
         <div className="mt-1 border-t-2 border-foreground pt-1">
-          <button type="button" className={`${menuItemClass} flex w-full items-center gap-1.5 text-destructive`} onClick={onLogout}>
+          <button type="button" className={`${menuItemClass} flex w-full items-center gap-1.5 text-destructive`} style={menuItemStyle} onClick={onLogout}>
             <LogOutIcon className="size-4" aria-hidden="true" />
             退出
           </button>
@@ -317,19 +321,19 @@ function AccountMenuBody({
       </DropdownMenuLabel>
       <DropdownMenuSeparator />
       <DropdownMenuGroup>
-        <DropdownMenuItem className={menuItemClass} onSelect={() => onNavigate('/settings')}>
+        <DropdownMenuItem className={menuItemClass} style={menuItemStyle} onSelect={() => onNavigate('/settings')}>
           <SettingsIcon className="size-4" aria-hidden="true" />
           设置
         </DropdownMenuItem>
         {role === 'admin' ? (
-          <DropdownMenuItem className={menuItemClass} onSelect={() => onNavigate('/admin')}>
+          <DropdownMenuItem className={menuItemClass} style={menuItemStyle} onSelect={() => onNavigate('/admin')}>
             <ShieldIcon className="size-4" aria-hidden="true" />
             管理
           </DropdownMenuItem>
         ) : null}
       </DropdownMenuGroup>
       <DropdownMenuSeparator />
-      <DropdownMenuItem className={menuItemClass} variant="destructive" onSelect={onLogout}>
+      <DropdownMenuItem className={menuItemClass} style={menuItemStyle} variant="destructive" onSelect={onLogout}>
         <LogOutIcon className="size-4" aria-hidden="true" />
         退出
       </DropdownMenuItem>

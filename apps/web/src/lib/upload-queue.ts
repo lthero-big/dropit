@@ -20,6 +20,22 @@ export type UploadRow = {
   error: string
   speedBps: number
   etaMs: number | null
+  /** Drawn from localStorage after a refresh. The File is gone until the user picks it again. */
+  restored?: boolean
+  confirmMtime?: boolean
+}
+
+export type RestoredUpload = {
+  uploadId: string
+  name: string
+  size: number
+  ratio: number
+  sessionKey: string
+}
+
+export type KeptSession = {
+  key: string
+  uploadId: string
 }
 
 type Uploader = (
@@ -29,7 +45,10 @@ type Uploader = (
 ) => Promise<{ item: Item }>
 
 type Job = UploadRow & {
-  file: File
+  file: File | null
+  sessionKey: string | null
+  uploadId: string | null
+  held: File | null
   controller: AbortController | null
   timer: ReturnType<typeof setTimeout> | null
   samples: SpeedSample[]
@@ -44,6 +63,18 @@ export type UploadQueue = {
   retry: (id: string) => void
   pause: (id: string) => void
   resume: (id: string) => void
+  restore: (input: RestoredUpload) => void
+  dropRestored: () => void
+  dropUpload: (uploadId: string) => void
+  dropForeign: (uploadId: string) => void
+  claimedIds: () => string[]
+  needsFile: (id: string) => boolean
+  sessionOf: (id: string) => (KeptSession & { name: string; size: number }) | null
+  bindFile: (id: string, file: File, sessionKey?: string) => void
+  holdFile: (id: string, file: File, error: string) => void
+  armMtime: (id: string, file: File) => void
+  confirmMtime: (id: string) => File | null
+  takeHeld: (id: string) => File | null
   dispose: () => void
 }
 
@@ -84,6 +115,7 @@ export function createUploadQueue(options: {
   onOversize: (name: string) => void
   onFailed: (message: string) => void
   discard?: (file: File) => void
+  discardKept?: (session: KeptSession) => void
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>
   now?: () => number
   doneMs?: number
@@ -106,9 +138,20 @@ export function createUploadQueue(options: {
   }
 
   function snapshot(): UploadRow[] {
-    return jobs.map(({ id, name, size, ratio, status, error, speedBps, etaMs: remain }) => ({
+    return jobs.map(({ id, name, size, ratio, status, error, speedBps, etaMs: remain, restored, confirmMtime }) => ({
       id, name, size, ratio, status, error, speedBps, etaMs: remain,
+      restored: restored || undefined,
+      confirmMtime: confirmMtime || undefined,
     }))
+  }
+
+  function forget(job: Job) {
+    if (job.file) options.discard?.(job.file)
+    else if (job.sessionKey && job.uploadId) options.discardKept?.({ key: job.sessionKey, uploadId: job.uploadId })
+  }
+
+  function find(id: string) {
+    return jobs.find((entry) => entry.id === id)
   }
 
   function publish() {
@@ -151,10 +194,12 @@ export function createUploadQueue(options: {
   }
 
   async function uploadWithRetry(job: Job, signal: AbortSignal): Promise<{ item: Item }> {
+    const file = job.file
+    if (!file) throw new Error('missing file')
     let retries = 0
     while (true) {
       try {
-        return await options.upload(job.file, (update) => applyProgress(job, update), signal)
+        return await options.upload(file, (update) => applyProgress(job, update), signal)
       } catch (error) {
         if (signal.aborted || isUploadCancelled(error) || isKeepSession(error)) throw error
         if (!retryable(error) || retries >= UPLOAD_AUTO_RETRIES) throw error
@@ -168,7 +213,7 @@ export function createUploadQueue(options: {
   function pump() {
     if (disposed) return
     while (jobs.filter((job) => job.status === 'uploading' || job.status === 'processing').length < UPLOAD_CONCURRENCY) {
-      const job = jobs.find((entry) => entry.status === 'queued')
+      const job = jobs.find((entry) => entry.status === 'queued' && entry.file)
       if (!job) break
       job.status = 'uploading'
       job.ratio = 0
@@ -229,6 +274,9 @@ export function createUploadQueue(options: {
     return {
       id: `up-${++seq}`,
       file,
+      sessionKey: null,
+      uploadId: null,
+      held: null,
       name,
       size: file.size,
       ratio: 0,
@@ -241,6 +289,14 @@ export function createUploadQueue(options: {
       samples: [],
       run: 0,
     }
+  }
+
+  function detach(uploadId: string) {
+    const job = jobs.find((entry) => entry.uploadId === uploadId)
+    if (!job) return
+    job.run += 1
+    job.controller?.abort(new KeepSession())
+    remove(job)
   }
 
   return {
@@ -256,15 +312,15 @@ export function createUploadQueue(options: {
       pump()
     },
     cancel(id) {
-      const job = jobs.find((entry) => entry.id === id)
+      const job = find(id)
       if (!job) return
       if (job.status === 'queued') {
-        options.discard?.(job.file)
+        forget(job)
         remove(job)
         return
       }
       if (job.status === 'paused') {
-        options.discard?.(job.file)
+        forget(job)
         job.status = 'cancelled'
         publish()
         armRemoval(job)
@@ -284,8 +340,8 @@ export function createUploadQueue(options: {
       }
     },
     retry(id) {
-      const job = jobs.find((entry) => entry.id === id)
-      if (!job || job.status !== 'failed') return
+      const job = find(id)
+      if (!job || job.status !== 'failed' || !job.file) return
       job.error = ''
       job.ratio = 0
       job.speedBps = 0
@@ -301,7 +357,7 @@ export function createUploadQueue(options: {
       pump()
     },
     pause(id) {
-      const job = jobs.find((entry) => entry.id === id)
+      const job = find(id)
       if (!job || job.status !== 'uploading') return
       job.status = 'paused'
       job.controller?.abort(new KeepSession())
@@ -309,12 +365,115 @@ export function createUploadQueue(options: {
       publish()
     },
     resume(id) {
-      const job = jobs.find((entry) => entry.id === id)
-      if (!job || job.status !== 'paused') return
+      const job = find(id)
+      if (!job || job.status !== 'paused' || !job.file) return
       job.status = 'queued'
       job.error = ''
+      job.confirmMtime = false
       publish()
       pump()
+    },
+    restore(input) {
+      if (disposed || jobs.some((entry) => entry.uploadId === input.uploadId)) return
+      jobs.push({
+        id: `up-${++seq}`,
+        file: null,
+        sessionKey: input.sessionKey,
+        uploadId: input.uploadId,
+        held: null,
+        name: input.name || '截图',
+        size: input.size,
+        ratio: input.ratio,
+        status: 'paused',
+        error: '',
+        restored: true,
+        confirmMtime: false,
+        speedBps: 0,
+        etaMs: null,
+        controller: null,
+        timer: null,
+        samples: [],
+        run: 0,
+      })
+      publish()
+    },
+    dropRestored() {
+      for (const job of [...jobs]) {
+        if (job.restored && !job.file && job.status === 'paused') remove(job)
+      }
+    },
+    dropUpload: detach,
+    dropForeign(uploadId) {
+      const job = jobs.find((entry) => entry.uploadId === uploadId)
+      if (!job || job.status === 'uploading' || job.status === 'processing' || job.status === 'queued') return
+      job.run += 1
+      remove(job)
+    },
+    claimedIds() {
+      return jobs.flatMap((job) => job.uploadId ? [job.uploadId] : [])
+    },
+    needsFile(id) {
+      const job = find(id)
+      return Boolean(job && job.status === 'paused' && !job.file)
+    },
+    sessionOf(id) {
+      const job = find(id)
+      if (!job?.sessionKey || !job.uploadId) return null
+      return { key: job.sessionKey, uploadId: job.uploadId, name: job.name, size: job.size }
+    },
+    bindFile(id, file, sessionKey) {
+      const job = find(id)
+      if (!job || job.status === 'cancelled' || job.status === 'done') return
+      job.file = file
+      job.held = null
+      job.confirmMtime = false
+      job.error = ''
+      job.name = file.name || job.name
+      job.size = file.size
+      if (sessionKey) job.sessionKey = sessionKey
+      if (job.status === 'paused' || job.status === 'failed') {
+        job.status = 'queued'
+        publish()
+        pump()
+        return
+      }
+      publish()
+    },
+    holdFile(id, file, error) {
+      const job = find(id)
+      if (!job || job.status !== 'paused') return
+      job.held = file
+      job.confirmMtime = false
+      job.error = error
+      publish()
+    },
+    armMtime(id, file) {
+      const job = find(id)
+      if (!job || job.status !== 'paused') return
+      job.held = file
+      job.confirmMtime = true
+      job.error = '修改时间不一致，仍要续传？'
+      publish()
+    },
+    confirmMtime(id) {
+      const job = find(id)
+      if (!job?.held) return null
+      const file = job.held
+      job.held = null
+      job.confirmMtime = false
+      job.error = ''
+      publish()
+      return file
+    },
+    takeHeld(id) {
+      const job = find(id)
+      if (!job) return null
+      const file = job.held
+      job.held = null
+      job.confirmMtime = false
+      job.error = ''
+      publish()
+      return file
     },
     dispose() {
       disposed = true

@@ -1,7 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { toast } from 'sonner'
 import { ClipboardBoard } from './clipboard-board.tsx'
 import { ApiError, UploadCancelled, uploadFile } from '@/lib/api.ts'
+import { memoryStore, resumeKey, type ChunkTransport, type ResumeRecord, type ResumeStore } from '@/lib/chunked-upload.ts'
+import { CLAIMS_KEY } from '@/lib/upload-claims.ts'
 import type { Item } from '@/lib/types.ts'
 
 class FakeSocket {
@@ -130,6 +133,8 @@ beforeEach(() => {
   FakeSocket.instances = []
   localStorage.removeItem('dropit-chunk-bytes')
   localStorage.removeItem('dropit-upload-sessions')
+  localStorage.removeItem(CLAIMS_KEY)
+  sessionStorage.clear()
   vi.stubGlobal('WebSocket', FakeSocket)
   window.WebSocket = FakeSocket as unknown as typeof WebSocket
 })
@@ -309,5 +314,180 @@ describe('upload queue', () => {
     })
     expect(rowFor('notes.txt').textContent).toContain('完成')
     expect(document.getElementById('clip-item-notes.txt')).not.toBeNull()
+  })
+})
+
+const BASE = '/api/spaces/s1'
+
+function stampedFile(name: string, bytes: number, lastModified: number) {
+  return new File([new Uint8Array(bytes)], name, { type: 'text/plain', lastModified })
+}
+
+function savedSession(target: File, patch: Partial<ResumeRecord> = {}): ResumeRecord {
+  return {
+    key: resumeKey(BASE, target),
+    base: BASE,
+    uploadId: 'up-1',
+    chunkSize: 4,
+    expiresAt: Date.now() + 60_000,
+    size: target.size,
+    name: target.name,
+    ...patch,
+  }
+}
+
+function fakeTransport(options: { status?: number; received?: number[] } = {}) {
+  const calls = { create: 0, cancel: [] as string[], get: 0 }
+  const transport: ChunkTransport = {
+    create: async () => {
+      calls.create += 1
+      return { uploadId: 'new-id', chunkSize: 4, expiresAt: Date.now() + 60_000, received: [] }
+    },
+    get: async () => {
+      calls.get += 1
+      if (options.status === 404) throw new ApiError(404, 'NOT_FOUND', null)
+      return { uploadId: 'up-1', chunkSize: 4, expiresAt: Date.now() + 60_000, received: options.received ?? [0] }
+    },
+    put: async () => {},
+    complete: async (_base, uploadId) => ({ item: makeItem(uploadId === 'up-1' ? 'notes.txt' : 'other.txt') }),
+    cancel: async (_base, id) => {
+      calls.cancel.push(id)
+    },
+  }
+  return { transport, calls }
+}
+
+function renderResume(store: ResumeStore, transport: ChunkTransport, upload = holdUpload().upload) {
+  return render(
+    <ClipboardBoard
+      base={BASE}
+      title="私人空间"
+      quotaBytes={1000}
+      usedBytes={0}
+      maxFileBytes={8 * 1024 * 1024}
+      maxTextBytes={1000}
+      sender={() => '我'}
+      canEdit={() => false}
+      canRetract={() => false}
+      canShare={() => false}
+      upload={upload}
+      chunkBytes={8 * 1024 * 1024}
+      resumeStore={store}
+      transport={transport}
+    />,
+  )
+}
+
+function pickResume(file: File) {
+  const input = screen.getByLabelText('选择要续传的文件') as HTMLInputElement
+  Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+  fireEvent.change(input)
+}
+
+describe('restored upload queue', () => {
+  const original = stampedFile('notes.txt', 8, 1_700_000_000_000)
+
+  it('redraws a paused row with progress and remaining bytes after refresh', async () => {
+    const store = memoryStore()
+    store.put(savedSession(original))
+    const { transport } = fakeTransport()
+    renderResume(store, transport)
+    const row = await screen.findByRole('progressbar', { name: 'notes.txt' })
+    expect(row.closest('li')?.textContent).toContain('已暂停')
+    expect(row.closest('li')?.textContent).toContain('50%')
+    expect(row.closest('li')?.textContent).toContain('剩余 4 B')
+    expect(screen.getByRole('button', { name: '继续 notes.txt' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '取消 notes.txt' })).toBeTruthy()
+  })
+
+  it('continues only after the same file is picked again', async () => {
+    const store = memoryStore()
+    store.put(savedSession(original))
+    const { transport, calls } = fakeTransport()
+    renderResume(store, transport)
+    fireEvent.click(await screen.findByRole('button', { name: '继续 notes.txt' }))
+    expect(screen.queryByText('上传中')).toBeNull()
+    pickResume(original)
+    await waitFor(() => expect(rowFor('notes.txt').textContent).toContain('完成'))
+    expect(calls.create).toBe(0)
+  })
+
+  it('names a mismatched field and deletes the old session only when the user abandons it', async () => {
+    const store = memoryStore()
+    store.put(savedSession(original))
+    const { transport, calls } = fakeTransport()
+    const gate = holdUpload()
+    renderResume(store, transport, gate.upload)
+    fireEvent.click(await screen.findByRole('button', { name: '继续 notes.txt' }))
+    pickResume(stampedFile('other.txt', 8, original.lastModified))
+    expect(rowFor('notes.txt').textContent).toContain('文件名不一致')
+    expect(calls.cancel).toEqual([])
+    expect(calls.create).toBe(0)
+    fireEvent.click(screen.getByRole('button', { name: '放弃并重新上传 notes.txt' }))
+    await waitFor(() => expect(gate.held.some((entry) => entry.name === 'other.txt')).toBe(true))
+    expect(calls.cancel).toEqual(['up-1'])
+    expect(store.list()).toEqual([])
+  })
+
+  it('confirms a lastModified mismatch and resumes the same upload id', async () => {
+    const store = memoryStore()
+    store.put(savedSession(original))
+    const { transport, calls } = fakeTransport()
+    renderResume(store, transport)
+    fireEvent.click(await screen.findByRole('button', { name: '继续 notes.txt' }))
+    pickResume(stampedFile('notes.txt', 8, original.lastModified + 5))
+    expect(rowFor('notes.txt').textContent).toContain('修改时间不一致，仍要续传？')
+    fireEvent.click(screen.getByRole('button', { name: '仍要续传 notes.txt' }))
+    await waitFor(() => expect(rowFor('notes.txt').textContent).toContain('完成'))
+    expect(calls.create).toBe(0)
+  })
+
+  it('clears an expired local session and a missing server session', async () => {
+    const error = vi.spyOn(toast, 'error').mockImplementation(() => '1')
+    const expired = memoryStore()
+    expired.put(savedSession(original, { expiresAt: Date.now() - 1_000 }))
+    const expiredTransport = fakeTransport()
+    renderResume(expired, expiredTransport.transport)
+    await waitFor(() => expect(error).toHaveBeenCalledWith('会话已过期，请重新上传'))
+    expect(screen.queryByRole('button', { name: '继续 notes.txt' })).toBeNull()
+    expect(expired.list()).toEqual([])
+    cleanup()
+
+    error.mockClear()
+    const missing = memoryStore()
+    missing.put(savedSession(original))
+    const missingTransport = fakeTransport({ status: 404 })
+    renderResume(missing, missingTransport.transport)
+    await waitFor(() => expect(error).toHaveBeenCalledWith('会话已过期，请重新上传'))
+    expect(screen.queryByRole('button', { name: '继续 notes.txt' })).toBeNull()
+    expect(missing.list()).toEqual([])
+    expect(missingTransport.calls.cancel).toEqual(['up-1'])
+  })
+
+  it('does not restore a session another live tab already claimed', async () => {
+    sessionStorage.setItem('dropit-tab', 'tab-a')
+    localStorage.setItem(CLAIMS_KEY, JSON.stringify({ 'up-1': { tabId: 'tab-b', until: Date.now() + 60_000 } }))
+    const store = memoryStore()
+    store.put(savedSession(original))
+    const { transport, calls } = fakeTransport()
+    renderResume(store, transport)
+    await act(async () => {})
+    expect(screen.queryByRole('button', { name: '继续 notes.txt' })).toBeNull()
+    expect(calls.cancel).toEqual([])
+    expect(store.list()).toHaveLength(1)
+  })
+
+  it('drops the row when another tab takes the lock, without deleting the server session', async () => {
+    sessionStorage.setItem('dropit-tab', 'tab-a')
+    const store = memoryStore()
+    store.put(savedSession(original))
+    const { transport, calls } = fakeTransport()
+    renderResume(store, transport)
+    expect(await screen.findByRole('button', { name: '继续 notes.txt' })).toBeTruthy()
+    localStorage.setItem(CLAIMS_KEY, JSON.stringify({ 'up-1': { tabId: 'tab-b', until: Date.now() + 60_000 } }))
+    window.dispatchEvent(new StorageEvent('storage', { key: CLAIMS_KEY }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: '继续 notes.txt' })).toBeNull())
+    expect(calls.cancel).toEqual([])
+    expect(store.list()).toHaveLength(1)
   })
 })

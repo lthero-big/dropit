@@ -352,31 +352,33 @@ export function ExpandCapsule({
     <div
       ref={setPill}
       data-slot="expand-capsule"
-      className={`relative box-border inline-flex max-w-full shrink-0 overflow-hidden border-2 border-foreground bg-card text-foreground ${className ?? ''}`}
+      className={`relative box-border inline-flex max-w-full shrink-0 border-2 border-foreground bg-card text-foreground overflow-visible ${className ?? ''}`}
     >
+      <div className="absolute inset-0 overflow-hidden">
+        <div
+          ref={setActs}
+          data-slot="expand-capsule-actions"
+          aria-hidden={expanded ? undefined : true}
+          className="absolute top-0 bottom-0 left-0 flex items-center px-1"
+        >
+          {children}
+        </div>
+      </div>
       <button
         ref={triggerRef}
         type="button"
-        className="absolute inset-0 flex cursor-pointer items-center justify-center border-0 bg-transparent text-foreground hover:bg-foreground hover:text-background"
+        className="absolute flex cursor-pointer items-center justify-center border-0 bg-transparent text-foreground hover:bg-foreground hover:text-background"
         aria-expanded={expanded}
         aria-label={label}
         title={label}
         tabIndex={expanded ? -1 : 0}
-        style={{ pointerEvents: expanded ? 'none' : 'auto' }}
+        style={{ top: -2, right: -2, bottom: -2, left: -2, minWidth: 40, minHeight: 40, pointerEvents: expanded ? 'none' : 'auto' }}
         onClick={(event) => {
           if (!expandedRef.current) api.current.expand(event.detail === 0)
         }}
       >
         {icon}
       </button>
-      <div
-        ref={setActs}
-        data-slot="expand-capsule-actions"
-        aria-hidden={expanded ? undefined : true}
-        className="absolute top-0 bottom-0 left-0 flex items-center px-1"
-      >
-        {children}
-      </div>
     </div>
   )
 }

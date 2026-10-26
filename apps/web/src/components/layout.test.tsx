@@ -96,12 +96,14 @@ describe('account menu', () => {
     expect(screen.queryByRole('link', { name: '设置' })).toBeNull()
     expect(screen.queryByRole('link', { name: '管理' })).toBeNull()
     const account = screen.getByRole('button', { name: '账户菜单' })
+    expect(screen.getByRole('button', { name: '切换主题' }).style.minHeight).toBe('40px')
     fireEvent.pointerDown(account, { button: 0, pointerType: 'mouse' })
     expect(await screen.findByRole('menu')).toBeTruthy()
     expect(screen.getByRole('progressbar', { name: '配额' }).getAttribute('data-quota-tone')).toBe('warn')
     expect(screen.getByRole('menuitem', { name: '设置' })).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: '管理' })).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: '退出' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: '设置' }).style.minHeight).toBe('40px')
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('menuitem', { name: '设置' })).toBeNull())
   })
@@ -123,6 +125,32 @@ describe('account menu', () => {
     expect(screen.getByRole('button', { name: '退出' })).toBeTruthy()
     fireEvent.keyDown(document, { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '账户' })).toBeNull())
+  })
+
+  it('gives the space switcher and room button a 40px hit area', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url === '/api/me') return Response.json(me)
+        return Response.json({ error: { code: 'NOT_FOUND' } }, { status: 404 })
+      }),
+    )
+    render(
+      <ThemeProvider>
+        <SessionProvider>
+          <MemoryRouter>
+            <Shell spaces={[{ id: 's1', name: 'Private space', ownerId: 'u1', expiresAt: null }]} spaceId="s1" onSpace={() => {}}>
+              <p>内容</p>
+            </Shell>
+          </MemoryRouter>
+        </SessionProvider>
+      </ThemeProvider>,
+    )
+    const space = await screen.findByRole('button', { name: '私人空间' })
+    expect(space.style.minHeight).toBe('40px')
+    expect(space.style.minWidth).toBe('40px')
+    expect(screen.getByRole('button', { name: '临时房间' }).style.minHeight).toBe('40px')
   })
 
   it('toggles theme from the header icon', async () => {
@@ -168,7 +196,12 @@ describe('clipboard layout', () => {
     expect(await screen.findByText('setup.exe')).toBeTruthy()
     expect(screen.getByRole('list').getAttribute('data-layout')).toBe('grid')
     expect(screen.getByRole('status', { name: '0 台设备在线' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '展开' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '展开' }).style.minWidth).toBe('40px')
+    for (const button of screen.getAllByRole('button', { name: '更多' })) {
+      expect(button.style.minWidth).toBe('40px')
+      expect(button.style.minHeight).toBe('40px')
+    }
+    expect(screen.getByRole('button', { name: '网格' }).style.minHeight).toBe('40px')
     fireEvent.click(screen.getByRole('button', { name: '列表' }))
     expect(localStorage.getItem('dropit-layout')).toBe('list')
     expect(screen.getByRole('list').getAttribute('data-layout')).toBe('list')

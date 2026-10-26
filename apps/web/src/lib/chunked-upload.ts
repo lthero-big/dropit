@@ -50,6 +50,7 @@ export type ResumeRecord = {
 
 export type ResumeStore = {
   get: (key: string) => ResumeRecord | null
+  list: () => ResumeRecord[]
   put: (record: ResumeRecord) => void
   remove: (key: string) => void
 }
@@ -84,6 +85,7 @@ export function memoryStore(): ResumeStore {
   const records = new Map<string, ResumeRecord>()
   return {
     get: (key) => records.get(key) ?? null,
+    list: () => [...records.values()],
     put: (record) => {
       records.set(record.key, record)
     },
@@ -119,6 +121,7 @@ export function browserResumeStore(): ResumeStore {
   }
   return {
     get: (key) => read().find((record) => record.key === key) ?? null,
+    list: () => read(),
     put: (record) => {
       write([...read().filter((entry) => entry.key !== record.key), record])
     },
@@ -126,6 +129,51 @@ export function browserResumeStore(): ResumeStore {
       write(read().filter((entry) => entry.key !== key))
     },
   }
+}
+
+export function resumeIdentity(key: string): { base: string; name: string; size: number; lastModified: number } | null {
+  const parts = key.split('\u0000')
+  if (parts.length < 4) return null
+  const lastModified = Number(parts.at(-1))
+  const size = Number(parts.at(-2))
+  if (!Number.isSafeInteger(size) || !Number.isSafeInteger(lastModified)) return null
+  return { base: parts[0] ?? '', name: parts.slice(1, -2).join('\u0000'), size, lastModified }
+}
+
+export type ResumeMatch =
+  | { kind: 'match' }
+  | { kind: 'mtime' }
+  | { kind: 'mismatch'; fields: Array<'文件名' | '大小'> }
+
+export function matchResumeFile(record: Pick<ResumeRecord, 'key' | 'name' | 'size'>, file: File): ResumeMatch {
+  const fields: Array<'文件名' | '大小'> = []
+  if ((file.name || '截图') !== (record.name || '截图')) fields.push('文件名')
+  if (file.size !== record.size) fields.push('大小')
+  if (fields.length > 0) return { kind: 'mismatch', fields }
+  const identity = resumeIdentity(record.key)
+  if (identity && file.lastModified !== identity.lastModified) return { kind: 'mtime' }
+  return { kind: 'match' }
+}
+
+/** Point an existing server session at a re-picked file whose mtime differs. Does not open a new session. */
+export function adoptResume(store: ResumeStore, record: ResumeRecord, file: File): ResumeRecord {
+  const next = { ...record, key: resumeKey(record.base, file), name: file.name || record.name, size: file.size }
+  if (next.key !== record.key) store.remove(record.key)
+  store.put(next)
+  return next
+}
+
+export function receivedRatio(size: number, chunkSize: number, received: number[]): number {
+  if (size <= 0 || chunkSize <= 0) return 0
+  const count = Math.ceil(size / chunkSize)
+  let bytes = 0
+  const seen = new Set<number>()
+  for (const index of received) {
+    if (!Number.isSafeInteger(index) || index < 0 || index >= count || seen.has(index)) continue
+    seen.add(index)
+    bytes += Math.min(chunkSize, size - index * chunkSize)
+  }
+  return Math.min(1, bytes / size)
 }
 
 export class ChunkGate {
@@ -282,6 +330,16 @@ export function browserTransport(): ChunkTransport {
 export function discardUpload(base: string, file: File, store: ResumeStore = browserResumeStore(), transport: ChunkTransport = browserTransport()) {
   const record = store.get(resumeKey(base, file))
   if (!record || record.base !== base) return
+  discardSession(base, record, store, transport)
+}
+
+export function discardSession(
+  base: string,
+  record: Pick<ResumeRecord, 'key' | 'uploadId' | 'base'>,
+  store: ResumeStore = browserResumeStore(),
+  transport: ChunkTransport = browserTransport(),
+) {
+  if (record.base !== base) return
   store.remove(record.key)
   void transport.cancel(base, record.uploadId).catch(() => {})
 }

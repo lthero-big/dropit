@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
 import { CopyIcon, DownloadIcon, EllipsisIcon, LayoutGridIcon, ListIcon, PencilIcon, PinIcon, PinOffIcon, Share2Icon, TagIcon, Undo2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 import { CommandPalette } from '@/components/command-palette.tsx'
@@ -7,8 +7,9 @@ import { ImageLightbox, type LightboxSlide } from '@/components/image-lightbox.t
 import { SharePanel } from '@/components/share-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
-import { discardUpload, uploadMaybeChunked } from '@/lib/chunked-upload.ts'
+import { adoptResume, browserResumeStore, browserTransport, discardSession, discardUpload, matchResumeFile, receivedRatio, uploadMaybeChunked, type ChunkTransport, type ResumeRecord, type ResumeStore } from '@/lib/chunked-upload.ts'
 import { useChannel } from '@/lib/channel.ts'
+import { CLAIMS_KEY, claimUpload, heartbeatUploads, ownsUpload, releaseUploads, tabId } from '@/lib/upload-claims.ts'
 import { createUploadQueue, type UploadQueue, type UploadRow } from '@/lib/upload-queue.ts'
 import { formatEta, formatSpeed } from '@/lib/upload-speed.ts'
 import { copyText, formatBytes, formatRemain, formatWhen, quotaTone, useClock, utf8Size } from '@/lib/format.ts'
@@ -70,7 +71,8 @@ const uploadStatusLabel: Record<UploadRow['status'], string> = {
 }
 
 const queueActionClass =
-  'inline-flex min-h-10 items-center border-2 border-foreground bg-background px-2 text-xs font-extrabold tracking-wider uppercase focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary'
+  'inline-flex min-h-10 min-w-10 items-center border-2 border-foreground bg-background px-2 text-xs font-extrabold tracking-wider uppercase focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary'
+const EXPIRED = '会话已过期，请重新上传'
 
 function extension(name: string): string {
   const dot = name.lastIndexOf('.')
@@ -118,6 +120,8 @@ export function ClipboardBoard({
   onBindCancel,
   upload = uploadFile,
   chunkBytes,
+  resumeStore,
+  transport,
 }: {
   base: string | null
   title: string
@@ -139,6 +143,8 @@ export function ClipboardBoard({
   upload?: typeof uploadFile
   /** Bytes above this use the resumable chunk protocol. Omit to use the learned or 8 MiB default. */
   chunkBytes?: number
+  resumeStore?: ResumeStore
+  transport?: ChunkTransport
 }) {
   const channel = useChannel(base)
   const now = useClock(channel.offset)
@@ -160,6 +166,11 @@ export function ClipboardBoard({
   const [layout, setLayout] = useState<BoardLayout>(readLayout)
   const [expandedText, setExpandedText] = useState<Record<string, boolean>>({})
   const fileRef = useRef<HTMLInputElement>(null)
+  const resumeRef = useRef<HTMLInputElement>(null)
+  const resumeTarget = useRef<string | null>(null)
+  const ownerRef = useRef(tabId())
+  const storeRef = useRef<ResumeStore>(resumeStore ?? browserResumeStore())
+  const transportRef = useRef<ChunkTransport>(transport ?? browserTransport())
   const seenAuth = useRef(0)
   const sendFilesRef = useRef<(files: File[]) => void>(() => {})
   const queueRef = useRef<UploadQueue | null>(null)
@@ -273,6 +284,8 @@ export function ClipboardBoard({
     uploadRef.current = upload
     chunkBytesRef.current = chunkBytes
     sendFilesRef.current = sendFiles
+    if (resumeStore) storeRef.current = resumeStore
+    if (transport) transportRef.current = transport
   })
 
   useEffect(() => {
@@ -283,9 +296,16 @@ export function ClipboardBoard({
         onProgress,
         signal,
         chunkBytes: chunkBytesRef.current,
+        store: storeRef.current,
+        transport: transportRef.current,
         single: (next, progress, nextSignal) => uploadRef.current(baseRef.current ?? '', next, progress, nextSignal),
       }),
-      discard: (file) => discardUpload(baseRef.current ?? '', file),
+      discard: (file) => discardUpload(baseRef.current ?? '', file, storeRef.current, transportRef.current),
+      discardKept: (session) => {
+        const current = baseRef.current ?? ''
+        discardSession(current, { ...session, base: current }, storeRef.current, transportRef.current)
+        releaseUploads([session.uploadId], ownerRef.current)
+      },
       onItem: (item) => {
         channelRef.current.upsert(item)
         onActivityRef.current?.()
@@ -301,6 +321,89 @@ export function ClipboardBoard({
       if (queueRef.current === queue) queueRef.current = null
     }
   }, [])
+
+  useEffect(() => {
+    const owner = ownerRef.current
+    const timer = window.setInterval(() => {
+      heartbeatUploads(queueRef.current?.claimedIds() ?? [], owner)
+    }, 5_000)
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== CLAIMS_KEY) return
+      for (const id of queueRef.current?.claimedIds() ?? []) {
+        if (!ownsUpload(id, owner)) queueRef.current?.dropForeign(id)
+      }
+    }
+    const release = () => releaseUploads(queueRef.current?.claimedIds() ?? [], owner)
+    window.addEventListener('storage', onStorage)
+    window.addEventListener('beforeunload', release)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener('beforeunload', release)
+      release()
+    }
+  }, [])
+
+  useEffect(() => {
+    const current = base
+    if (!current) return
+    let cancelled = false
+    queueRef.current?.dropRestored()
+    const owner = ownerRef.current
+    const records = storeRef.current.list().filter((record) => record.base === current)
+    void (async () => {
+      for (const record of records) {
+        if (cancelled) return
+        if (record.expiresAt <= Date.now()) {
+          discardSession(current, record, storeRef.current, transportRef.current)
+          toast.error(EXPIRED)
+          continue
+        }
+        if (!claimUpload(record.uploadId, owner)) continue
+        try {
+          const session = await transportRef.current.get(current, record.uploadId, new AbortController().signal)
+          if (cancelled) {
+            releaseUploads([record.uploadId], owner)
+            return
+          }
+          if (session.expiresAt <= Date.now()) {
+            discardSession(current, record, storeRef.current, transportRef.current)
+            releaseUploads([record.uploadId], owner)
+            toast.error(EXPIRED)
+            continue
+          }
+          queueRef.current?.restore({
+            uploadId: record.uploadId,
+            name: record.name,
+            size: record.size,
+            ratio: receivedRatio(record.size, session.chunkSize || record.chunkSize, session.received ?? []),
+            sessionKey: record.key,
+          })
+        } catch (error) {
+          if (cancelled) {
+            releaseUploads([record.uploadId], owner)
+            return
+          }
+          if (error instanceof ApiError && error.status === 404) {
+            discardSession(current, record, storeRef.current, transportRef.current)
+            releaseUploads([record.uploadId], owner)
+            toast.error(EXPIRED)
+            continue
+          }
+          queueRef.current?.restore({
+            uploadId: record.uploadId,
+            name: record.name,
+            size: record.size,
+            ratio: 0,
+            sessionKey: record.key,
+          })
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [base])
 
   const uploadBusy = rows.some((row) => row.status === 'queued' || row.status === 'uploading' || row.status === 'processing' || row.status === 'paused')
 
@@ -462,6 +565,81 @@ export function ClipboardBoard({
     }
   }
 
+  function recordFor(session: { key: string; uploadId: string }): ResumeRecord | null {
+    return storeRef.current.get(session.key) ?? storeRef.current.list().find((entry) => entry.uploadId === session.uploadId) ?? null
+  }
+
+  function continueRow(row: UploadRow) {
+    const queue = queueRef.current
+    if (!queue) return
+    if (queue.needsFile(row.id)) {
+      resumeTarget.current = row.id
+      resumeRef.current?.click()
+      return
+    }
+    queue.resume(row.id)
+  }
+
+  function onResumePicked(event: ChangeEvent<HTMLInputElement>) {
+    const file = filesFromList(event.target.files)[0]
+    event.target.value = ''
+    const id = resumeTarget.current
+    resumeTarget.current = null
+    const queue = queueRef.current
+    if (!file || !id || !queue) return
+    const session = queue.sessionOf(id)
+    if (!session) return
+    const record = recordFor(session)
+    if (!record) {
+      toast.error(EXPIRED)
+      releaseUploads([session.uploadId], ownerRef.current)
+      queue.dropUpload(session.uploadId)
+      return
+    }
+    const match = matchResumeFile(record, file)
+    if (match.kind === 'match') {
+      queue.bindFile(id, file)
+      return
+    }
+    if (match.kind === 'mtime') {
+      queue.armMtime(id, file)
+      return
+    }
+    queue.holdFile(id, file, `${match.fields.join('、')}不一致`)
+  }
+
+  function acceptMtime(row: UploadRow) {
+    const queue = queueRef.current
+    const file = queue?.confirmMtime(row.id)
+    const session = queue?.sessionOf(row.id)
+    const current = baseRef.current
+    if (!queue || !file || !session || !current) return
+    const record = recordFor(session)
+    if (!record) {
+      toast.error(EXPIRED)
+      releaseUploads([session.uploadId], ownerRef.current)
+      queue.dropUpload(session.uploadId)
+      return
+    }
+    const next = adoptResume(storeRef.current, record, file)
+    queue.bindFile(row.id, file, next.key)
+  }
+
+  function abandonResume(row: UploadRow) {
+    const queue = queueRef.current
+    if (!queue) return
+    const session = queue.sessionOf(row.id)
+    const file = queue.takeHeld(row.id)
+    const current = baseRef.current
+    if (session && current) {
+      const record = recordFor(session)
+      if (record) discardSession(current, record, storeRef.current, transportRef.current)
+      releaseUploads([session.uploadId], ownerRef.current)
+      queue.dropUpload(session.uploadId)
+    }
+    if (file) queue.enqueue([file], maxFileRef.current)
+  }
+
   return (
     <section>
       <div>
@@ -486,6 +664,7 @@ export function ClipboardBoard({
                   aria-label="网格"
                   title="网格"
                   className={`inline-flex size-10 items-center justify-center ${layout === 'grid' ? 'bg-foreground text-background' : 'bg-background'}`}
+                  style={touchTarget}
                   onClick={() => chooseLayout('grid')}
                 >
                   <LayoutGridIcon className="size-4" aria-hidden="true" />
@@ -496,6 +675,7 @@ export function ClipboardBoard({
                   aria-label="列表"
                   title="列表"
                   className={`inline-flex size-10 items-center justify-center border-l-2 border-foreground ${layout === 'list' ? 'bg-foreground text-background' : 'bg-background'}`}
+                  style={touchTarget}
                   onClick={() => chooseLayout('list')}
                 >
                   <ListIcon className="size-4" aria-hidden="true" />
@@ -560,6 +740,13 @@ export function ClipboardBoard({
                 if (files.length) void sendFiles(files)
               }}
             />
+            <input
+              ref={resumeRef}
+              type="file"
+              className="sr-only"
+              aria-label="选择要续传的文件"
+              onChange={onResumePicked}
+            />
             <span className="text-xs text-muted-foreground">拖入文件，或直接粘贴截图 · Ctrl/⌘ Enter 发送</span>
           </div>
           {rows.length > 0 ? (
@@ -570,6 +757,7 @@ export function ClipboardBoard({
                   <button
                     type="button"
                     className={queueActionClass}
+                    style={touchTarget}
                     onClick={() => queueRef.current?.cancelAll()}
                   >
                     全部取消
@@ -586,6 +774,7 @@ export function ClipboardBoard({
                           <button
                             type="button"
                             className={queueActionClass}
+                            style={touchTarget}
                             aria-label={`重试 ${row.name}`}
                             onClick={() => queueRef.current?.retry(row.id)}
                           >
@@ -596,6 +785,7 @@ export function ClipboardBoard({
                           <button
                             type="button"
                             className={queueActionClass}
+                            style={touchTarget}
                             aria-label={`暂停 ${row.name}`}
                             onClick={() => queueRef.current?.pause(row.id)}
                           >
@@ -606,16 +796,40 @@ export function ClipboardBoard({
                           <button
                             type="button"
                             className={queueActionClass}
+                            style={touchTarget}
                             aria-label={`继续 ${row.name}`}
-                            onClick={() => queueRef.current?.resume(row.id)}
+                            onClick={() => continueRow(row)}
                           >
                             继续
+                          </button>
+                        ) : null}
+                        {row.status === 'paused' && row.confirmMtime ? (
+                          <button
+                            type="button"
+                            className={queueActionClass}
+                            style={touchTarget}
+                            aria-label={`仍要续传 ${row.name}`}
+                            onClick={() => acceptMtime(row)}
+                          >
+                            仍要续传
+                          </button>
+                        ) : null}
+                        {row.status === 'paused' && row.restored && row.error && !row.confirmMtime ? (
+                          <button
+                            type="button"
+                            className={queueActionClass}
+                            style={touchTarget}
+                            aria-label={`放弃并重新上传 ${row.name}`}
+                            onClick={() => abandonResume(row)}
+                          >
+                            放弃并重新上传
                           </button>
                         ) : null}
                         {row.status === 'queued' || row.status === 'uploading' || row.status === 'processing' || row.status === 'paused' ? (
                           <button
                             type="button"
                             className={queueActionClass}
+                            style={touchTarget}
                             aria-label={`取消 ${row.name}`}
                             onClick={() => queueRef.current?.cancel(row.id)}
                           >
@@ -629,10 +843,11 @@ export function ClipboardBoard({
                       <span className={row.status === 'processing' ? 'font-extrabold tracking-wider text-foreground uppercase' : undefined}>
                         {uploadStatusLabel[row.status]}
                       </span>
-                      {row.status === 'uploading' || row.status === 'done' ? ` · ${Math.round(row.ratio * 100)}%` : ''}
+                      {row.status === 'uploading' || row.status === 'done' || row.status === 'paused' ? ` · ${Math.round(row.ratio * 100)}%` : ''}
+                      {row.status === 'paused' ? ` · 剩余 ${formatBytes(Math.max(0, row.size - Math.round(row.ratio * row.size)))}` : ''}
                       {row.status === 'uploading' && row.speedBps > 0 ? ` · ${formatSpeed(row.speedBps)} · ${formatEta(row.etaMs)}` : ''}
                     </p>
-                    {row.status === 'failed' && row.error ? <p className="mt-1 text-xs break-words text-destructive">{row.error}</p> : null}
+                    {(row.status === 'failed' || row.status === 'paused') && row.error ? <p className="mt-1 text-xs break-words text-destructive">{row.error}</p> : null}
                     <div
                       className="mt-2 h-1.5 bg-secondary"
                       role="progressbar"
@@ -675,7 +890,7 @@ export function ClipboardBoard({
           <p className="border-t border-foreground py-8 text-sm text-muted-foreground">还没有内容。发送文本或文件，其他设备会实时收到。</p>
         ) : null}
         {activeTag ? (
-          <button type="button" className="mt-3 border border-foreground px-2 py-1 text-xs font-extrabold" onClick={() => setActiveTag(null)}>
+          <button type="button" className="mt-3 inline-flex min-h-10 min-w-10 items-center justify-center border border-foreground px-2 text-xs font-extrabold" style={touchTarget} onClick={() => setActiveTag(null)}>
             #{activeTag} · 清除标签
           </button>
         ) : null}
@@ -733,7 +948,8 @@ export function ClipboardBoard({
                   {textLong ? (
                     <button
                       type="button"
-                      className="mt-1 min-h-10 text-xs font-extrabold tracking-wider uppercase"
+                      className="mt-1 inline-flex min-h-10 min-w-10 items-center justify-center px-2 text-xs font-extrabold tracking-wider uppercase"
+                      style={touchTarget}
                       aria-expanded={textOpen}
                       onClick={() => setExpandedText((current) => ({ ...current, [item.id]: !textOpen }))}
                     >
@@ -752,7 +968,8 @@ export function ClipboardBoard({
                     <button
                       type="button"
                       aria-label={`查看 ${item.filename?.trim() || '图片'}`}
-                      className="mb-2 block max-w-full border-0 bg-transparent p-0 text-left"
+                      className="mb-2 block min-h-10 min-w-10 max-w-full border-0 bg-transparent p-0 text-left"
+                      style={touchTarget}
                       onClick={() => setOpenId(item.id)}
                     >
                       <img src={`${base}/items/${item.id}/thumbnail`} alt="" className="max-h-80 w-full border border-foreground object-contain" />
@@ -863,7 +1080,8 @@ export function ClipboardBoard({
                     <button
                       key={name}
                       type="button"
-                      className={`border px-1.5 py-0.5 text-xs ${activeTag === name ? 'border-primary bg-primary text-primary-foreground' : 'border-foreground'}`}
+                      className={`inline-flex min-h-10 min-w-10 items-center justify-center border px-2 text-xs ${activeTag === name ? 'border-primary bg-primary text-primary-foreground' : 'border-foreground'}`}
+                      style={touchTarget}
                       onClick={() => setActiveTag((current) => (current === name ? null : name))}
                     >
                       #{name}

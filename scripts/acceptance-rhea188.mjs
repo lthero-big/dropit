@@ -2,7 +2,7 @@
 // Product code is not modified. The Docker image supplies the static assets.
 // Mock OAuth stays out of the image (apps/server/test/rhea188-browser-server.ts).
 // A second pass talks to the image itself through an anonymous room.
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { closeSync, ftruncateSync, openSync, statSync } from 'node:fs';
@@ -248,13 +248,21 @@ class Page {
       width, height, deviceScaleFactor: 1, mobile: width < 700,
     });
   }
-  async files(paths) {
+  async filesOn(selector, paths) {
     const doc = await this.send('DOM.getDocument', { depth: 0 });
-    const input = await this.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: 'input[type=file]' });
-    if (!input.nodeId) throw new Error('file input missing');
+    const input = await this.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector });
+    if (!input.nodeId) throw new Error(`file input missing: ${selector}`);
     await this.send('DOM.setFileInputFiles', { nodeId: input.nodeId, files: paths });
   }
+  async files(paths) {
+    await this.filesOn('input[type=file]', paths);
+  }
   onEvent(message) {
+    if (message.method === 'Page.javascriptDialogOpening') {
+      // A paused upload asks before unload. Acceptance refresh must leave the page.
+      void this.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {});
+      return;
+    }
     if (message.method === 'Fetch.requestPaused') {
       const { requestId, request } = message.params;
       const chunk = /\/uploads\/[^/]+\/chunks\/\d+$/.test(new URL(request.url).pathname);
@@ -375,11 +383,16 @@ async function poll(fn, ms, label) {
   const deadline = Date.now() + ms;
   let last;
   while (Date.now() < deadline) {
-    last = await fn();
-    if (last) return last;
+    try {
+      last = await fn();
+      if (last) return last;
+    } catch (error) {
+      // Navigation replaces the document; a null body is not a failed check.
+      last = error instanceof Error ? error.message : String(error);
+    }
     await sleep(200);
   }
-  throw new Error(`${label}: ${JSON.stringify(last)?.slice(0, 300)}`);
+  throw new Error(`${label}: ${String(last).slice(0, 300)}`);
 }
 
 function sha256(buffer) {
@@ -397,6 +410,20 @@ async function fileCount(dir) {
 
 function addedFiles(before, after) {
   return [...after].filter((name) => !before.has(name));
+}
+
+function signalTree(pid, signal = 'SIGINT') {
+  let text = '';
+  try {
+    text = execFileSync('pgrep', ['-P', String(pid)], { encoding: 'utf8' });
+  } catch {
+    text = '';
+  }
+  for (const line of text.split('\n')) {
+    const child = Number(line);
+    if (child) signalTree(child, signal);
+  }
+  try { process.kill(pid, signal); } catch { /* already exited */ }
 }
 
 async function main() {
@@ -470,9 +497,9 @@ async function main() {
     await poll(() => page.evaluate(`Boolean(document.querySelector('a[href="/api/auth/github"]'))`), 8000, 'github link');
     await page.evaluate(`document.querySelector('a[href="/api/auth/github"]').click()`);
     try {
-      await poll(() => page.evaluate(`document.body.innerText.includes('Browser Admin')`), 8000, 'admin login');
+      await poll(() => page.evaluate(`Boolean(document.body && document.body.innerText.includes('Browser Admin'))`), 8000, 'admin login');
     } catch (error) {
-      const info = await page.evaluate(`JSON.stringify({ href: location.href, text: document.body.innerText.slice(0, 500) })`);
+      const info = await page.evaluate(`JSON.stringify({ href: location.href, text: document.body ? document.body.innerText.slice(0, 500) : '' })`);
       await page.shot('00-login-fail');
       throw new Error(`${error instanceof Error ? error.message : error} ${info}`);
     }
@@ -706,16 +733,30 @@ async function main() {
       const sessions = await page.evaluate(`localStorage.getItem('dropit-upload-sessions') ?? ''`);
       await page.evaluate(`document.querySelector('[aria-label="暂停 slow.bin"]')?.click()`);
       await poll(async () => page.evaluate(`(document.querySelector('[aria-label="上传队列"]')?.innerText ?? '').includes('已暂停')`), 6000, 'paused');
+      await page.shot('02b-queue-paused-before-refresh');
       await page.goto(`${origin}/`);
-      await poll(() => page.evaluate(`document.body.innerText.includes('Browser Admin')`), 8000, 'board after refresh');
-      const stillPaused = await page.evaluate(`(document.querySelector('[aria-label="上传队列"]')?.innerText ?? '').includes('已暂停')`);
+      const reloaded = await page.evaluate(`(document.documentElement.dataset.nav || "") !== "old"`);
+      if (!reloaded) throw new Error('refresh did not navigate');
+      await poll(() => page.evaluate(`Boolean(document.body && document.body.innerText.includes('Browser Admin'))`), 8000, 'board after refresh');
+      const stillPaused = await poll(async () => page.evaluate(`(document.querySelector('[aria-label="上传队列"]')?.innerText ?? '').includes('已暂停')`), 8000, 'paused after refresh').catch(async (error) => {
+        const text = await page.evaluate(`document.querySelector('[aria-label="上传队列"]')?.innerText ?? ''`);
+        throw new Error(`${error.message}; queue=${text.slice(0, 180)}; sessions ${String(sessions).includes('slow.bin')}`);
+      });
+      await page.shot('02c-queue-paused-after-refresh');
       page.resetNet();
       page.slowPut = true;
+      await page.evaluate(`(() => {
+        const input = document.querySelector('[aria-label="选择要续传的文件"]');
+        if (input) input.click = () => {};
+      })()`);
       await page.evaluate(`document.querySelector('[aria-label="继续 slow.bin"]')?.click()`);
+      await page.filesOn('[aria-label="选择要续传的文件"]', [slowPath]);
+      const mtime = await page.evaluate(`Boolean(document.querySelector('[aria-label="仍要续传 slow.bin"]'))`);
+      if (mtime) await page.evaluate(`document.querySelector('[aria-label="仍要续传 slow.bin"]').click()`);
       const continued = await poll(async () => {
         const text = await page.evaluate(`document.querySelector('[aria-label="上传队列"]')?.innerText ?? ''`);
         return text.includes('上传中') || text.includes('处理中') ? text.replaceAll('\n', ' ') : '';
-      }, 8000, 'continue after refresh').catch((error) => String(error.message));
+      }, 8000, 'continue after refresh');
       const parallelNote = page.maxChunks >= 2 ? `parallel ${page.maxChunks}` : `chunk indexes ${indexes.join(',') || 'none'}`;
       page.slowPut = false;
       await page.send('Network.emulateNetworkConditions', {
@@ -765,8 +806,7 @@ async function main() {
       await call('/__mock/complete-hold?ms=0', { method: 'POST' });
       if (processingSeen !== '处理中') throw new Error(`processing state not observed: ${processingSeen}`);
       if (leftover.length > 1) throw new Error(`cancel left files ${leftover.join(',')}`);
-      const refreshNote = stillPaused ? 'queue restored paused row' : `queue did not restore paused row; sessions ${String(sessions).includes('slow.bin')}`;
-      return `speed ${String(moving).slice(0, 80)}; ${parallelNote}; ${refreshNote}; continue=${String(continued).slice(0, 60)}; processing ${processingSeen}; cancel leftover ${leftover.length}`;
+      return `speed ${String(moving).slice(0, 80)}; ${parallelNote}; queue restored paused row; mtime confirm ${mtime}; continue=${String(continued).slice(0, 60)}; processing ${processingSeen}; cancel leftover ${leftover.length}`;
     });
 
     await check('AC-T interaction, more button, retract, lightbox, qr, file copy', async () => {
@@ -799,7 +839,7 @@ async function main() {
         const rect = button.getBoundingClientRect();
         return { w: Math.round(rect.width), h: Math.round(rect.height), text: button.textContent.trim(), title: button.getAttribute('title'), expanded: button.getAttribute('aria-expanded') };
       })()`);
-      if (more.w > 48 || more.h > 48 || more.text.includes('更多') || more.title !== '更多') throw new Error(JSON.stringify(more));
+      if (more.w < 40 || more.h < 40 || more.w > 48 || more.h > 48 || more.text.includes('更多') || more.title !== '更多') throw new Error(JSON.stringify(more));
       await page.evaluate(`[...document.querySelectorAll('button')].find((node) => node.getAttribute('aria-label') === '更多').click()`);
       const opened = await page.evaluate(`(() => {
         const button = [...document.querySelectorAll('button')].find((node) => node.getAttribute('aria-label') === '更多' && node.getAttribute('aria-expanded') === 'true');
@@ -945,31 +985,48 @@ async function main() {
       await poll(() => page.evaluate(`document.body.innerText.includes('plain.bin')`), 8000, 'phone board');
       const phone = await page.evaluate(`(() => {
         const header = document.querySelector('header');
-        const overflow = header.scrollWidth > header.clientWidth + 2 || document.documentElement.scrollWidth > 400;
-        const targets = [...document.querySelectorAll('header button, [data-clip-card] button')].map((node) => {
+        const headerOverflow = header.scrollWidth > header.clientWidth + 2;
+        const scrollWidth = document.documentElement.scrollWidth;
+        const overflow = headerOverflow || scrollWidth > 400;
+        const targets = [...document.querySelectorAll('header button, [data-clip-card] button, nav button')].map((node) => {
           const rect = node.getBoundingClientRect();
-          if (rect.width < 1 || rect.bottom < 0 || rect.top > window.innerHeight) return null;
-          return Math.round(Math.min(rect.width, rect.height));
+          if (rect.width < 1 || rect.bottom < 0 || rect.top > window.innerHeight + 80) return null;
+          const label = node.getAttribute('aria-label') || node.textContent.trim().slice(0, 24);
+          return { label, w: Math.round(rect.width), h: Math.round(rect.height), min: Math.round(Math.min(rect.width, rect.height)) };
         }).filter((value) => value != null);
-        return { overflow, min: targets.length ? Math.min(...targets) : 0, count: targets.length, layout: document.querySelector('[data-layout]')?.getAttribute('data-layout') };
+        const mins = targets.map((row) => row.min);
+        return { overflow, headerOverflow, scrollWidth, headerScroll: header.scrollWidth, headerClient: header.clientWidth, min: mins.length ? Math.min(...mins) : 0, count: targets.length, targets, layout: document.querySelector('[data-layout]')?.getAttribute('data-layout') };
       })()`);
       await page.shot('10-phone');
-      const headerMin = await page.evaluate(`(() => {
-        const targets = [...document.querySelectorAll('header button, nav button')].map((node) => {
+      const headerTargets = await page.evaluate(`(() => {
+        return [...document.querySelectorAll('header button, nav button')].map((node) => {
           const rect = node.getBoundingClientRect();
           if (rect.width < 1) return null;
-          return Math.round(Math.min(rect.width, rect.height));
+          return { label: node.getAttribute('aria-label') || node.textContent.trim().slice(0, 24), w: Math.round(rect.width), h: Math.round(rect.height), min: Math.round(Math.min(rect.width, rect.height)) };
         }).filter((value) => value != null);
-        return targets.length ? Math.min(...targets) : 0;
       })()`);
+      const headerMin = headerTargets.length ? Math.min(...headerTargets.map((row) => row.min)) : 0;
       await clickFound(page, centerOf(`document.querySelector('[aria-label="账户菜单"]')`));
       const drawer = await poll(async () => page.evaluate(`document.querySelector('[aria-label="账户"]') ? document.querySelector('[aria-label="配额"]')?.getAttribute('data-quota-tone') : ''`), 4000, 'phone drawer');
       await page.shot('11-phone-menu');
-      if (phone.overflow) throw new Error(JSON.stringify(phone));
+      const menuTargets = await page.evaluate(`(() => {
+        return [...document.querySelectorAll('[aria-label="账户"] button, [role="menuitem"]')].map((node) => {
+          const rect = node.getBoundingClientRect();
+          if (rect.width < 1) return null;
+          return { label: node.getAttribute('aria-label') || node.textContent.trim().slice(0, 24), w: Math.round(rect.width), h: Math.round(rect.height), min: Math.round(Math.min(rect.width, rect.height)) };
+        }).filter((value) => value != null);
+      })()`);
+      const touchTargets = [...phone.targets, ...headerTargets, ...menuTargets];
+      await writeFile(join(outDir, 'touch-targets.json'), JSON.stringify({ phone: phone.targets, header: headerTargets, menu: menuTargets }, null, 2));
+      if (phone.overflow) throw new Error(JSON.stringify({ overflow: phone.overflow, headerOverflow: phone.headerOverflow, scrollWidth: phone.scrollWidth, headerScroll: phone.headerScroll, headerClient: phone.headerClient, min: phone.min }));
+      if (phone.min < 40 || headerMin < 40 || menuTargets.some((row) => row.min < 40)) {
+        throw new Error(`touch target below 40: header ${headerMin}; card ${phone.min}; ${JSON.stringify(touchTargets.filter((row) => row.min < 40))}`);
+      }
       if (!drawer) throw new Error('phone quota missing');
       await page.viewport(1280, 900);
       await page.evaluate(`document.querySelector('[aria-label="关闭账户菜单"]')?.click()`);
-      return `grid ${grid.layout}; file card ${grid.fileH}px; menu ${menu.items.join('/')}; dark contrast ${ratio.toFixed(1)}; phone header min ${headerMin}; card min ${phone.min}`;
+      const touchList = touchTargets.map((row) => `${row.label} ${row.w}x${row.h}`).join(', ');
+      return `grid ${grid.layout}; file card ${grid.fileH}px; menu ${menu.items.join('/')}; dark contrast ${ratio.toFixed(1)}; phone header min ${headerMin}; card min ${phone.min}; hits ${touchList}`;
     });
 
     await check('regression: text, copy, download, retract, share link', async () => {
@@ -1094,13 +1151,16 @@ async function main() {
         });
         void watch();
       }).then(async (id) => {
-        third.kill('SIGINT');
+        signalTree(third.pid);
         await once(third, 'close');
-        await sleep(500);
         await call('/__mock/chunk-delay?ms=0', { method: 'POST' });
-        await sleep(1500);
-        const left = await call(`${base}/uploads/${id}`, { cookie: admin });
-        if (left.status !== 404) throw new Error(`SIGINT did not delete session ${left.status} out ${cancelOut.slice(-180)}`);
+        const gone = await poll(async () => {
+          const left = await call(`${base}/uploads/${id}`, { cookie: admin });
+          return left.status === 404 ? '404' : '';
+        }, 8000, 'SIGINT delete session').catch(async (error) => {
+          const left = await call(`${base}/uploads/${id}`, { cookie: admin });
+          throw new Error(`SIGINT did not delete session ${left.status} out ${cancelOut.slice(-180)} ${error.message}`);
+        });
         return id;
       });
       return `snapshotted before SIGINT; received ${remote.parsed.received?.length ?? 0}; mode ${mode.toString(8)}; resume exit 0; SIGINT cleaned; code ${closed[0]}`;
