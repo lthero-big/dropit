@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, stat, unlink } from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
-import { join } from 'node:path';
+import { createReadStream, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { ApiError } from './domain.js';
 
@@ -114,4 +114,21 @@ function concatenate(files: FileStorage, keys: string[]) {
     }
   }
   return Readable.toWeb(Readable.from(bytes())) as ReadableStream<Uint8Array>;
+}
+
+/** Small JSON files outside the content store (build-info.json, update-check cache). */
+export function readJsonFile(path: string): unknown {
+  try { return JSON.parse(readFileSync(path, 'utf8')); }
+  catch { return null; }
+}
+export function jsonFileStore(path: string) {
+  return {
+    load: () => readJsonFile(path),
+    save(value: unknown) {
+      mkdirSync(dirname(path), { recursive: true });
+      const temp = `${path}.${process.pid}.tmp`;
+      writeFileSync(temp, JSON.stringify(value));
+      renameSync(temp, path);
+    },
+  };
 }

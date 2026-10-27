@@ -1,5 +1,12 @@
 FROM node:22-bookworm-slim AS build
 
+# Build metadata. CI passes the git short hash; local builds can use
+#   DROPIT_COMMIT=$(git rev-parse --short HEAD) docker compose build
+ARG DROPIT_VERSION=
+ARG DROPIT_COMMIT=
+ARG DROPIT_BUILD_DATE=
+ARG DROPIT_INSTALL=docker
+
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@11.1.0 --activate
 
@@ -12,12 +19,29 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm --filter @dropit/web build \
   && pnpm --filter @dropit/server build \
-  && pnpm --filter @dropit/server deploy --prod --legacy /out
+  && pnpm --filter @dropit/server deploy --prod --legacy /out \
+  && cp apps/server/build-info.json /out/build-info.json
 
 FROM node:22-bookworm-slim AS runtime
 
+ARG DROPIT_VERSION=
+ARG DROPIT_COMMIT=
+ARG DROPIT_BUILD_DATE=
+ARG DROPIT_INSTALL=docker
+LABEL org.opencontainers.image.title="dropit" \
+      org.opencontainers.image.description="Self-hosted clipboard and file drop" \
+      org.opencontainers.image.source="https://github.com/lthero-big/dropit" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.version="${DROPIT_VERSION}" \
+      org.opencontainers.image.revision="${DROPIT_COMMIT}" \
+      org.opencontainers.image.created="${DROPIT_BUILD_DATE}"
+
 WORKDIR /app
-ENV NODE_ENV=production \
+ENV DROPIT_VERSION=${DROPIT_VERSION} \
+    DROPIT_COMMIT=${DROPIT_COMMIT} \
+    DROPIT_BUILD_DATE=${DROPIT_BUILD_DATE} \
+    DROPIT_INSTALL=${DROPIT_INSTALL} \
+    NODE_ENV=production \
     PORT=8787 \
     HOST=0.0.0.0 \
     DATA_DIR=/data \

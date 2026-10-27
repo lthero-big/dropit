@@ -11,6 +11,7 @@
 - JSON 请求需要 `Content-Type: application/json`。
 - 错误格式：`{"error":{"code":"QUOTA_EXCEEDED"}}`；429 带 `Retry-After`。
 - 健康检查：`GET /healthz` → `{"status":"ok"}`。
+- 版本：`GET /api/version`（无需登录）→ `{"version":"0.1.0","commit":"ab078cf","buildDate":"…","install":"docker"}`。
 
 ## 端点分组
 
@@ -20,7 +21,7 @@
 | 个人访问令牌 | `POST/GET /tokens`、`PATCH/DELETE /tokens/:id` |
 | 设备码登录 | `POST /auth/device/authorize`、`POST /auth/device/token`、`GET /auth/device`、`POST /auth/device/approve`、`POST /auth/device/deny` |
 | 登录设备 | `GET /sessions`、`DELETE /sessions/:id`、`POST /sessions/revoke-others`（仅浏览器会话） |
-| 管理 | `/admin/users`、`/admin/users/:id/logout`、`GET /admin/users/:id/sessions`、`DELETE /admin/sessions/:id`、`/admin/invites`、`/admin/tokens`、`/admin/limits`、`/admin/limits/audit` |
+| 管理 | `/admin/users`、`/admin/users/:id/logout`、`GET /admin/users/:id/sessions`、`DELETE /admin/sessions/:id`、`/admin/invites`、`/admin/tokens`、`/admin/limits`、`/admin/limits/audit`、`GET /admin/update`、`POST /admin/update/check` |
 | 空间与房间 | `GET /spaces`、`POST /rooms` |
 | 条目（`base` = `/spaces/:id` 或 `/rooms/:token`） | `GET base`、`GET base/items`、`POST base/items/text`、`POST base/items/file`、`PATCH base/items/:id`、`PATCH base/items/:id/labels`、`DELETE base/items/:id`、`GET base/items/:id/{download,thumbnail,preview,media}` |
 | 分组 | `GET/POST base/groups`、`PATCH/DELETE base/groups/:name` |

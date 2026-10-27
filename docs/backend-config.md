@@ -17,6 +17,10 @@ at `APP_ORIGIN` (typically terminated by a trusted reverse proxy).
 | `ADMIN_EMAILS` | empty | Optional comma-separated verified emails that are also created as admins. The first sign-in on an empty users table is admin whether or not this is set |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | unset | Enables GitHub login only when both are set |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | unset | Enables Google login only when both are set |
+| `UPDATE_CHECK` | true | `false`/`0`/`off` disables the periodic new-version check (no outbound requests) |
+| `UPDATE_CHECK_HOURS` | 12 | Check interval in hours, 6–168 |
+| `UPDATE_IMAGE` / `UPDATE_REPO` / `UPDATE_BRANCH` | `lthero1/dropit` / `lthero-big/dropit` / `main` | Docker Hub image and GitHub repository/branch compared against the running build |
+| `DROPIT_VERSION` / `DROPIT_COMMIT` / `DROPIT_BUILD_DATE` / `DROPIT_INSTALL` | set at build time | Build metadata for `GET /api/version`; Docker build-args become these variables |
 | `TRUST_PROXY` | empty | Comma-separated trusted proxy CIDRs/IPs (`loopback` allowed); never blindly trust every address |
 | `MAX_FILE_BYTES` | 26214400 | 25 MiB per file |
 | `USER_QUOTA_BYTES` | 1073741824 | 1 GiB default across a user's uploads and text. Admins may set a per-user override; `null` keeps this default |

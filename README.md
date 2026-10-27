@@ -147,6 +147,12 @@ server {
 - 本项目为单进程、单实例设计：限流、广播、在线人数驻留内存，不要多实例共享同一数据目录。
 - 纯 HTTP 内网使用时只能 `NODE_ENV=development`，且 `APP_ORIGIN` 必须与访问地址一致（如 `http://192.168.1.10:8787`）。
 
+### 升级与版本检测
+
+- Docker 镜像：`docker compose pull && docker compose up -d`；想全自动可以 `docker compose --profile autoupdate up -d`，启动只监控 dropit 容器的 watchtower。
+- 源码部署：`./scripts/update.sh`（`git pull --ff-only` → `pnpm install --frozen-lockfile` → `pnpm build` → 重启）；compose 本地构建用 `./scripts/update.sh --docker`。
+- `GET /api/version` 返回版本号和 git 短 hash。服务端默认每 12 小时检查一次 Docker Hub / GitHub，管理员在「管理 → 更新」看到新版本提示和对应的升级命令；离线部署设 `UPDATE_CHECK=false`。详见 [部署 → 升级](docs/wiki/Deployment.md#升级)。
+
 ## 配置
 
 所有配置通过环境变量提供，启动时校验；不合法的组合会直接拒绝启动。常用项：
@@ -161,6 +167,7 @@ server {
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | 未设置 | 两者都设置才开放 Google 登录 |
 | `ADMIN_EMAILS` | 空 | 可选，逗号分隔；这些已验证邮箱注册时也成为管理员 |
 | `TRUST_PROXY` | 空 | 受信任反代的 IP/CIDR（可用 `loopback`） |
+| `UPDATE_CHECK` / `UPDATE_CHECK_HOURS` | `true` / `12` | 新版本检查开关与间隔（6–168 小时） |
 | `MAX_FILE_BYTES` | 26214400（25 MiB） | 单文件上限 |
 | `USER_QUOTA_BYTES` | 1073741824（1 GiB） | 每用户默认配额 |
 | `RETENTION_HOURS` | 168 | 空间条目保留时长 |

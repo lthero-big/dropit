@@ -208,3 +208,39 @@ export interface DeviceSession {
   os: string
   device: { id: string; name: string; kind: 'mac' | 'phone' | 'pad' | 'pc' | 'cli' } | null
 }
+
+export type InstallKind = 'docker' | 'docker-build' | 'source'
+export type UpdateStatus = 'disabled' | 'pending' | 'up-to-date' | 'available' | 'unknown' | 'error'
+
+export interface BuildInfo {
+  version: string
+  commit: string | null
+  buildDate: string | null
+  install: InstallKind
+}
+
+export interface UpdateReport {
+  current: BuildInfo
+  check: {
+    enabled: boolean
+    status: UpdateStatus
+    source: 'dockerhub' | 'github' | null
+    checkedAt: number | null
+    nextCheckAt: number | null
+    intervalHours: number
+    error: string | null
+    reason: string | null
+    image: string
+    repo: string
+    branch: string
+    latest: {
+      version: string | null
+      commit: string | null
+      digest: string | null
+      publishedAt: string | null
+      url: string | null
+      behindBy: number | null
+    } | null
+  }
+  upgrade: { install: InstallKind; command: string; docs: string }
+}

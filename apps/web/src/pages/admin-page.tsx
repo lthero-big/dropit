@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { DeviceSessions } from '@/components/device-sessions.tsx'
 import { LimitsEditor } from '@/components/limits-editor.tsx'
 import { PageTitle, Shell } from '@/components/shell.tsx'
+import { UpdateNotice, UpdatePanel } from '@/components/update-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText } from '@/lib/api.ts'
 import { copyText, formatBytes, formatRemain, spaceLabel, useClock } from '@/lib/format.ts'
@@ -19,7 +20,13 @@ const hourChoices = [
 ]
 const quotaCapMb = 102400
 
-type Tab = 'invites' | 'users' | 'usage' | 'limits'
+type Tab = 'invites' | 'users' | 'usage' | 'limits' | 'update'
+const tabIds: Tab[] = ['invites', 'users', 'usage', 'limits', 'update']
+
+function initialTab(): Tab {
+  const requested = new URLSearchParams(window.location.search).get('tab')
+  return tabIds.includes(requested as Tab) ? (requested as Tab) : 'invites'
+}
 type Editor = 'new' | AdminUser | null
 
 function inviteState(invite: Invite, now: number): string {
@@ -53,7 +60,7 @@ export function AdminPage() {
   const [maxUses, setMaxUses] = useState('5')
   const [hours, setHours] = useState('168')
   const [freshUrl, setFreshUrl] = useState<string | null>(null)
-  const [tab, setTab] = useState<Tab>('invites')
+  const [tab, setTab] = useState<Tab>(initialTab)
   const [editor, setEditor] = useState<Editor>(null)
 
   const load = useCallback(async () => {
@@ -141,11 +148,13 @@ export function AdminPage() {
     { id: 'users', label: '用户' },
     { id: 'usage', label: '用量' },
     { id: 'limits', label: '限制' },
+    { id: 'update', label: '更新' },
   ]
 
   return (
     <Shell>
       <PageTitle title="管理" sub="邀请、预创建用户、配额。普通用户不能打开这些接口。" />
+      {tab === 'update' ? null : <UpdateNotice onOpen={() => setTab('update')} />}
       <div className="mb-6 flex flex-wrap border-b border-line-1" role="tablist">
         {tabs.map((item) => (
           <button
@@ -332,6 +341,7 @@ export function AdminPage() {
         </div>
       ) : null}
       {tab === 'limits' && limits ? <LimitsEditor limits={limits} onChange={setLimits} /> : null}
+      {tab === 'update' ? <UpdatePanel /> : null}
     </Shell>
   )
 }
