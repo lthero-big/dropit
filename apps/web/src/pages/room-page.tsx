@@ -93,7 +93,7 @@ export function RoomPage() {
   if (missing) {
     return (
       <Shell>
-        <h1 className="border-l-[14px] border-primary pl-4 text-4xl font-black">房间不存在或已过期</h1>
+        <h1 className="text-4xl font-semibold">房间不存在或已过期</h1>
         <p className="mt-4 text-sm text-muted-foreground">临时房间不会出现在任何列表里。可以新建一个再把链接发给对方。</p>
         <Button type="button" className="mt-6" asChild>
           <Link to="/">返回</Link>
@@ -106,7 +106,7 @@ export function RoomPage() {
     <Shell>
       {scope ? (
         <>
-          <div ref={qrRootRef} className="relative mb-4 flex flex-wrap items-center gap-2 border border-foreground px-3 py-2">
+          <div ref={qrRootRef} className="relative mb-4 flex flex-wrap items-center gap-2 border border-line-2 px-3 py-2">
             <code className="min-w-0 flex-1 truncate text-sm">{shareUrl}</code>
             <Button
               type="button"
@@ -137,14 +137,14 @@ export function RoomPage() {
               二维码
             </Button>
             {qrOpen ? (
-              <div role="dialog" aria-label="房间二维码" className="absolute top-full right-0 z-30 mt-2 border-2 border-foreground bg-card p-3">
+              <div role="dialog" aria-label="房间二维码" className="absolute top-full right-0 z-30 mt-2 rounded-md border border-line-2 bg-card p-3">
                 {qr ? (
                   <img
                     src={qr}
                     alt="房间二维码"
                     width={qrLarge ? 192 : 96}
                     height={qrLarge ? 192 : 96}
-                    className="border border-foreground bg-white p-1"
+                    className="border border-line-2 bg-white p-1"
                   />
                 ) : (
                   <p className="text-xs text-muted-foreground">正在生成二维码…</p>

@@ -78,8 +78,8 @@ export function AdminPage() {
   if (!me) {
     return (
       <main className="mx-auto max-w-md px-6 py-16">
-        <h1 className="text-3xl font-black">请先登录</h1>
-        <Link to="/login" className="mt-4 inline-block text-sm font-extrabold tracking-widest uppercase">
+        <h1 className="text-3xl font-semibold">请先登录</h1>
+        <Link to="/login" className="mt-4 inline-block text-sm font-medium">
           登录
         </Link>
       </main>
@@ -88,7 +88,7 @@ export function AdminPage() {
   if (me.user.role !== 'admin') {
     return (
       <Shell>
-        <h1 className="text-3xl font-black">需要管理员权限</h1>
+        <h1 className="text-3xl font-semibold">需要管理员权限</h1>
       </Shell>
     )
   }
@@ -145,14 +145,14 @@ export function AdminPage() {
   return (
     <Shell>
       <PageTitle title="管理" sub="邀请、预创建用户、配额。普通用户不能打开这些接口。" />
-      <div className="mb-6 flex flex-wrap border-b-2 border-foreground" role="tablist">
+      <div className="mb-6 flex flex-wrap border-b border-line-1" role="tablist">
         {tabs.map((item) => (
           <button
             key={item.id}
             type="button"
             role="tab"
             aria-selected={tab === item.id}
-            className={`px-4 py-2 text-xs font-extrabold tracking-widest uppercase ${tab === item.id ? 'bg-foreground text-background' : ''}`}
+            className={`px-4 py-2 text-xs font-medium ${tab === item.id ? 'bg-surface-2 text-fg' : ''}`}
             onClick={() => setTab(item.id)}
           >
             {item.label}
@@ -161,10 +161,10 @@ export function AdminPage() {
       </div>
       {tab === 'invites' ? (
         <div>
-          <form className="mb-6 grid gap-3 border-2 border-foreground p-4 sm:grid-cols-[1fr_140px_140px_auto] sm:items-end" onSubmit={(event) => void createInvite(event)}>
-            <label className="text-xs font-extrabold tracking-widest uppercase">
+          <form className="mb-6 grid gap-3 rounded-md border border-line-2 p-4 sm:grid-cols-[1fr_140px_140px_auto] sm:items-end" onSubmit={(event) => void createInvite(event)}>
+            <label className="text-xs font-medium">
               空间
-              <select className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium normal-case" value={spaceId} onChange={(event) => setSpaceId(event.target.value)}>
+              <select className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium normal-case" value={spaceId} onChange={(event) => setSpaceId(event.target.value)}>
                 {spaces.map((space) => (
                   <option key={space.id} value={space.id}>
                     {spaceLabel(space, me.user.id, spaces)}
@@ -172,9 +172,9 @@ export function AdminPage() {
                 ))}
               </select>
             </label>
-            <label className="text-xs font-extrabold tracking-widest uppercase">
+            <label className="text-xs font-medium">
               次数
-              <select className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium normal-case" value={maxUses} onChange={(event) => setMaxUses(event.target.value)}>
+              <select className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium normal-case" value={maxUses} onChange={(event) => setMaxUses(event.target.value)}>
                 {useChoices.map((count) => (
                   <option key={count} value={count}>
                     {count}
@@ -182,9 +182,9 @@ export function AdminPage() {
                 ))}
               </select>
             </label>
-            <label className="text-xs font-extrabold tracking-widest uppercase">
+            <label className="text-xs font-medium">
               有效期
-              <select className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium normal-case" value={hours} onChange={(event) => setHours(event.target.value)}>
+              <select className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium normal-case" value={hours} onChange={(event) => setHours(event.target.value)}>
                 {hourChoices.map((choice) => (
                   <option key={choice.value} value={choice.value}>
                     {choice.label}
@@ -195,7 +195,7 @@ export function AdminPage() {
             <Button type="submit">生成邀请</Button>
           </form>
           {freshUrl ? (
-            <div className="mb-6 flex flex-wrap items-center gap-2 border-l-4 border-primary bg-secondary px-3 py-2">
+            <div className="mb-6 flex flex-wrap items-center gap-2 rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2">
               <code className="min-w-0 flex-1 truncate text-sm">{freshUrl}</code>
               <Button type="button" variant="outline" size="sm" onClick={() => void copyText(freshUrl).then(() => toast.success('已复制'))}>
                 复制
@@ -203,14 +203,14 @@ export function AdminPage() {
             </div>
           ) : null}
           <p className="mb-3 text-xs text-muted-foreground">邀请链接只在生成时显示一次。过期、撤销或用尽后立即失效。</p>
-          <div className="overflow-x-auto border-t-2 border-foreground">
+          <div className="overflow-x-auto border-t border-line-1">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b-2 border-foreground text-left text-[11px] tracking-widest uppercase">
-                  <th className="py-2 font-extrabold">空间</th>
-                  <th className="py-2 font-extrabold">使用</th>
-                  <th className="py-2 font-extrabold">剩余</th>
-                  <th className="py-2 font-extrabold">状态</th>
+                <tr className="border-b border-line-1 text-left text-[11px]">
+                  <th className="py-2 font-medium">空间</th>
+                  <th className="py-2 font-medium">使用</th>
+                  <th className="py-2 font-medium">剩余</th>
+                  <th className="py-2 font-medium">状态</th>
                   <th />
                 </tr>
               </thead>
@@ -219,7 +219,7 @@ export function AdminPage() {
                   const space = spaces.find((item) => item.id === invite.spaceId)
                   const state = inviteState(invite, now)
                   return (
-                    <tr key={invite.id} className="border-b border-foreground">
+                    <tr key={invite.id} className="border-b border-line-2">
                       <td className="py-3" data-l="空间">{space ? spaceLabel(space, me.user.id, spaces) : invite.spaceId.slice(0, 8)}</td>
                       <td className="py-3" data-l="使用">{invite.uses}/{invite.maxUses}</td>
                       <td className="py-3" data-l="剩余">{formatRemain(invite.expiresAt - now)}</td>
@@ -255,20 +255,20 @@ export function AdminPage() {
               onSaved={load}
             />
           ) : null}
-          <div className="overflow-x-auto border-t-2 border-foreground">
+          <div className="overflow-x-auto border-t border-line-1">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b-2 border-foreground text-left text-[11px] tracking-widest uppercase">
-                  <th className="py-2 font-extrabold">用户</th>
-                  <th className="py-2 font-extrabold">角色</th>
-                  <th className="py-2 font-extrabold">配额</th>
-                  <th className="py-2 font-extrabold">状态</th>
+                <tr className="border-b border-line-1 text-left text-[11px]">
+                  <th className="py-2 font-medium">用户</th>
+                  <th className="py-2 font-medium">角色</th>
+                  <th className="py-2 font-medium">配额</th>
+                  <th className="py-2 font-medium">状态</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
                 {users.map((user) => (
-                  <tr key={user.id} className={`border-b border-foreground ${user.disabled ? 'opacity-60' : ''}`}>
+                  <tr key={user.id} className={`border-b border-line-2 ${user.disabled ? 'opacity-60' : ''}`}>
                     <td className="py-3" data-l="用户">
                       <b>{user.name}</b>
                       <small className="mt-1 block text-muted-foreground">{user.email}</small>
@@ -296,20 +296,20 @@ export function AdminPage() {
         </div>
       ) : null}
       {tab === 'usage' ? (
-        <div className="overflow-x-auto border-t-2 border-foreground">
+        <div className="overflow-x-auto border-t border-line-1">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b-2 border-foreground text-left text-[11px] tracking-widest uppercase">
-                <th className="py-2 font-extrabold">用户</th>
-                <th className="py-2 font-extrabold">用量</th>
-                <th className="py-2 text-right font-extrabold">占比</th>
+              <tr className="border-b border-line-1 text-left text-[11px]">
+                <th className="py-2 font-medium">用户</th>
+                <th className="py-2 font-medium">用量</th>
+                <th className="py-2 text-right font-medium">占比</th>
               </tr>
             </thead>
             <tbody>
               {users.map((user) => {
                 const ratio = user.quotaBytes > 0 ? Math.min(100, Math.round((user.usedBytes / user.quotaBytes) * 100)) : 0
                 return (
-                  <tr key={user.id} className="border-b border-foreground">
+                  <tr key={user.id} className="border-b border-line-2">
                     <td className="py-3" data-l="用户">
                       <b>{user.name}</b>
                       <small className="mt-1 block text-muted-foreground">{user.email}</small>
@@ -408,13 +408,13 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
   }
 
   return (
-    <form className="mb-6 border-2 border-foreground p-4" onSubmit={(event) => void save(event)}>
-      <h2 className="text-xs font-extrabold tracking-widest uppercase">{creating ? '新建用户' : '编辑用户'}</h2>
+    <form className="mb-6 rounded-md border border-line-2 p-4" onSubmit={(event) => void save(event)}>
+      <h2 className="text-xs font-medium">{creating ? '新建用户' : '编辑用户'}</h2>
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
-        <label className="text-xs font-extrabold tracking-widest uppercase">
+        <label className="text-xs font-medium">
           邮箱
           <input
-            className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium normal-case disabled:opacity-60"
+            className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium normal-case disabled:opacity-60"
             type="email"
             required
             value={creating ? email : user.email}
@@ -423,36 +423,36 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
             placeholder="name@example.com"
           />
         </label>
-        <label className="text-xs font-extrabold tracking-widest uppercase">
+        <label className="text-xs font-medium">
           显示名称
           <input
-            className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium normal-case"
+            className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium normal-case"
             value={name}
             maxLength={80}
             onChange={(event) => setName(event.target.value)}
             placeholder="可留空，默认用邮箱名"
           />
         </label>
-        <label className="text-xs font-extrabold tracking-widest uppercase">
+        <label className="text-xs font-medium">
           角色
-          <select className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium normal-case" value={role} onChange={(event) => setRole(event.target.value === 'admin' ? 'admin' : 'user')}>
+          <select className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium normal-case" value={role} onChange={(event) => setRole(event.target.value === 'admin' ? 'admin' : 'user')}>
             <option value="user">普通用户</option>
             <option value="admin">管理员</option>
           </select>
         </label>
         {creating ? null : (
-          <label className="text-xs font-extrabold tracking-widest uppercase">
+          <label className="text-xs font-medium">
             状态
-            <select className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium normal-case" value={disabled ? 'off' : 'on'} onChange={(event) => setDisabled(event.target.value === 'off')}>
+            <select className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium normal-case" value={disabled ? 'off' : 'on'} onChange={(event) => setDisabled(event.target.value === 'off')}>
               <option value="on">正常</option>
               <option value="off">已停用</option>
             </select>
           </label>
         )}
-        <label className="text-xs font-extrabold tracking-widest uppercase">
+        <label className="text-xs font-medium">
           配额（MB）
           <input
-            className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium normal-case disabled:opacity-60"
+            className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium normal-case disabled:opacity-60"
             inputMode="numeric"
             value={quotaMb}
             disabled={useDefault}

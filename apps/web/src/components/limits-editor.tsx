@@ -74,7 +74,7 @@ export function LimitsEditor({ limits, onChange }: { limits: AdminLimits; onChan
 
   return (
     <div>
-      <div className="mb-4 border-l-4 border-primary bg-secondary px-3 py-2 text-sm">
+      <div className="mb-4 rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">
         <p>覆盖值保存在数据库，重启后保留；只读项仍需改环境变量。</p>
         <p className="mt-1 text-xs text-muted-foreground">
           只读项包括 APP_ORIGIN、TRUST_PROXY、DATA_DIR、OAuth 凭据、RATE_TOKEN 和清理间隔。调低上限或配额不会删除已有内容。保留时间只影响新条目和新房间，会话时长只影响新会话。
@@ -82,8 +82,8 @@ export function LimitsEditor({ limits, onChange }: { limits: AdminLimits; onChan
       </div>
       {groups.map((group) => (
         <section key={group} className="mb-6">
-          <h2 className="text-xs font-extrabold tracking-widest uppercase">{group}</h2>
-          <ul className="border-t-2 border-foreground">
+          <h2 className="text-xs font-medium">{group}</h2>
+          <ul className="border-t border-line-1">
             {LIMIT_SPECS.filter((spec) => spec.group === group).map((spec) => (
               <LimitRow
                 key={`${spec.key}:${limits[spec.key].value}:${limits[spec.key].overridden}`}
@@ -97,14 +97,14 @@ export function LimitsEditor({ limits, onChange }: { limits: AdminLimits; onChan
         </section>
       ))}
       <section>
-        <h2 className="text-xs font-extrabold tracking-widest uppercase">变更记录</h2>
+        <h2 className="text-xs font-medium">变更记录</h2>
         {auditError ? <p role="alert" className="mt-3 text-sm text-destructive">{auditError}</p> : null}
         {auditLoading ? <p className="mt-3 text-sm text-muted-foreground">正在加载变更记录…</p> : null}
         {!auditLoading && entries.length === 0 && !auditError ? <p className="mt-3 text-sm text-muted-foreground">还没有修改记录。</p> : null}
         {entries.length > 0 ? (
-          <ul className="mt-3 border-t-2 border-foreground" aria-label="变更记录">
+          <ul className="mt-3 border-t border-line-1" aria-label="变更记录">
             {entries.map((entry) => (
-              <li key={entry.id} className="grid gap-1 border-b border-foreground py-3 text-sm sm:grid-cols-[minmax(0,1.4fr)_9rem_minmax(0,1.4fr)] sm:items-baseline sm:gap-3">
+              <li key={entry.id} className="grid gap-1 border-b border-line-2 py-3 text-sm sm:grid-cols-[minmax(0,1.4fr)_9rem_minmax(0,1.4fr)] sm:items-baseline sm:gap-3">
                 <span className="truncate">{entry.actorEmail || entry.actorId}</span>
                 <time dateTime={new Date(entry.createdAt).toISOString()} className="text-xs text-muted-foreground">{formatStamp(entry.createdAt)}</time>
                 <span>
@@ -196,13 +196,13 @@ function LimitRow({
   }
 
   return (
-    <li data-limit={spec.key} className="border-b border-foreground py-3">
+    <li data-limit={spec.key} className="border-b border-line-2 py-3">
       <form onSubmit={save}>
         <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-          <label htmlFor={`limit-${spec.key}`} className="text-xs font-extrabold tracking-widest uppercase">
+          <label htmlFor={`limit-${spec.key}`} className="text-xs font-medium">
             {spec.label}
           </label>
-          <span className={`text-[11px] font-extrabold tracking-widest uppercase ${field.overridden ? 'text-primary' : 'text-muted-foreground'}`}>
+          <span className={`text-[11px] font-medium ${field.overridden ? 'text-primary' : 'text-muted-foreground'}`}>
             {field.overridden ? '已覆盖' : '未覆盖'}
           </span>
         </div>
@@ -214,7 +214,7 @@ function LimitRow({
         <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
           <input
             id={`limit-${spec.key}`}
-            className="min-h-10 w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium text-foreground sm:max-w-40"
+            className="min-h-10 w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium text-foreground sm:max-w-40"
             inputMode={unit === 'count' ? 'numeric' : 'decimal'}
             autoComplete="off"
             aria-invalid={error ? true : undefined}
@@ -228,7 +228,7 @@ function LimitRow({
           />
           {units.length > 1 ? (
             <select
-              className="min-h-10 w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium sm:w-28"
+              className="min-h-10 w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium sm:w-28"
               aria-label={`${spec.label}单位`}
               disabled={busy}
               value={unit}

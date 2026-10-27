@@ -382,7 +382,7 @@ export function ImageLightbox({
               {sizeLabel}
             </p>
           </div>
-          <button ref={closeRef} type="button" aria-label="关闭" onClick={onClose} className="px-3 text-xs font-extrabold" style={controlStyle}>
+          <button ref={closeRef} type="button" aria-label="关闭" onClick={onClose} className="px-3 text-xs font-medium" style={controlStyle}>
             关闭
           </button>
         </header>
@@ -448,7 +448,7 @@ export function ImageLightbox({
         ) : null}
         <footer data-testid="lightbox-toolbar" className="pointer-events-auto m-3 flex flex-wrap items-center gap-2 px-3 py-2" style={chromeStyle}>
           {multiple ? (
-            <button type="button" aria-label="上一张" disabled={index <= 0} onClick={() => onIndex(index - 1)} className="px-2 text-xs font-extrabold disabled:opacity-40" style={controlStyle}>
+            <button type="button" aria-label="上一张" disabled={index <= 0} onClick={() => onIndex(index - 1)} className="px-2 text-xs font-medium disabled:opacity-40" style={controlStyle}>
               上一张
             </button>
           ) : null}
@@ -457,12 +457,12 @@ export function ImageLightbox({
             aria-label="缩小"
             disabled={scale <= MIN_SCALE}
             onClick={() => commitScale(scaleRef.current - ZOOM_STEP)}
-            className="text-sm font-extrabold disabled:opacity-40"
+            className="text-sm font-medium disabled:opacity-40"
             style={controlStyle}
           >
             −
           </button>
-          <span aria-live="polite" className="min-w-12 text-center text-xs font-extrabold">
+          <span aria-live="polite" className="min-w-12 text-center text-xs font-medium">
             {Math.round(scale * 100)}%
           </span>
           <button
@@ -470,7 +470,7 @@ export function ImageLightbox({
             aria-label="放大"
             disabled={scale >= MAX_SCALE}
             onClick={() => commitScale(scaleRef.current + ZOOM_STEP)}
-            className="text-sm font-extrabold disabled:opacity-40"
+            className="text-sm font-medium disabled:opacity-40"
             style={controlStyle}
           >
             +
@@ -481,13 +481,13 @@ export function ImageLightbox({
               aria-label="下一张"
               disabled={index >= slides.length - 1}
               onClick={() => onIndex(index + 1)}
-              className="px-2 text-xs font-extrabold disabled:opacity-40"
+              className="px-2 text-xs font-medium disabled:opacity-40"
               style={controlStyle}
             >
               下一张
             </button>
           ) : null}
-          <a href={slide.downloadHref} download={slide.filename} className="ml-auto inline-flex items-center justify-center px-3 text-xs font-extrabold no-underline" style={controlStyle}>
+          <a href={slide.downloadHref} download={slide.filename} className="ml-auto inline-flex items-center justify-center px-3 text-xs font-medium no-underline" style={controlStyle}>
             下载原图
           </a>
         </footer>

@@ -35,17 +35,17 @@ export function SharePage() {
 
   return (
     <main className="mx-auto min-h-svh max-w-3xl px-4 py-8">
-      <Link to="/" className="text-[22px] font-black tracking-tight">
+      <Link to="/" className="text-[22px] font-semibold tracking-tight">
         dropit
       </Link>
       {missing ? (
         <>
-          <h1 className="mt-8 border-l-[14px] border-primary pl-4 text-4xl font-black">链接无效</h1>
+          <h1 className="mt-8 text-4xl font-semibold">链接无效</h1>
           <p className="mt-4 text-sm text-muted-foreground">链接不存在、已过期、已撤销，或已达到查看次数。</p>
         </>
       ) : share ? (
         <>
-          <h1 className="mt-8 border-l-[14px] border-primary pl-4 text-4xl font-black">分享的内容</h1>
+          <h1 className="mt-8 text-4xl font-semibold">分享的内容</h1>
           <p className="mt-3 text-xs text-muted-foreground">只读。此页面不需要登录。</p>
           {share.item.kind === 'text' ? (
             <div className="mt-6">
@@ -63,7 +63,7 @@ export function SharePage() {
                   <img
                     src={`/api/s/${encodeURIComponent(token)}/thumbnail?access=${encodeURIComponent(share.access)}`}
                     alt=""
-                    className="max-h-80 border border-foreground object-contain"
+                    className="max-h-80 border border-line-2 object-contain"
                   />
                 </button>
               ) : mediaKind({ ...share.item, hasThumbnail: share.item.hasThumbnail }) === 'video' ? (

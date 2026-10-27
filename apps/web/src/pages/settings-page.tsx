@@ -156,7 +156,7 @@ export function SettingsPage() {
   if (status === 'error') {
     return (
       <main className="mx-auto max-w-md px-6 py-16">
-        <h1 className="text-3xl font-black">无法连接</h1>
+        <h1 className="text-3xl font-semibold">无法连接</h1>
         <Button type="button" className="mt-6" onClick={() => void refresh()}>
           重试
         </Button>
@@ -166,9 +166,9 @@ export function SettingsPage() {
   if (!me) {
     return (
       <main className="mx-auto flex min-h-svh max-w-md flex-col justify-center px-6 py-16">
-        <h1 className="border-l-[14px] border-primary pl-4 text-4xl font-black">请先登录</h1>
+        <h1 className="text-4xl font-semibold">请先登录</h1>
         <p className="mt-4 text-sm text-muted-foreground">登录后可以确认设备码，并管理个人访问令牌。</p>
-        <Link to="/login" className="mt-6 text-sm font-extrabold tracking-widest uppercase">
+        <Link to="/login" className="mt-6 text-sm font-medium">
           登录后继续
         </Link>
       </main>
@@ -181,18 +181,18 @@ export function SettingsPage() {
       <DeviceConfirm initialCode="" initialVerificationId={null} auto={false} />
       <section className="mt-8">
         <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-          <h2 className="text-xs font-extrabold tracking-widest uppercase">令牌</h2>
+          <h2 className="text-xs font-medium">令牌</h2>
           <Button type="button" onClick={() => setCreating(true)}>
             创建令牌
           </Button>
         </div>
-        {tokens.length === 0 ? <p className="border-2 border-foreground p-4 text-sm text-muted-foreground">还没有令牌。用设备码登录，或手动创建一个。</p> : null}
+        {tokens.length === 0 ? <p className="rounded-md border border-line-2 p-4 text-sm text-muted-foreground">还没有令牌。用设备码登录，或手动创建一个。</p> : null}
         <ul className="grid gap-3">
           {tokens.map((token) => {
             const state = tokenState(token, now)
             const active = state === '有效'
             return (
-              <li key={token.id} className="border-2 border-foreground p-4">
+              <li key={token.id} className="rounded-md border border-line-2 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   {editing === token.id ? (
                     <form
@@ -207,7 +207,7 @@ export function SettingsPage() {
                       </label>
                       <input
                         id={`rename-${token.id}`}
-                        className="grow border-2 border-foreground bg-background px-2 py-1 text-sm"
+                        className="grow rounded-md border border-line-2 bg-background px-2 py-1 text-sm"
                         value={draft}
                         maxLength={80}
                         onChange={(event) => setDraft(event.target.value)}
@@ -220,7 +220,7 @@ export function SettingsPage() {
                       </Button>
                     </form>
                   ) : (
-                    <h3 className="text-lg font-black break-all">{token.name}</h3>
+                    <h3 className="text-lg font-semibold break-all">{token.name}</h3>
                   )}
                   {editing === token.id ? null : (
                     <div className="flex flex-wrap gap-2">
@@ -251,23 +251,23 @@ export function SettingsPage() {
                 </div>
                 <dl className="mt-3 grid grid-cols-2 gap-3 text-sm md:grid-cols-5">
                   <div>
-                    <dt className="text-xs font-extrabold tracking-widest uppercase">状态</dt>
+                    <dt className="text-xs font-medium">状态</dt>
                     <dd>{state}</dd>
                   </div>
                   <div>
-                    <dt className="text-xs font-extrabold tracking-widest uppercase">范围</dt>
+                    <dt className="text-xs font-medium">范围</dt>
                     <dd>{token.scopes.map(scopeLabel).join('、')}</dd>
                   </div>
                   <div>
-                    <dt className="text-xs font-extrabold tracking-widest uppercase">创建</dt>
+                    <dt className="text-xs font-medium">创建</dt>
                     <dd>{formatWhen(token.createdAt, now)}</dd>
                   </div>
                   <div>
-                    <dt className="text-xs font-extrabold tracking-widest uppercase">最近使用</dt>
+                    <dt className="text-xs font-medium">最近使用</dt>
                     <dd>{token.lastUsedAt === null ? '从未使用' : formatStamp(token.lastUsedAt)}</dd>
                   </div>
                   <div>
-                    <dt className="text-xs font-extrabold tracking-widest uppercase">过期</dt>
+                    <dt className="text-xs font-medium">过期</dt>
                     <dd>{token.expiresAt === null ? '永不' : formatStamp(token.expiresAt)}</dd>
                   </div>
                 </dl>
@@ -283,16 +283,16 @@ export function SettingsPage() {
             if (event.target === event.currentTarget && !secret) closeDialog()
           }}
         >
-          <div role="dialog" aria-modal="true" aria-labelledby="create-token-title" className="max-h-svh w-full max-w-lg overflow-y-auto border-2 border-foreground bg-background p-4">
-            <h2 id="create-token-title" className="text-2xl font-black">
+          <div role="dialog" aria-modal="true" aria-labelledby="create-token-title" className="max-h-svh w-full max-w-lg overflow-y-auto rounded-md border border-line-2 bg-background p-4">
+            <h2 id="create-token-title" className="text-2xl font-semibold">
               {secret ? '保存令牌' : '创建令牌'}
             </h2>
             {secret ? (
               <div className="mt-4">
-                <p className="border-l-4 border-primary bg-secondary px-3 py-2 text-sm">只显示这一次。关闭后无法再查看，请立即复制并保存。</p>
-                <label className="mt-4 block text-xs font-extrabold tracking-widest uppercase" htmlFor="fresh-token">
+                <p className="rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">只显示这一次。关闭后无法再查看，请立即复制并保存。</p>
+                <label className="mt-4 block text-xs font-medium" htmlFor="fresh-token">
                   令牌
-                  <input id="fresh-token" className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 font-mono text-sm normal-case" readOnly value={secret} />
+                  <input id="fresh-token" className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 font-mono text-sm normal-case" readOnly value={secret} />
                 </label>
                 <div className="mt-4 flex flex-wrap gap-2">
                   <Button
@@ -310,11 +310,11 @@ export function SettingsPage() {
               </div>
             ) : (
               <form className="mt-4 grid gap-4" onSubmit={(event) => void createToken(event)}>
-                <label className="text-xs font-extrabold tracking-widest uppercase" htmlFor="token-name">
+                <label className="text-xs font-medium" htmlFor="token-name">
                   名称
                   <input
                     id="token-name"
-                    className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium normal-case"
+                    className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium normal-case"
                     value={name}
                     maxLength={80}
                     autoFocus
@@ -322,7 +322,7 @@ export function SettingsPage() {
                   />
                 </label>
                 <fieldset className="grid gap-2">
-                  <legend className="text-xs font-extrabold tracking-widest uppercase">范围</legend>
+                  <legend className="text-xs font-medium">范围</legend>
                   <label className="flex items-center gap-2 text-sm normal-case">
                     <input type="checkbox" checked={read} onChange={(event) => setRead(event.target.checked)} />
                     读取
@@ -332,11 +332,11 @@ export function SettingsPage() {
                     写入
                   </label>
                 </fieldset>
-                <label className="text-xs font-extrabold tracking-widest uppercase" htmlFor="token-expiry">
+                <label className="text-xs font-medium" htmlFor="token-expiry">
                   有效期
                   <select
                     id="token-expiry"
-                    className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 text-sm font-medium normal-case"
+                    className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium normal-case"
                     value={expiry}
                     onChange={(event) => setExpiry(event.target.value)}
                   >
@@ -348,11 +348,11 @@ export function SettingsPage() {
                   </select>
                 </label>
                 {expiry === 'custom' ? (
-                  <label className="text-xs font-extrabold tracking-widest uppercase" htmlFor="token-days">
+                  <label className="text-xs font-medium" htmlFor="token-days">
                     天数
                     <input
                       id="token-days"
-                      className="mt-1 block w-full border-2 border-foreground bg-background px-2 py-2 text-sm normal-case"
+                      className="mt-1 block w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm normal-case"
                       inputMode="numeric"
                       value={customDays}
                       onChange={(event) => setCustomDays(event.target.value)}

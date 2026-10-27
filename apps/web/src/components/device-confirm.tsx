@@ -117,8 +117,8 @@ export function DeviceConfirm({
   }
 
   return (
-    <section className="border-2 border-foreground p-4">
-      <h2 className="text-xs font-extrabold tracking-widest uppercase">设备码</h2>
+    <section className="rounded-md border border-line-2 p-4">
+      <h2 className="text-xs font-medium">设备码</h2>
       <p className="mt-2 text-sm text-muted-foreground">核对终端上的代码、设备名和网络概要后再允许。允许后，令牌要等终端领取才会创建。</p>
       <form
         className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end"
@@ -127,10 +127,10 @@ export function DeviceConfirm({
           void lookup()
         }}
       >
-        <label className="grow text-xs font-extrabold tracking-widest uppercase">
+        <label className="grow text-xs font-medium">
           用户码
           <input
-            className="mt-1 block w-full border-2 border-foreground bg-background px-3 py-2 font-mono text-lg font-black tracking-[0.3em] normal-case"
+            className="mt-1 block w-full rounded-md border border-line-2 bg-background px-3 py-2 font-mono text-lg font-semibold tracking-[0.3em] normal-case"
             value={code}
             onChange={(event) => onCodeChange(event.target.value)}
             autoComplete="off"
@@ -150,35 +150,35 @@ export function DeviceConfirm({
         {verificationId ? ' 当前代码绑定到打开的确认链接。' : ''}
       </p>
       {notice ? (
-        <p role="alert" className="mt-3 border-l-4 border-primary bg-secondary px-3 py-2 text-sm">
+        <p role="alert" className="mt-3 rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">
           {notice}
         </p>
       ) : null}
       {phase === 'preview' && device ? (
-        <div className="mt-4 border-2 border-foreground">
+        <div className="mt-4 rounded-md border border-line-2">
           <dl className="grid gap-px bg-foreground sm:grid-cols-2">
             <div className="bg-background p-3">
-              <dt className="text-xs font-extrabold tracking-widest uppercase">设备名</dt>
-              <dd className="mt-1 text-lg font-black break-all">{device.name}</dd>
+              <dt className="text-xs font-medium">设备名</dt>
+              <dd className="mt-1 text-lg font-semibold break-all">{device.name}</dd>
             </div>
             <div className="bg-background p-3">
-              <dt className="text-xs font-extrabold tracking-widest uppercase">网络概要</dt>
+              <dt className="text-xs font-medium">网络概要</dt>
               <dd className="mt-1 font-mono text-sm">{device.ipSummary}</dd>
             </div>
             <div className="bg-background p-3">
-              <dt className="text-xs font-extrabold tracking-widest uppercase">权限</dt>
+              <dt className="text-xs font-medium">权限</dt>
               <dd className="mt-1 text-sm">{device.scopes.map(scopeLabel).join('、')}</dd>
             </div>
             <div className="bg-background p-3">
-              <dt className="text-xs font-extrabold tracking-widest uppercase">令牌有效期</dt>
+              <dt className="text-xs font-medium">令牌有效期</dt>
               <dd className="mt-1 text-sm">{lifetimeText(device.tokenExpiresInDays)}</dd>
             </div>
             <div className="bg-background p-3 sm:col-span-2">
-              <dt className="text-xs font-extrabold tracking-widest uppercase">申请剩余</dt>
+              <dt className="text-xs font-medium">申请剩余</dt>
               <dd className="mt-1 text-sm">{formatRemain(device.expiresAt - now)}</dd>
             </div>
           </dl>
-          <div className="flex flex-col gap-2 border-t-2 border-foreground p-3 sm:flex-row">
+          <div className="flex flex-col gap-2 border-t border-line-1 p-3 sm:flex-row">
             <Button type="button" disabled={busy} onClick={() => void decide('approve')}>
               允许
             </Button>
@@ -189,12 +189,12 @@ export function DeviceConfirm({
         </div>
       ) : null}
       {phase === 'allowed' ? (
-        <p role="status" className="mt-4 border-l-4 border-foreground bg-secondary px-3 py-2 text-sm">
+        <p role="status" className="mt-4 rounded-md border border-line-1 bg-surface-2 px-3 py-2 text-sm">
           已允许。回到终端完成登录。令牌被领取后会出现在设置里，可以在那里撤销。
         </p>
       ) : null}
       {phase === 'denied' ? (
-        <p role="status" className="mt-4 border-l-4 border-primary bg-secondary px-3 py-2 text-sm">
+        <p role="status" className="mt-4 rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">
           已拒绝。这台设备拿不到令牌。
         </p>
       ) : null}
