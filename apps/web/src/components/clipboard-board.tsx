@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
+import { MotionConfig, motion, type PanInfo } from 'motion/react'
 import { CopyIcon, DownloadIcon, EllipsisIcon, LayoutGridIcon, ListIcon, PencilIcon, PinIcon, PinOffIcon, Share2Icon, TagIcon, Undo2Icon } from 'lucide-react'
 import { toast } from 'sonner'
+import { CodeBody, ColorBody, KindTag, LinkBody, SourceBadge } from '@/components/clip-content.tsx'
 import { CommandPalette } from '@/components/command-palette.tsx'
 import { ExpandCapsule } from '@/components/expand-capsule.tsx'
 import { ImageLightbox, type LightboxSlide } from '@/components/image-lightbox.tsx'
@@ -14,7 +16,9 @@ import { createUploadQueue, type UploadQueue, type UploadRow } from '@/lib/uploa
 import { formatEta, formatSpeed } from '@/lib/upload-speed.ts'
 import { copyText, formatBytes, formatRemain, formatWhen, quotaTone, useClock, utf8Size } from '@/lib/format.ts'
 import { MarkdownText } from '@/lib/markdown.tsx'
+import { AGING_WINDOW, clipKind, codeSource, lifeOpacity } from '@/lib/clip-kind.ts'
 import { mediaKind } from '@/lib/media.ts'
+import { dur, easeOut, springBounce, springSettle } from '@/lib/motion.ts'
 import type { ConnectionStatus, Item } from '@/lib/types.ts'
 
 function filesFromList(list: FileList | File[] | null | undefined): File[] {
@@ -22,11 +26,26 @@ function filesFromList(list: FileList | File[] | null | undefined): File[] {
 }
 
 const iconButtonClass =
-  'inline-flex size-10 shrink-0 items-center justify-center border-2 border-foreground bg-background text-foreground hover:bg-foreground hover:text-background'
+  'inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-line-2 bg-surface-1 text-fg-2 transition-[color,background-color,border-color] duration-(--dur-fast) ease-out hover:border-line-3 hover:bg-surface-2 hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring'
 const confirmButtonClass =
-  'inline-flex h-10 min-w-10 shrink-0 items-center justify-center gap-1 border-2 border-primary bg-primary px-2 text-xs font-extrabold tracking-wider text-primary-foreground hover:bg-primary/80'
+  'inline-flex h-10 min-w-10 shrink-0 items-center justify-center gap-1 rounded-md border border-primary bg-primary px-2 text-xs font-semibold text-primary-foreground transition-colors duration-(--dur-fast) hover:bg-primary/85'
 const capsuleIconClass =
-  'inline-flex size-10 shrink-0 items-center justify-center bg-transparent text-foreground hover:bg-foreground hover:text-background'
+  'inline-flex size-10 shrink-0 items-center justify-center rounded-md bg-transparent text-fg-2 transition-colors duration-(--dur-fast) hover:bg-surface-2 hover:text-fg'
+/** Horizontal travel (px) a touch swipe needs: right copies, left arms 撤回. */
+const SWIPE = 72
+const COPIED_MS = 1400
+
+function useCoarsePointer(): boolean {
+  const [coarse, setCoarse] = useState(() => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches)
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const query = window.matchMedia('(pointer: coarse)')
+    const onChange = () => setCoarse(query.matches)
+    query.addEventListener?.('change', onChange)
+    return () => query.removeEventListener?.('change', onChange)
+  }, [])
+  return coarse
+}
 const touchTarget = { minWidth: 40, minHeight: 40 }
 const RETRACT_MS = 3000
 
@@ -71,7 +90,7 @@ const uploadStatusLabel: Record<UploadRow['status'], string> = {
 }
 
 const queueActionClass =
-  'inline-flex min-h-10 min-w-10 items-center border-2 border-foreground bg-background px-2 text-xs font-extrabold tracking-wider uppercase focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary'
+  'inline-flex min-h-10 min-w-10 items-center rounded-md border border-line-2 bg-surface-1 px-2 text-xs font-medium text-fg-2 transition-colors duration-(--dur-fast) hover:border-line-3 hover:bg-surface-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring'
 const EXPIRED = '会话已过期，请重新上传'
 
 function extension(name: string): string {
@@ -165,6 +184,8 @@ export function ClipboardBoard({
   const [openId, setOpenId] = useState<string | null>(null)
   const [layout, setLayout] = useState<BoardLayout>(readLayout)
   const [expandedText, setExpandedText] = useState<Record<string, boolean>>({})
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const coarse = useCoarsePointer()
   const fileRef = useRef<HTMLInputElement>(null)
   const resumeRef = useRef<HTMLInputElement>(null)
   const resumeTarget = useRef<string | null>(null)
@@ -552,6 +573,25 @@ export function ClipboardBoard({
     return new URL(`${base}/items/${item.id}/download`, window.location.origin).href
   }
 
+  useEffect(() => {
+    if (!copiedId) return
+    const timer = window.setTimeout(() => setCopiedId(null), COPIED_MS)
+    return () => window.clearTimeout(timer)
+  }, [copiedId])
+
+  function copyItem(item: Item) {
+    const value = item.kind === 'text' && clipKind(item) === 'code' ? codeSource(item.text ?? '').body : copyValue(item)
+    void copyText(value).then(() => {
+      setCopiedId(item.id)
+      toast.success('已复制')
+    })
+  }
+
+  function onSwipeEnd(item: Item, info: PanInfo) {
+    if (info.offset.x >= SWIPE) copyItem(item)
+    else if (info.offset.x <= -SWIPE && canRetract(item) && pendingRef.current !== item.id) armPending(item.id)
+  }
+
   const ratio = quotaBytes > 0 ? Math.min(100, Math.round((roomUsed / quotaBytes) * 100)) : 0
   const tone = quotaTone(roomUsed, quotaBytes)
   const quotaBar = tone === 'over' ? 'bg-destructive' : tone === 'warn' ? 'bg-[#b45309]' : 'bg-primary'
@@ -643,27 +683,27 @@ export function ClipboardBoard({
   return (
     <section>
       <div>
-        <header className="mb-6 border-b-2 border-foreground pb-3">
+        <header className="mb-6 border-b border-line-1 pb-4">
           <div className="flex flex-wrap items-end justify-between gap-3">
-            <h1 className="border-l-[14px] border-primary pl-4 text-4xl font-black tracking-tight md:text-[56px] md:leading-none">{title}</h1>
+            <h1 className="text-3xl font-semibold tracking-tight text-fg md:text-[40px] md:leading-none">{title}</h1>
             <span className="inline-flex items-center gap-2">
               <span
-                className="inline-flex min-h-10 items-center gap-1.5 border border-foreground px-2 text-xs font-extrabold"
+                className="inline-flex min-h-10 items-center gap-1.5 rounded-md border border-line-2 bg-surface-1 px-2.5 text-xs font-medium text-fg-2 tabular-nums"
                 tabIndex={0}
                 role="status"
                 title={`${channel.devices} 台设备在线`}
                 aria-label={`${channel.devices} 台设备在线`}
               >
-                <span className={`size-2 ${channel.status === 'live' ? 'bg-primary' : 'bg-muted-foreground'}`} aria-hidden="true" />
+                <span className={`size-2 rounded-full ${channel.status === 'live' ? 'bg-ok motion-safe:animate-pulse' : 'bg-fg-4'}`} aria-hidden="true" />
                 {channel.devices}
               </span>
-              <span className="inline-flex border-2 border-foreground" role="group" aria-label="布局">
+              <span className="inline-flex overflow-hidden rounded-md border border-line-2 bg-surface-1" role="group" aria-label="布局">
                 <button
                   type="button"
                   aria-pressed={layout === 'grid'}
                   aria-label="网格"
                   title="网格"
-                  className={`inline-flex size-10 items-center justify-center ${layout === 'grid' ? 'bg-foreground text-background' : 'bg-background'}`}
+                  className={`inline-flex size-10 items-center justify-center transition-colors duration-(--dur-fast) ${layout === 'grid' ? 'bg-surface-2 text-fg' : 'text-fg-3 hover:text-fg'}`}
                   style={touchTarget}
                   onClick={() => chooseLayout('grid')}
                 >
@@ -674,7 +714,7 @@ export function ClipboardBoard({
                   aria-pressed={layout === 'list'}
                   aria-label="列表"
                   title="列表"
-                  className={`inline-flex size-10 items-center justify-center border-l-2 border-foreground ${layout === 'list' ? 'bg-foreground text-background' : 'bg-background'}`}
+                  className={`inline-flex size-10 items-center justify-center border-l border-line-2 transition-colors duration-(--dur-fast) ${layout === 'list' ? 'bg-surface-2 text-fg' : 'text-fg-3 hover:text-fg'}`}
                   style={touchTarget}
                   onClick={() => chooseLayout('list')}
                 >
@@ -692,14 +732,14 @@ export function ClipboardBoard({
           {usedBytes === null ? (
             <p className="mt-3 flex max-w-xs items-center gap-2 text-xs text-muted-foreground">
               <span className="shrink-0">房间配额 {formatBytes(roomUsed)} / {formatBytes(quotaBytes)}</span>
-              <span className="h-1 min-w-16 flex-1 bg-secondary" role="progressbar" aria-label="房间配额" aria-valuemin={0} aria-valuemax={100} aria-valuenow={ratio} data-quota-tone={tone}>
-                <span className={`block h-full ${quotaBar}`} style={{ width: `${ratio}%` }} />
+              <span className="h-1 min-w-16 flex-1 overflow-hidden rounded-full bg-surface-2" role="progressbar" aria-label="房间配额" aria-valuemin={0} aria-valuemax={100} aria-valuenow={ratio} data-quota-tone={tone}>
+                <span className={`block h-full rounded-full ${quotaBar}`} style={{ width: `${ratio}%` }} />
               </span>
             </p>
           ) : null}
         </header>
         <form
-          className="border-2 border-foreground p-4"
+          className="rounded-lg border border-line-2 bg-surface-1 p-4 shadow-elev-1 transition-[border-color,box-shadow] duration-(--dur-base) focus-within:border-line-3 focus-within:shadow-elev-2"
           onSubmit={(event) => {
             event.preventDefault()
             void sendText()
@@ -719,7 +759,7 @@ export function ClipboardBoard({
               }
             }}
             placeholder="写点什么，或粘贴截图"
-            className="min-h-20 w-full resize-y bg-transparent text-base outline-none"
+            className="min-h-20 w-full resize-y bg-transparent text-base text-fg outline-none placeholder:text-fg-4"
           />
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <Button type="submit" disabled={!base || sending}>
@@ -747,12 +787,12 @@ export function ClipboardBoard({
               aria-label="选择要续传的文件"
               onChange={onResumePicked}
             />
-            <span className="text-xs text-muted-foreground">拖入文件，或直接粘贴截图 · Ctrl/⌘ Enter 发送</span>
+            <span className="text-xs text-fg-3">拖入文件，或直接粘贴截图 · Ctrl/⌘ Enter 发送</span>
           </div>
           {rows.length > 0 ? (
-            <div className="mt-3 max-w-full border-2 border-foreground" role="region" aria-label="上传队列">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-foreground px-3 py-2">
-                <p className="text-xs font-extrabold tracking-widest uppercase">上传</p>
+            <div className="mt-3 max-w-full overflow-hidden rounded-md border border-line-2 bg-surface-0" role="region" aria-label="上传队列">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line-1 px-3 py-2">
+                <p className="text-xs font-medium text-fg-2">上传</p>
                 {uploadBusy ? (
                   <button
                     type="button"
@@ -766,7 +806,7 @@ export function ClipboardBoard({
               </div>
               <ul>
                 {rows.map((row) => (
-                  <li key={row.id} className="border-t border-foreground px-3 py-2 first:border-t-0" data-upload-status={row.status}>
+                  <li key={row.id} className="border-t border-line-1 px-3 py-2 first:border-t-0" data-upload-status={row.status}>
                     <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
                       <p className="min-w-0 flex-1 truncate text-sm font-medium">{row.name}</p>
                       <div className="flex shrink-0 flex-wrap gap-2">
@@ -840,7 +880,7 @@ export function ClipboardBoard({
                     </div>
                     <p className="mt-1 text-xs break-words text-muted-foreground tabular-nums">
                       {formatBytes(row.size)} ·{' '}
-                      <span className={row.status === 'processing' ? 'font-extrabold tracking-wider text-foreground uppercase' : undefined}>
+                      <span className={row.status === 'processing' ? 'font-medium text-fg' : undefined}>
                         {uploadStatusLabel[row.status]}
                       </span>
                       {row.status === 'uploading' || row.status === 'done' || row.status === 'paused' ? ` · ${Math.round(row.ratio * 100)}%` : ''}
@@ -849,7 +889,7 @@ export function ClipboardBoard({
                     </p>
                     {(row.status === 'failed' || row.status === 'paused') && row.error ? <p className="mt-1 text-xs break-words text-destructive">{row.error}</p> : null}
                     <div
-                      className="mt-2 h-1.5 bg-secondary"
+                      className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface-2"
                       role="progressbar"
                       aria-valuemin={0}
                       aria-valuemax={100}
@@ -857,7 +897,7 @@ export function ClipboardBoard({
                       aria-valuetext={row.status === 'processing' ? '处理中' : undefined}
                       aria-label={row.name}
                     >
-                      <div className="h-full bg-primary motion-safe:transition-[width] motion-safe:duration-150" style={{ width: `${Math.round(row.ratio * 100)}%` }} />
+                      <div className="h-full rounded-full bg-primary motion-safe:transition-[width] motion-safe:duration-(--dur-fast)" style={{ width: `${Math.round(row.ratio * 100)}%` }} />
                     </div>
                   </li>
                 ))}
@@ -865,7 +905,7 @@ export function ClipboardBoard({
             </div>
           ) : null}
         </form>
-        <label className="mt-6 block border-2 border-foreground">
+        <label className="mt-6 block rounded-md border border-line-2 bg-surface-1 transition-colors duration-(--dur-fast) focus-within:border-line-3">
           <span className="sr-only">搜索</span>
           <input
             type="search"
@@ -873,48 +913,81 @@ export function ClipboardBoard({
             onChange={(event) => setQuery(event.target.value)}
             placeholder="搜索文本、文件名或标签"
             aria-label="搜索"
-            className="w-full bg-transparent px-3 py-2 text-sm outline-none"
+            className="w-full bg-transparent px-3 py-2.5 text-sm text-fg outline-none placeholder:text-fg-4"
           />
         </label>
         {dragOver ? (
-          <div className="pointer-events-none fixed inset-0 z-30 grid place-items-center border-4 border-primary bg-background/80">
-            <p className="border-2 border-primary bg-background px-6 py-4 text-sm font-extrabold tracking-widest uppercase">松开以上传</p>
+          <div className="pointer-events-none fixed inset-3 z-30 grid place-items-center rounded-xl border-2 border-dashed border-primary/60 bg-background/85 backdrop-blur-sm motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-150">
+            <p className="rounded-lg border border-line-2 bg-surface-1 px-6 py-4 text-sm font-medium text-fg shadow-elev-3">松开以上传</p>
           </div>
         ) : null}
         {channel.status === 'connecting' || channel.status === 'reconnecting' ? (
-          <p className="border-t border-foreground py-8 text-sm text-muted-foreground" role="status">
+          <p className="py-8 text-sm text-fg-3" role="status">
             {channel.status === 'reconnecting' ? '连接中断，正在重连并补拉…' : '正在同步…'}
           </p>
         ) : null}
         {channel.status !== 'connecting' && visible.length === 0 ? (
-          <p className="border-t border-foreground py-8 text-sm text-muted-foreground">还没有内容。发送文本或文件，其他设备会实时收到。</p>
+          <p className="mt-4 rounded-lg border border-dashed border-line-2 py-10 text-center text-sm text-fg-3">还没有内容。发送文本或文件，其他设备会实时收到。</p>
         ) : null}
         {activeTag ? (
-          <button type="button" className="mt-3 inline-flex min-h-10 min-w-10 items-center justify-center border border-foreground px-2 text-xs font-extrabold" style={touchTarget} onClick={() => setActiveTag(null)}>
+          <button type="button" className="mt-3 inline-flex min-h-10 min-w-10 items-center justify-center rounded-md border border-line-2 bg-surface-1 px-2.5 text-xs font-medium text-fg-2 hover:border-line-3" style={touchTarget} onClick={() => setActiveTag(null)}>
             #{activeTag} · 清除标签
           </button>
         ) : null}
         {visible.length > 0 && shown.length === 0 ? (
-          <p className="border-t border-foreground py-8 text-sm text-muted-foreground">没有匹配的内容。</p>
+          <p className="py-8 text-center text-sm text-fg-3">没有匹配的内容。</p>
         ) : null}
-        <ul className={grid ? 'clip-board mt-4 columns-1 gap-3 sm:columns-2 xl:columns-3' : 'mt-4 grid gap-3'} data-layout={layout}>
-          {shown.map((item) => {
+        <MotionConfig reducedMotion="user">
+        <ul className={grid ? 'clip-board mt-4 columns-1 gap-3 sm:columns-2 xl:columns-3' : 'mt-4 grid gap-2.5'} data-layout={layout}>
+          {shown.map((item, index) => {
             const compactFile = item.kind === 'file' && !item.hasThumbnail && mediaKind(item) === null
             const textOpen = expandedText[item.id] === true
             const textLong = item.kind === 'text' && textOverflows(item.text ?? '')
+            const kind = clipKind(item)
+            const remaining = item.expiresAt - now
+            const life = lifeOpacity(remaining)
+            const copied = copiedId === item.id
+            const pinnedEdge = item.pinned && !shown[index + 1]?.pinned
             return (
-            <li id={`clip-${item.id}`} tabIndex={-1} key={item.id} data-interactive-card="" data-clip-card="" className={`border-2 border-foreground bg-card px-3 py-3 ${grid ? 'mb-3 break-inside-avoid' : ''} ${compactFile ? 'flex min-h-16 items-center gap-3 py-2' : ''}`}>
+            <motion.li
+              id={`clip-${item.id}`}
+              tabIndex={-1}
+              key={item.id}
+              data-interactive-card=""
+              data-clip-card=""
+              data-pinned={item.pinned ? '' : undefined}
+              data-aging={remaining < AGING_WINDOW ? '' : undefined}
+              data-copied={copied ? '' : undefined}
+              layout="position"
+              initial={{ opacity: 0, y: 10, scale: 0.985 }}
+              animate={{ opacity: life, y: 0, scale: 1 }}
+              transition={{ layout: item.pinned ? springBounce : springSettle, opacity: { duration: dur.slow, ease: easeOut }, y: springSettle, scale: springSettle }}
+              drag={coarse && editing !== item.id ? 'x' : false}
+              dragDirectionLock
+              dragSnapToOrigin
+              dragConstraints={{ left: 0, right: 0 }}
+              dragElastic={0.35}
+              onDragEnd={(_event, info) => onSwipeEnd(item, info)}
+              className={`group/card relative rounded-lg border bg-surface-1 px-3.5 py-3 shadow-elev-1 transition-[border-color,box-shadow] duration-(--dur-base) ease-out hover:shadow-elev-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${copied ? 'border-ok' : item.pinned ? 'border-line-3' : 'border-line-2 hover:border-line-3'} ${grid ? 'mb-3 break-inside-avoid' : ''} ${pinnedEdge && !grid ? 'mb-3' : ''} ${compactFile ? 'flex min-h-16 items-center gap-3 py-2.5' : ''}`}
+            >
+              {item.pinned ? <span className="absolute inset-y-3 left-0 w-0.5 rounded-full bg-primary" aria-hidden="true" /> : null}
+              {copied ? (
+                <span className="pointer-events-none absolute top-2 right-2 rounded-full bg-ok px-2 py-0.5 text-[11px] font-medium text-white motion-safe:animate-in motion-safe:fade-in-0 motion-safe:zoom-in-95" aria-hidden="true">
+                  已复制
+                </span>
+              ) : null}
               {compactFile ? (
-                <span className="grid size-10 shrink-0 place-items-center bg-foreground text-[10px] font-extrabold text-background">
+                <span className="grid size-10 shrink-0 place-items-center rounded-md border border-line-2 bg-surface-2 font-mono text-[10px] font-semibold text-fg-2">
                   {extension(item.filename || 'file')}
                 </span>
               ) : (
-              <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-                <span className="bg-foreground px-2 py-0.5 font-extrabold tracking-wider text-background uppercase">{sender(item)}</span>
-                <span className="text-muted-foreground">{formatWhen(item.createdAt, now)}</span>
-                {item.pinned ? <span className="font-extrabold text-primary">置顶</span> : null}
-                {item.updatedAt > item.createdAt ? <span className="text-muted-foreground">已编辑</span> : null}
-                <span className="text-muted-foreground">剩余 {formatRemain(item.expiresAt - now)}</span>
+              <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                <SourceBadge label={sender(item)} />
+                <KindTag kind={kind} />
+                <span className="text-fg-3 tabular-nums">{formatWhen(item.createdAt, now)}</span>
+                {item.pinned ? <span className="font-medium text-primary">置顶</span> : null}
+                {item.updatedAt > item.createdAt ? <span className="text-fg-3">已编辑</span> : null}
+                <span className={`ml-auto tabular-nums ${remaining < AGING_WINDOW ? 'text-primary' : 'text-fg-4'}`}>剩余 {formatRemain(remaining)}</span>
               </div>
               )}
               {item.kind === 'text' && editing === item.id ? (
@@ -931,7 +1004,7 @@ export function ClipboardBoard({
                     id={`edit-${item.id}`}
                     value={editDraft}
                     onChange={(event) => setEditDraft(event.target.value)}
-                    className="min-h-20 w-full resize-y border border-foreground bg-transparent p-2 text-[15px] outline-none"
+                    className="min-h-20 w-full resize-y rounded-md border border-line-2 bg-surface-0 p-2 text-[15px] text-fg outline-none focus:border-line-3"
                   />
                   <div className="mt-2 flex gap-2">
                     <Button type="submit" size="sm" disabled={savingEdit}>
@@ -942,13 +1015,17 @@ export function ClipboardBoard({
                     </Button>
                   </div>
                 </form>
+              ) : kind === 'link' ? (
+                <LinkBody text={item.text ?? ''} />
+              ) : kind === 'color' ? (
+                <ColorBody text={item.text ?? ''} />
               ) : item.kind === 'text' ? (
                 <div>
-                  <MarkdownText text={item.text ?? ''} collapsed={!textOpen} />
+                  {kind === 'code' ? <CodeBody text={item.text ?? ''} collapsed={!textOpen} /> : <MarkdownText text={item.text ?? ''} collapsed={!textOpen} />}
                   {textLong ? (
                     <button
                       type="button"
-                      className="mt-1 inline-flex min-h-10 min-w-10 items-center justify-center px-2 text-xs font-extrabold tracking-wider uppercase"
+                      className="mt-1 inline-flex min-h-10 min-w-10 items-center justify-center rounded-md px-2 text-xs font-medium text-fg-3 hover:text-fg"
                       style={touchTarget}
                       aria-expanded={textOpen}
                       onClick={() => setExpandedText((current) => ({ ...current, [item.id]: !textOpen }))}
@@ -959,8 +1036,8 @@ export function ClipboardBoard({
                 </div>
               ) : compactFile ? (
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-bold">{item.filename}</p>
-                  <p className="text-xs text-muted-foreground">{formatBytes(item.size)} · {sender(item)}</p>
+                  <p className="truncate text-sm font-medium text-fg">{item.filename}</p>
+                  <p className="text-xs text-fg-3 tabular-nums">{formatBytes(item.size)} · {sender(item)} · 剩余 {formatRemain(remaining)}</p>
                 </div>
               ) : (
                 <div>
@@ -968,32 +1045,30 @@ export function ClipboardBoard({
                     <button
                       type="button"
                       aria-label={`查看 ${item.filename?.trim() || '图片'}`}
-                      className="mb-2 block min-h-10 min-w-10 max-w-full border-0 bg-transparent p-0 text-left"
+                      className="mb-2 block min-h-10 min-w-10 max-w-full overflow-hidden rounded-md border-0 bg-transparent p-0 text-left"
                       style={touchTarget}
                       onClick={() => setOpenId(item.id)}
                     >
-                      <img src={`${base}/items/${item.id}/thumbnail`} alt="" className="max-h-80 w-full border border-foreground object-contain" />
+                      <img src={`${base}/items/${item.id}/thumbnail`} alt="" className="max-h-80 w-full rounded-md border border-line-1 bg-surface-sunken object-contain transition-transform duration-(--dur-slow) ease-out motion-safe:group-hover/card:scale-[1.01]" />
                     </button>
                   ) : mediaKind(item) === 'video' ? (
-                    <video controls preload="metadata" src={`${base}/items/${item.id}/media`} className="mb-2 max-h-80 w-full bg-foreground" />
+                    <video controls preload="metadata" src={`${base}/items/${item.id}/media`} className="mb-2 max-h-80 w-full rounded-md bg-surface-sunken" />
                   ) : mediaKind(item) === 'audio' ? (
                     <audio controls preload="metadata" src={`${base}/items/${item.id}/media`} className="mb-2 w-full" />
                   ) : (
-                    <span className="mb-2 grid size-10 place-items-center bg-foreground text-[10px] font-extrabold text-background">
+                    <span className="mb-2 grid size-10 place-items-center rounded-md border border-line-2 bg-surface-2 font-mono text-[10px] font-semibold text-fg-2">
                       {extension(item.filename || 'file')}
                     </span>
                   )}
-                  <p className="text-sm font-bold break-words">{item.filename}</p>
-                  <p className="text-xs text-muted-foreground">{formatBytes(item.size)}</p>
+                  <p className="text-sm font-medium break-words text-fg">{item.filename}</p>
+                  <p className="text-xs text-fg-3 tabular-nums">{formatBytes(item.size)}</p>
                 </div>
               )}
               <div className={`${compactFile ? 'ml-auto shrink-0' : 'mt-3'} flex flex-wrap items-center gap-2`}>
                 {item.kind === 'text' || item.kind === 'file' ? (
                   <IconAction
                     label="复制"
-                    onClick={() => {
-                      void copyText(copyValue(item)).then(() => toast.success('已复制'))
-                    }}
+                    onClick={() => copyItem(item)}
                   >
                     <CopyIcon className="size-5" aria-hidden="true" />
                   </IconAction>
@@ -1080,7 +1155,7 @@ export function ClipboardBoard({
                     <button
                       key={name}
                       type="button"
-                      className={`inline-flex min-h-10 min-w-10 items-center justify-center border px-2 text-xs ${activeTag === name ? 'border-primary bg-primary text-primary-foreground' : 'border-foreground'}`}
+                      className={`inline-flex min-h-10 min-w-10 items-center justify-center rounded-md border px-2 text-xs transition-colors duration-(--dur-fast) ${activeTag === name ? 'border-primary bg-primary text-primary-foreground' : 'border-line-2 text-fg-2 hover:border-line-3 hover:text-fg'}`}
                       style={touchTarget}
                       onClick={() => setActiveTag((current) => (current === name ? null : name))}
                     >
@@ -1108,7 +1183,7 @@ export function ClipboardBoard({
                     value={tagDraft}
                     onChange={(event) => setTagDraft(event.target.value)}
                     placeholder="输入标签后回车"
-                    className="border border-foreground bg-transparent px-2 py-1 text-xs"
+                    className="rounded-md border border-line-2 bg-surface-0 px-2 py-1 text-xs text-fg outline-none focus:border-line-3"
                   />
                   <Button type="submit" size="sm">
                     添加
@@ -1127,10 +1202,11 @@ export function ClipboardBoard({
                 </form>
               ) : null}
               {shareFor === item.id && base ? <SharePanel base={base} itemId={item.id} now={now} onClose={() => setShareFor(null)} /> : null}
-            </li>
+            </motion.li>
             )
           })}
         </ul>
+        </MotionConfig>
       </div>
       {openIndex >= 0 ? (
         <ImageLightbox
