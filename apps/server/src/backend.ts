@@ -7,7 +7,7 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import { upgradeWebSocket } from '@hono/node-server';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { loadConfig, type Config } from './config.js';
-import { ApiError, hash, token, type AccessToken, type Item, type Session, type TokenScope } from './domain.js';
+import { ApiError, hash, parseDevice, token, type AccessToken, type Item, type ItemDevice, type ItemMeta, type Session, type TokenScope } from './domain.js';
 import { parseByteRange, sniffMedia } from './media.js';
 import { SqliteRepository, type Repository } from './repository.js';
 import { DiskFileStorage, type FileStorage } from './files.js';
@@ -505,7 +505,36 @@ export function createBackend(options: BackendOptions = {}) {
     }
     return service.space(c.req.param('space')!, c.get('session'));
   };
+  // Optional item metadata a client may attach: which device sent it and which
+  // demo-style group it belongs to. Headers so binary uploads can carry them too.
+  const meta = (c: Ctx, group?: unknown): ItemMeta => {
+    const device = parseDevice(c.req.header('x-dropit-device'), c.req.header('x-dropit-device-name'), c.req.header('x-dropit-device-kind'));
+    let headerGroup: string | undefined;
+    const rawGroup = c.req.header('x-dropit-group');
+    if (rawGroup) {
+      try { headerGroup = decodeURIComponent(rawGroup); } catch { throw new ApiError(400, 'INVALID_GROUP'); }
+    }
+    return { device, group: group ?? headerGroup };
+  };
   for (const base of ['/api/spaces/:space', '/api/rooms/:room']) {
+    app.get(`${base}/groups`, c => c.json({ groups: service.groups(scope(c)) }));
+    app.post(`${base}/groups`, async c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      const body = await json(c, 2048);
+      return c.json({ groups: service.createGroup(space, body.name) }, 201);
+    });
+    app.patch(`${base}/groups/:name`, async c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      const body = await json(c, 2048);
+      return c.json({ groups: service.renameGroup(space, c.req.param('name')!, body.name) });
+    });
+    app.delete(`${base}/groups/:name`, c => {
+      const space = scope(c);
+      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      return c.json({ groups: service.deleteGroup(space, c.req.param('name')!) });
+    });
     app.post(`${base}/uploads`, async c => {
       const space = scope(c);
       limit(c, space.roomHash ? 'room-write' : 'upload', space.roomHash ? config.rateRoom : config.rateUpload);
@@ -524,7 +553,7 @@ export function createBackend(options: BackendOptions = {}) {
     app.post(`${base}/uploads/:id/complete`, async c => {
       const space = scope(c);
       limit(c, space.roomHash ? 'room-write' : 'upload', space.roomHash ? config.rateRoom : config.rateUpload);
-      return c.json({ item: await service.uploads.complete(space, c.get('session'), c.req.param('id')!) }, 201);
+      return c.json({ item: await service.uploads.complete(space, c.get('session'), c.req.param('id')!, meta(c)) }, 201);
     });
     app.delete(`${base}/uploads/:id`, async c => {
       await service.uploads.cancel(scope(c), c.get('session'), c.req.param('id')!);
@@ -542,7 +571,7 @@ export function createBackend(options: BackendOptions = {}) {
       const space = scope(c);
       limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
       const body = await json(c, config.maxTextBytes * 6 + 1024);
-      return c.json({ item: service.text(space, c.get('session'), string(body.text, Infinity)) }, 201);
+      return c.json({ item: service.text(space, c.get('session'), string(body.text, Infinity), meta(c, body.group)) }, 201);
     });
     app.post(`${base}/items/file`, async c => {
       const space = scope(c);
@@ -559,18 +588,22 @@ export function createBackend(options: BackendOptions = {}) {
       const mime = (c.req.header('content-type') ?? 'application/octet-stream').split(';')[0].trim().toLowerCase();
       if (mime.length > 200) throw new ApiError(400, 'INVALID_INPUT');
       if (!c.req.raw.body) throw new ApiError(400, 'EMPTY_FILE');
-      return c.json({ item: await service.upload(space, c.get('session'), c.req.raw.body, filename, mime, expected) }, 201);
+      return c.json({ item: await service.upload(space, c.get('session'), c.req.raw.body, filename, mime, expected, undefined, undefined, meta(c)) }, 201);
     });
     app.patch(`${base}/items/:id/labels`, async c => {
       const space = scope(c);
       limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
       const body = await json(c, 4096);
-      const patch: { pinned?: boolean; tags?: unknown } = {};
+      const patch: { pinned?: boolean; tags?: unknown; group?: unknown } = {};
       if ('pinned' in body) {
         if (typeof body.pinned !== 'boolean') throw new ApiError(400, 'INVALID_INPUT');
         patch.pinned = body.pinned;
       }
       if ('tags' in body) patch.tags = body.tags;
+      if ('group' in body) {
+        if (body.group !== null && typeof body.group !== 'string') throw new ApiError(400, 'INVALID_GROUP');
+        patch.group = body.group;
+      }
       return c.json({ item: service.label(space, c.get('session'), c.req.param('id')!, patch) });
     });
     app.patch(`${base}/items/:id`, async c => {
@@ -619,6 +652,15 @@ export function createBackend(options: BackendOptions = {}) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 });
   const socketsByIp = new Map<string, number>();
   const socketsByUser = new Map<string, number>();
+  // Who is connected per channel, for the demo-style named presence dots. Only
+  // sockets that identified a device are listed; `devices` keeps the raw count.
+  const peersBySpace = new Map<string, Map<object, ItemDevice>>();
+  const presence = (spaceId: string) => {
+    const seen = new Map<string, ItemDevice>();
+    for (const peer of peersBySpace.get(spaceId)?.values() ?? []) if (!seen.has(peer.id)) seen.set(peer.id, peer);
+    const devices = events.count(spaceId);
+    return seen.size ? { type: 'presence', devices, peers: [...seen.values()] } : { type: 'presence', devices };
+  };
   for (const base of ['/api/spaces/:space', '/api/rooms/:room']) {
     app.get(`${base}/ws`, c => {
       if (!c.get('session')?.bearer && c.req.header('origin') !== config.origin) throw new ApiError(403, 'ORIGIN_REJECTED');
@@ -633,18 +675,22 @@ export function createBackend(options: BackendOptions = {}) {
         if (space.roomHash) return Boolean(repo.room(space.roomHash, now()));
         return Boolean(auth && (bearerHash || repo.session(auth.sessionHash, now())) && repo.isMember(space.id, auth.user.id));
       };
+      const peer = parseDevice(c.req.query('device'), c.req.query('name'), c.req.query('kind'), false);
+      const peerKey = {};
       let unsubscribe: (() => void) | undefined;
       let opened = false;
       const release = () => {
         unsubscribe?.();
         unsubscribe = undefined;
+        const peers = peersBySpace.get(space.id);
+        if (peers?.delete(peerKey) && !peers.size) peersBySpace.delete(space.id);
         if (!opened) return;
         opened = false;
         for (const [map, key] of [[socketsByIp, ip], [socketsByUser, userKey]] as const) {
           const count = (map.get(key) ?? 1) - 1;
           if (count) map.set(key, count); else map.delete(key);
         }
-        events.publish(space.id, { type: 'presence', devices: events.count(space.id) });
+        events.publish(space.id, presence(space.id));
       };
       return upgradeWebSocket(c, {
         onOpen(_event, ws) {
@@ -661,7 +707,12 @@ export function createBackend(options: BackendOptions = {}) {
           }, authorized);
           // Authoritative replacement snapshot on EVERY connect, including reconnect.
           ws.send(JSON.stringify(service.snapshot(space)));
-          events.publish(space.id, { type: 'presence', devices: events.count(space.id) });
+          if (peer) {
+            const peers = peersBySpace.get(space.id) ?? new Map<object, ItemDevice>();
+            peers.set(peerKey, peer);
+            peersBySpace.set(space.id, peers);
+          }
+          events.publish(space.id, presence(space.id));
         },
         onMessage(_event, ws) { ws.close(1008, 'Read-only channel'); },
         onClose: release, onError: release,

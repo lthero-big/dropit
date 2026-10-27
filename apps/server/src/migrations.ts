@@ -118,3 +118,19 @@ CREATE TABLE upload_chunks (
 );
 PRAGMA user_version=8;
 `;
+
+// Step 5 (RHEA-190): demo-style groups and device identity. Every column is
+// nullable so existing rows stay "ungrouped / unknown device".
+export const migration9 = `
+CREATE TABLE item_groups (
+ spaceId TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+ name TEXT NOT NULL, position INTEGER NOT NULL, createdAt INTEGER NOT NULL,
+ PRIMARY KEY(spaceId,name)
+);
+ALTER TABLE items ADD COLUMN groupName TEXT;
+ALTER TABLE items ADD COLUMN deviceId TEXT;
+ALTER TABLE items ADD COLUMN deviceName TEXT;
+ALTER TABLE items ADD COLUMN deviceKind TEXT;
+CREATE INDEX item_group ON items(spaceId,groupName);
+PRAGMA user_version=9;
+`;

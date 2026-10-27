@@ -15,6 +15,8 @@ export interface Item {
   expiresAt: number;
   pinned: boolean;
   tags: string[];
+  group?: string | null;
+  device?: { id: string; name: string; kind: string } | null;
 }
 
 export interface SpaceInfo {

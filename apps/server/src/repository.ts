@@ -2,8 +2,8 @@ import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ApiError, type AccessToken, type DeviceAuthorization, type Flow, type Identity, type Invite, type Item, type Session, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8 } from './migrations.js';
+import { ApiError, type AccessToken, type DeviceAuthorization, type Flow, type Identity, type Invite, type Item, type ItemDevice, type Session, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9 } from './migrations.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
 type UserRow = User & { quotaBytes: number | null };
@@ -25,7 +25,13 @@ function mapItem(row: Item): Item {
       if (Array.isArray(parsed)) tags = parsed.filter((tag): tag is string => typeof tag === 'string');
     } catch { tags = []; }
   }
-  return { ...row, pinned: stored.pinned ? 1 : 0, tags };
+  const { groupName, deviceId, deviceName, deviceKind, ...rest } = stored as typeof stored & {
+    groupName?: string | null; deviceId?: string | null; deviceName?: string | null; deviceKind?: string | null;
+  };
+  const device: ItemDevice | null = deviceId
+    ? { id: deviceId, name: deviceName || '未命名设备', kind: (deviceKind ?? 'pc') as ItemDevice['kind'] }
+    : (rest.device ?? null);
+  return { ...rest, pinned: stored.pinned ? 1 : 0, tags, group: groupName ?? rest.group ?? null, device };
 }
 
 export interface Repository {
@@ -74,7 +80,12 @@ export interface Repository {
   addItem(item: Item, quota: number, maxItems: number, uploadId?: string): void;
   replaceText(id: string, text: string, size: number, quota: number, now: number): Item;
   deleteItem(id: string): Item | undefined;
-  updateLabels(id: string, patch: { pinned?: 0 | 1; tags?: string[] }, now: number): Item;
+  updateLabels(id: string, patch: { pinned?: 0 | 1; tags?: string[]; group?: string | null }, now: number): Item;
+  groups(spaceId: string): string[];
+  ensureGroup(spaceId: string, name: string, now: number, max: number): boolean;
+  createGroup(spaceId: string, name: string, now: number, max: number): void;
+  renameGroup(spaceId: string, from: string, to: string, now: number): Item[];
+  deleteGroup(spaceId: string, name: string, now: number): Item[];
   createShare(share: ShareLink): void;
   sharesForItem(itemId: string): SharePublic[];
   shareById(id: string): (SharePublic & { spaceId: string; userId: string | null }) | undefined;
@@ -97,8 +108,8 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 8) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 8) this.db.transaction(() => {
+    if (version > 9) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 9) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
@@ -106,7 +117,8 @@ export class SqliteRepository implements Repository {
       if (version < 5) this.db.exec(migration5);
       if (version < 6) this.db.exec(migration6);
       if (version < 7) this.db.exec(migration7);
-      this.db.exec(migration8);
+      if (version < 8) this.db.exec(migration8);
+      this.db.exec(migration9);
     })();
   }
   limitOverrides(): LimitOverrides {
@@ -426,8 +438,10 @@ export class SqliteRepository implements Repository {
         this.deleteUpload(uploadId);
       }
       this.checkCapacity(item.spaceId, item.userId, item.storedBytes, quota, maxItems, item.createdAt);
-      this.db.prepare(`INSERT INTO items (id,spaceId,userId,kind,text,filename,mime,size,storedBytes,fileKey,thumbnailKey,createdAt,expiresAt,updatedAt)
-        VALUES (@id,@spaceId,@userId,@kind,@text,@filename,@mime,@size,@storedBytes,@fileKey,@thumbnailKey,@createdAt,@expiresAt,@updatedAt)`).run(item);
+      const { group, device, tags: _tags, pinned: _pinned, ...columns } = item;
+      this.db.prepare(`INSERT INTO items (id,spaceId,userId,kind,text,filename,mime,size,storedBytes,fileKey,thumbnailKey,createdAt,expiresAt,updatedAt,groupName,deviceId,deviceName,deviceKind)
+        VALUES (@id,@spaceId,@userId,@kind,@text,@filename,@mime,@size,@storedBytes,@fileKey,@thumbnailKey,@createdAt,@expiresAt,@updatedAt,@groupName,@deviceId,@deviceName,@deviceKind)`)
+        .run({ ...columns, groupName: group ?? null, deviceId: device?.id ?? null, deviceName: device?.name ?? null, deviceKind: device?.kind ?? null });
     }).immediate();
   }
   replaceText(id: string, text: string, size: number, quota: number, now: number) {
@@ -461,7 +475,7 @@ export class SqliteRepository implements Repository {
       return item;
     })();
   }
-  updateLabels(id: string, patch: { pinned?: 0 | 1; tags?: string[] }, now: number) {
+  updateLabels(id: string, patch: { pinned?: 0 | 1; tags?: string[]; group?: string | null }, now: number) {
     return this.db.transaction(() => {
       const current = this.item(id, now);
       if (!current) throw new ApiError(404, 'NOT_FOUND');
@@ -473,8 +487,54 @@ export class SqliteRepository implements Repository {
       }
       const pinned = patch.pinned ?? current.pinned;
       const tags = patch.tags ?? current.tags;
-      this.db.prepare('UPDATE items SET pinned=?, tags=? WHERE id=?').run(pinned, JSON.stringify(tags), id);
-      return { ...current, pinned, tags };
+      const group = patch.group === undefined ? (current.group ?? null) : patch.group;
+      if (group !== null && !this.db.prepare('SELECT 1 FROM item_groups WHERE spaceId=? AND name=?').get(current.spaceId, group)) throw new ApiError(404, 'GROUP_NOT_FOUND');
+      this.db.prepare('UPDATE items SET pinned=?, tags=?, groupName=? WHERE id=?').run(pinned, JSON.stringify(tags), group, id);
+      return { ...current, pinned, tags, group };
+    }).immediate();
+  }
+  groups(spaceId: string) {
+    return (this.db.prepare('SELECT name FROM item_groups WHERE spaceId=? ORDER BY position, createdAt, name').all(spaceId) as { name: string }[])
+      .map(row => row.name);
+  }
+  private insertGroup(spaceId: string, name: string, now: number, max: number) {
+    const count = (this.db.prepare('SELECT count(*) AS n, coalesce(max(position),-1) AS top FROM item_groups WHERE spaceId=?').get(spaceId) as { n: number; top: number });
+    if (count.n >= max) throw new ApiError(409, 'GROUP_LIMIT');
+    this.db.prepare('INSERT INTO item_groups (spaceId,name,position,createdAt) VALUES (?,?,?,?)').run(spaceId, name, count.top + 1, now);
+  }
+  ensureGroup(spaceId: string, name: string, now: number, max: number) {
+    return this.db.transaction(() => {
+      if (this.db.prepare('SELECT 1 FROM item_groups WHERE spaceId=? AND name=?').get(spaceId, name)) return false;
+      this.insertGroup(spaceId, name, now, max);
+      return true;
+    }).immediate();
+  }
+  createGroup(spaceId: string, name: string, now: number, max: number) {
+    this.db.transaction(() => {
+      if (this.db.prepare('SELECT 1 FROM item_groups WHERE spaceId=? AND name=?').get(spaceId, name)) throw new ApiError(409, 'GROUP_EXISTS');
+      this.insertGroup(spaceId, name, now, max);
+    }).immediate();
+  }
+  private groupItems(spaceId: string, name: string, now: number) {
+    return (this.db.prepare('SELECT * FROM items WHERE spaceId=? AND groupName=? AND expiresAt>?').all(spaceId, name, now) as Item[]).map(mapItem);
+  }
+  renameGroup(spaceId: string, from: string, to: string, now: number) {
+    return this.db.transaction(() => {
+      if (!this.db.prepare('SELECT 1 FROM item_groups WHERE spaceId=? AND name=?').get(spaceId, from)) throw new ApiError(404, 'GROUP_NOT_FOUND');
+      if (from === to) return [];
+      if (this.db.prepare('SELECT 1 FROM item_groups WHERE spaceId=? AND name=?').get(spaceId, to)) throw new ApiError(409, 'GROUP_EXISTS');
+      this.db.prepare('UPDATE item_groups SET name=? WHERE spaceId=? AND name=?').run(to, spaceId, from);
+      this.db.prepare('UPDATE items SET groupName=? WHERE spaceId=? AND groupName=?').run(to, spaceId, from);
+      return this.groupItems(spaceId, to, now);
+    }).immediate();
+  }
+  deleteGroup(spaceId: string, name: string, now: number) {
+    return this.db.transaction(() => {
+      if (!this.db.prepare('SELECT 1 FROM item_groups WHERE spaceId=? AND name=?').get(spaceId, name)) throw new ApiError(404, 'GROUP_NOT_FOUND');
+      const affected = this.groupItems(spaceId, name, now);
+      this.db.prepare('UPDATE items SET groupName=NULL WHERE spaceId=? AND groupName=?').run(spaceId, name);
+      this.db.prepare('DELETE FROM item_groups WHERE spaceId=? AND name=?').run(spaceId, name);
+      return affected.map(item => ({ ...item, group: null }));
     }).immediate();
   }
   createShare(share: ShareLink) {

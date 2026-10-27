@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import type { ConnectionStatus, Item, ServerMessage } from './types.ts'
+import { deviceQuery } from './device.ts'
+import type { ConnectionStatus, Item, ItemDevice, ServerMessage } from './types.ts'
 
 export const channelClock = {
   delay(attempt: number) {
@@ -26,11 +27,15 @@ export function useChannel(base: string | null) {
   const [expiresAt, setExpiresAt] = useState<number | null>(null)
   const [authLost, setAuthLost] = useState(0)
   const [devices, setDevices] = useState(0)
+  const [peers, setPeers] = useState<ItemDevice[] | null>(null)
+  const [groups, setGroups] = useState<string[]>([])
 
   useEffect(() => {
     if (!base) {
       setItems([])
       setDevices(0)
+      setPeers(null)
+      setGroups([])
       setStatus('idle')
       setExpiresAt(null)
       return
@@ -42,11 +47,13 @@ export function useChannel(base: string | null) {
     let timer = 0
       setItems([])
       setDevices(0)
+      setPeers(null)
+      setGroups([])
       setStatus('connecting')
 
     const connect = () => {
       if (stopped) return
-      const url = new URL(`${base}/ws`, window.location.href)
+      const url = new URL(`${base}/ws?${deviceQuery()}`, window.location.href)
       url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const ws = new WebSocket(url)
       socket = ws
@@ -59,6 +66,7 @@ export function useChannel(base: string | null) {
         }
         if (message.type === 'snapshot') {
           setItems([...message.items].sort(compareItems))
+          if (Array.isArray(message.groups)) setGroups(message.groups.filter((name) => typeof name === 'string'))
           setOffset(message.serverTime - Date.now())
           setExpiresAt(message.expiresAt)
           setStatus('live')
@@ -73,7 +81,14 @@ export function useChannel(base: string | null) {
           setItems((current) => current.filter((item) => item.id !== message.id))
           return
         }
-        if (message.type === 'presence' && Number.isInteger(message.devices) && message.devices >= 0) setDevices(message.devices)
+        if (message.type === 'groups' && Array.isArray(message.groups)) {
+          setGroups(message.groups.filter((name) => typeof name === 'string'))
+          return
+        }
+        if (message.type === 'presence' && Number.isInteger(message.devices) && message.devices >= 0) {
+          setDevices(message.devices)
+          setPeers(Array.isArray(message.peers) ? message.peers : null)
+        }
       }
       ws.onclose = (event) => {
         if (stopped || socket !== ws) return
@@ -103,6 +118,10 @@ export function useChannel(base: string | null) {
     expiresAt,
     authLost,
     devices,
+    /** Named peers when the server reports them; null on older servers. */
+    peers,
+    groups,
+    setGroups,
     upsert(item: Item) {
       setItems((current) => upsert(current, item))
     },

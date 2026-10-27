@@ -195,3 +195,14 @@ test('errors scrub secrets and usage is exit 2', async () => {
   assert.equal(code, 2);
   assert.equal(JSON.parse(stderr.join('')).error.code, 'USAGE');
 });
+
+test('RHEA-190 step 5: the CLI identifies itself as a stable, URL-safe cli device', async () => {
+  const { cliDevice } = await import('../src/client.js');
+  const first = cliDevice('build box');
+  assert.deepEqual(first, cliDevice('build box'));
+  assert.match(first['x-dropit-device'], /^cli-[A-Za-z0-9_-]{16}$/);
+  assert.equal(first['x-dropit-device-kind'], 'cli');
+  assert.equal(decodeURIComponent(first['x-dropit-device-name']), 'build box');
+  assert.notEqual(cliDevice('other').id, first['x-dropit-device']);
+  assert.equal([...decodeURIComponent(cliDevice('x'.repeat(80))['x-dropit-device-name'])].length, 40);
+});

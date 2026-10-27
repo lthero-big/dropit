@@ -10,7 +10,8 @@ export type WatchMessage =
   | { type: 'item.created'; item: Item }
   | { type: 'item.updated'; item: Item }
   | { type: 'item.deleted'; id: string }
-  | { type: 'presence'; devices: number };
+  | { type: 'presence'; devices: number; peers?: { id: string; name: string; kind: string }[] }
+  | { type: 'groups'; groups: string[] };
 
 export function createWatchState(): WatchState {
   return { ready: false, items: new Map() };

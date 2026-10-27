@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { ApiError, cleanFilename, type Session, type Space, type UploadSession } from './domain.js';
+import { ApiError, cleanFilename, type ItemMeta, type Session, type Space, type UploadSession } from './domain.js';
 import type { ClipboardService } from './service.js';
 
 interface Work { controller: AbortController; done: Promise<void> }
@@ -86,7 +86,7 @@ export class UploadService {
       }
     }
   }
-  async complete(space: Space, session: Session | undefined, id: string) {
+  async complete(space: Space, session: Session | undefined, id: string, meta: ItemMeta = {}) {
     const upload = this.authorized(space, session, id);
     if (this.completing.has(id) || this.chunks.has(id)) throw new ApiError(409, 'UPLOAD_IN_PROGRESS');
     const completing = work();
@@ -101,7 +101,7 @@ export class UploadService {
           chunks.some((chunk, index) => chunk.size !== Math.min(upload.chunkSize, upload.size - index * upload.chunkSize))) throw new ApiError(400, 'UPLOAD_INCOMPLETE');
       body = files.concatenate(chunks.map(chunk => chunk.key));
       return await this.service.upload(space, session, body, upload.filename, upload.mime,
-        upload.size, id, completing.controller.signal);
+        upload.size, id, completing.controller.signal, meta);
     } finally {
       await body?.cancel().catch(() => {});
       try { repo.deleteUpload(id); }
