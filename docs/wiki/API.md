@@ -19,7 +19,8 @@
 | 认证 | `GET /auth/providers`、`GET /auth/:provider`、`GET /auth/:provider/callback`、`POST /auth/logout`、`GET /me`、`GET /invites/:token` |
 | 个人访问令牌 | `POST/GET /tokens`、`PATCH/DELETE /tokens/:id` |
 | 设备码登录 | `POST /auth/device/authorize`、`POST /auth/device/token`、`GET /auth/device`、`POST /auth/device/approve`、`POST /auth/device/deny` |
-| 管理 | `/admin/users`、`/admin/users/:id/logout`、`/admin/invites`、`/admin/tokens`、`/admin/limits`、`/admin/limits/audit` |
+| 登录设备 | `GET /sessions`、`DELETE /sessions/:id`、`POST /sessions/revoke-others`（仅浏览器会话） |
+| 管理 | `/admin/users`、`/admin/users/:id/logout`、`GET /admin/users/:id/sessions`、`DELETE /admin/sessions/:id`、`/admin/invites`、`/admin/tokens`、`/admin/limits`、`/admin/limits/audit` |
 | 空间与房间 | `GET /spaces`、`POST /rooms` |
 | 条目（`base` = `/spaces/:id` 或 `/rooms/:token`） | `GET base`、`GET base/items`、`POST base/items/text`、`POST base/items/file`、`PATCH base/items/:id`、`PATCH base/items/:id/labels`、`DELETE base/items/:id`、`GET base/items/:id/{download,thumbnail,preview,media}` |
 | 分组 | `GET/POST base/groups`、`PATCH/DELETE base/groups/:name` |
