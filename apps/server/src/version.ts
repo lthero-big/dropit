@@ -36,7 +36,7 @@ function gitCommit(cwd: string): string | null {
  * Build metadata, in priority order: DROPIT_* environment (Docker build-args become ENV),
  * then build-info.json written by `pnpm build`, then (development only) `git rev-parse`.
  */
-export function loadBuildInfo(env: NodeJS.ProcessEnv, file: unknown): BuildInfo {
+export function loadBuildInfo(env: NodeJS.ProcessEnv = process.env, file: unknown = null): BuildInfo {
   const stored = file && typeof file === 'object' && !Array.isArray(file) ? file as Record<string, unknown> : null;
   const install = (env.DROPIT_INSTALL?.trim() || stored?.install) as InstallKind;
   let commit = normalizeCommit(env.DROPIT_COMMIT) ?? normalizeCommit(stored?.commit);

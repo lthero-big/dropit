@@ -37,14 +37,15 @@ jobs:
         run: |
           echo "DROPIT_COMMIT=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
           echo "DROPIT_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "DROPIT_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"; fi
+          echo "DROPIT_VERSION=$(node -p 'require("./package.json").version')" >> "$GITHUB_ENV"
       - run: >-
           docker build -t dropit:ci
           --build-arg DROPIT_COMMIT --build-arg DROPIT_BUILD_DATE --build-arg DROPIT_VERSION .
       - name: image reports its build
         run: |
           docker image inspect dropit:ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -qx "$DROPIT_COMMIT"
-          docker run --rm dropit:ci node -e "import('./dist/version.js').then(m=>{const b=m.loadBuildInfo();console.log(JSON.stringify(b));if(b.commit!==process.env.DROPIT_COMMIT||b.install!=='docker')process.exit(1)})"
+          docker image inspect dropit:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' | grep -qx "$DROPIT_VERSION"
+          docker run --rm dropit:ci node -e "import('./dist/version.js').then(m=>{const b=m.loadBuildInfo(process.env,null);console.log(JSON.stringify(b));if(b.commit!==process.env.DROPIT_COMMIT||b.install!=='docker')process.exit(1)})"
 
   publish:
     name: publish image
@@ -68,12 +69,11 @@ jobs:
         if: env.HAS_HUB == 'true'
         run: |
           commit=$(git rev-parse --short=7 HEAD)
-          args=(--build-arg DROPIT_COMMIT="$commit" --build-arg DROPIT_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+          version=$(node -p 'require("./package.json").version')
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; fi
+          args=(--build-arg DROPIT_COMMIT="$commit" --build-arg DROPIT_VERSION="$version" --build-arg DROPIT_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)")
           tags=(-t "$IMAGE:$commit")
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            args+=(--build-arg DROPIT_VERSION="${GITHUB_REF_NAME#v}")
-            tags+=(-t "$IMAGE:${GITHUB_REF_NAME#v}")
-          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then tags+=(-t "$IMAGE:$version"); fi
           tags+=(-t "$IMAGE:latest")
           docker build "${args[@]}" "${tags[@]}" .
           for tag in "${tags[@]}"; do [[ "$tag" == -t ]] || docker push "$tag"; done
