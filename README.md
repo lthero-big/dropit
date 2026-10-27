@@ -1,14 +1,86 @@
+<div align="center">
+
+<img src="apps/web/public/favicon.svg" width="72" height="72" alt="dropit" />
+
 # dropit
 
-跨设备实时传递文本和文件的云剪贴板。前端按 Swiss 极简方案实现（登录、邀请、空间剪贴板、临时房间、管理后台、设备码确认 `/device`、令牌设置 `/settings`），文本只作纯文本渲染，WebSocket 断线后按指数退避重连并用 snapshot 补拉。登录失败会回到登录页，只显示固定的中文原因。文本可以就地修改，修改同步到同一空间，创建时间不变。
+**跨设备实时传递文本和文件的自托管云剪贴板**
 
-- 后端：Hono、SQLite WAL、本地磁盘、GitHub/Google OAuth（state + PKCE）、邀请制、服务器会话、私人/共享空间、临时房间、分享链接、限流与配额、缩略图、定时清理。
-- WebSocket 使用 `@hono/node-server` 2.x 内置接口（替代已废弃的 `@hono/node-ws`），仅允许经过授权的空间/房间订阅。
-- [API 与 WebSocket 契约](docs/api.md)供前端对接，[完整环境变量表](docs/backend-config.md)包含所有默认值、限额及生产配置。
+网页、命令行与临时房间共用一套实时 API：在一台设备上粘贴，其他设备立即看到。
 
-## 本地开发
+[![Docker Image Size](https://img.shields.io/docker/image-size/lthero1/dropit/latest?logo=docker&label=image)](https://hub.docker.com/r/lthero1/dropit)
+[![Docker Pulls](https://img.shields.io/docker/pulls/lthero1/dropit?logo=docker)](https://hub.docker.com/r/lthero1/dropit)
+![Node.js](https://img.shields.io/badge/node-%3E%3D22-339933?logo=node.js&logoColor=white)
+![pnpm](https://img.shields.io/badge/pnpm-11-F69220?logo=pnpm&logoColor=white)
 
-需要 Node.js 22+、pnpm 11。
+[功能](#功能) · [快速开始](#快速开始) · [部署](#生产部署) · [配置](#配置) · [命令行](#命令行) · [API](docs/api.md) · [开发](#开发)
+
+</div>
+
+---
+
+## 功能
+
+**剪贴板**
+
+- 文本与文件条目，WebSocket 实时同步到同一空间的所有设备；断线后指数退避重连，并用服务端 snapshot 补齐。
+- 私人空间（每个账号自动创建）与通过邀请加入的共享空间。
+- 文本可就地编辑（创建时间不变）；Markdown 可切换「渲染」视图，只渲染安全子集，不解析原始 HTML。
+- 标签（每条最多 8 个）、置顶、分组（每个空间最多 24 个），以及 Ctrl/⌘ K 命令面板搜索。
+- 条目记录来源设备（如 `Mac · Chrome`），方便分辨内容来自哪台设备。
+
+**文件**
+
+- 图片显示经 sharp 重编码的 WebP 缩略图和预览；视频、音频按文件头识别后才内联播放，支持拖动。
+- 下载支持单段 `Range` 断点续传；大文件走分片上传，可中断后续传。
+- SVG / HTML 不内联，上传时声明的 MIME 不被信任。
+
+**分享与临时房间**
+
+- 只读分享链接：有效期 1 小时 / 1 天 / 7 天 / 不过期，可限制查看次数，随时撤销；公开页面 `/s/<token>` 无需登录。
+- 临时房间：无需账号，持有房间链接即可读写，最长 24 小时；房间页可显示二维码供另一台设备扫码加入。
+
+**账号与管理**
+
+- GitHub / Google OAuth 登录（state + PKCE），无密码；邀请制注册，第一位登录者自动成为管理员。
+- 管理后台：用户（预创建、禁用、角色、单独配额、强制下线）、邀请、个人访问令牌，以及运行时限额（即时生效，带审计记录）。
+- 个人访问令牌（read / write 范围）与设备码登录（`/device`），供命令行和脚本使用。
+
+**命令行**
+
+- `dropit` CLI：设备码登录、发送文本、上传、列出、下载（`--jobs` 并行 Range）、删除、分享、`watch` 实时监听（可 `--exec` 触发脚本）、临时房间。
+
+**运维**
+
+- 单个 Node 进程 + SQLite（WAL）+ 本地磁盘，单镜像同时托管前端和 API。
+- 限流、配额、保留期、定时清理与删除重试队列；`/healthz` 健康检查。
+
+## 快速开始
+
+### Docker（推荐）
+
+镜像已发布在 Docker Hub：[`lthero1/dropit`](https://hub.docker.com/r/lthero1/dropit)。
+
+```bash
+docker run -d --name dropit \
+  -p 127.0.0.1:8787:8787 \
+  -e NODE_ENV=development \
+  -e APP_ORIGIN=http://localhost:8787 \
+  -v dropit-data:/data \
+  lthero1/dropit:latest
+```
+
+打开 <http://localhost:8787>。真实登录需要配置至少一个 OAuth provider，见 [OAuth 与首位管理员](#oauth-与首位管理员)；未登录时也可以直接创建临时房间。
+
+也可以从源码构建：
+
+```bash
+docker compose up --build        # 默认发布在 127.0.0.1:8787
+```
+
+### 从源码运行
+
+需要 Node.js 22+ 与 pnpm 11。
 
 ```bash
 pnpm install
@@ -16,106 +88,154 @@ cp .env.example .env
 pnpm dev
 ```
 
-浏览器访问 <http://localhost:5173>；Vite 将 `/api`（包括 WebSocket）及 `/healthz` 代理到后端 8787。`.env.example` 的 `APP_ORIGIN` 对应浏览器的 5173 origin。若直接访问后端，应设置 `APP_ORIGIN=http://localhost:8787`。开发环境自动读取仓库 `.env`，生产环境只读进程环境。
+浏览器访问 <http://localhost:5173>。Vite 把 `/api`（含 WebSocket）和 `/healthz` 代理到后端 8787；`.env.example` 中 `APP_ORIGIN` 已对应 5173。开发模式自动读取仓库根目录的 `.env`，生产模式只读进程环境变量。
 
-```bash
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
+## 生产部署
+
+生产环境要求 HTTPS：设 `NODE_ENV=production`（启用 Secure Cookie 与 HSTS），`APP_ORIGIN` 设为浏览器地址栏中的精确 origin，由反向代理终止 TLS。
+
+```yaml
+# compose.yml 示例
+services:
+  dropit:
+    image: lthero1/dropit:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"      # 只绑定回环，由反代对外
+    env_file: .env                 # OAuth 凭据等，不要提交到仓库
+    environment:
+      NODE_ENV: production
+      APP_ORIGIN: https://dropit.example.com
+      TRUST_PROXY: loopback        # 反代的 IP/CIDR；容器经 Docker 网关访问时填网关地址
+    volumes:
+      - dropit-data:/data
+volumes:
+  dropit-data:
 ```
 
-后端测试用 mock OAuth，无须真实凭据；包含真实 WebSocket、HTTP、SQLite、磁盘与安全用例。生产构建后可用 `pnpm --filter @dropit/server start` 托管 `apps/web/dist`，`/healthz` 可检查服务存活。
+nginx 反向代理要点（WebSocket 升级、请求体不小于上传分片、长连接超时）：
+
+```nginx
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+
+server {
+    listen 443 ssl;
+    server_name dropit.example.com;
+    client_max_body_size 30m;          # 需大于 UPLOAD_CHUNK_BYTES（默认 8 MiB，上限 24 MiB）
+
+    location / {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+    }
+}
+```
+
+注意事项：
+
+- 不要把 8787 直接发布到 `0.0.0.0`；所有写请求和 WebSocket 都校验精确 `Origin`。
+- `TRUST_PROXY` 只填真实反代地址；留空时忽略 `X-Forwarded-For`。
+- 数据（SQLite + 文件）都在 `/data`，务必挂载持久卷。备份请用 SQLite backup API，或停服后复制整个数据目录。
+- 本项目为单进程、单实例设计：限流、广播、在线人数驻留内存，不要多实例共享同一数据目录。
+- 纯 HTTP 内网使用时只能 `NODE_ENV=development`，且 `APP_ORIGIN` 必须与访问地址一致（如 `http://192.168.1.10:8787`）。
+
+## 配置
+
+所有配置通过环境变量提供，启动时校验；不合法的组合会直接拒绝启动。常用项：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `NODE_ENV` | `development` | `production` 启用 Secure Cookie 与 HSTS，并要求 HTTPS |
+| `APP_ORIGIN` | `http://localhost:$PORT` | 浏览器访问的精确 origin（无路径），OAuth 回调基于它 |
+| `PORT` / `HOST` | `8787` / `0.0.0.0` | 监听端口与地址 |
+| `DATA_DIR` | 仓库 `data/`（镜像为 `/data`） | SQLite 与文件存储目录 |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | 未设置 | 两者都设置才开放 GitHub 登录 |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | 未设置 | 两者都设置才开放 Google 登录 |
+| `ADMIN_EMAILS` | 空 | 可选，逗号分隔；这些已验证邮箱注册时也成为管理员 |
+| `TRUST_PROXY` | 空 | 受信任反代的 IP/CIDR（可用 `loopback`） |
+| `MAX_FILE_BYTES` | 26214400（25 MiB） | 单文件上限 |
+| `USER_QUOTA_BYTES` | 1073741824（1 GiB） | 每用户默认配额 |
+| `RETENTION_HOURS` | 168 | 空间条目保留时长 |
+| `ROOM_RETENTION_HOURS` | 24 | 临时房间保留时长（≤ 24） |
+
+完整列表（房间限额、限流、分片上传并发等 30 余项）及运行时覆盖规则见 [docs/backend-config.md](docs/backend-config.md)。管理员可以在后台修改大部分限额，即时生效并写入审计；优先级为 **SQLite 运行时覆盖 > 环境变量默认值**。
 
 ## OAuth 与首位管理员
 
-注册 GitHub OAuth App（`read:user user:email`）和 Google Web OAuth client（`openid email profile`），回调地址分别为：
+注册 GitHub OAuth App（`read:user user:email`）和/或 Google Web OAuth client（`openid email profile`），回调地址：
 
 - `${APP_ORIGIN}/api/auth/github/callback`
 - `${APP_ORIGIN}/api/auth/google/callback`
 
-只通过环境变量提供 `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`、`GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`。未配置的 provider 不开放登录。无密码入口，测试用 mock 不会作为生产登录接口开放。
-
-用户表里还没有任何人时，第一个成功登录的身份成为管理员。这一步在 SQLite `BEGIN IMMEDIATE` 事务里完成人数检查和建号，两个同时到达的首次登录只会有一个成为管理员。不需要事先配置 `ADMIN_EMAILS`。该变量可选、可叠加：之后新建且 provider 已验证邮箱命中列表的账号同样是管理员。其余新用户须通过有效邀请完成 OAuth，或由管理员按邮箱预创建（待首次已验证 OAuth 登录时绑定，不另建账号）。过期或无效的邀请不会拦住这第一个账号。不同 provider 的身份不按邮箱自动合并；预创建只绑定第一个匹配该邮箱的身份。会话为服务器保存的随机令牌，数据库仅存 SHA-256；不需要占位 `SESSION_SECRET`。
-
-## Docker（本机）
-
-单镜像托管前端静态文件和 API，数据必须持久化到 `/data`。只绑定回环地址：
-
-```bash
-docker build -t dropit .
-docker run --rm -p 127.0.0.1:8787:8787 \
-  -e NODE_ENV=development \
-  -e APP_ORIGIN=http://localhost:8787 \
-  -v dropit-data:/data dropit
-```
-
-或直接 `docker compose up --build`（未复制 `.env` 时默认 localhost:8787；已有 `.env` 时将 `APP_ORIGIN` 改为实际浏览器 origin）。默认 Compose 发布地址是 `127.0.0.1:8787`。
-
-## 私有部署
-
-仓库保持 private。不要改成 public，不要把 8787 发布到 `0.0.0.0`，也不要做路由器端口转发或公网 DNS。
-
-在私有主机上（示例地址 `192.168.1.152`，换成这台机器的内网地址）只绑定该地址：
-
-```bash
-docker build -t dropit .
-docker run --rm -p 192.168.1.152:8787:8787 \
-  -e NODE_ENV=development \
-  -e APP_ORIGIN=http://192.168.1.152:8787 \
-  -e ADMIN_EMAILS \
-  -e GITHUB_CLIENT_ID \
-  -e GITHUB_CLIENT_SECRET \
-  -e GOOGLE_CLIENT_ID \
-  -e GOOGLE_CLIENT_SECRET \
-  -v dropit-data:/data dropit
-```
-
-同一局域网的浏览器打开 `http://192.168.1.152:8787`。`APP_ORIGIN` 必须与浏览器地址栏的 origin 完全一致，OAuth 回调也要登记成这个 origin。纯 HTTP 只能用 `NODE_ENV=development`（生产模式要求 HTTPS）。若私有网前面有反代，反代终止 TLS 后设 `NODE_ENV=production`、`APP_ORIGIN=https://私有域名`，并把 `TRUST_PROXY` 设成该反代的 CIDR/IP，例如 `192.168.1.152/32`。默认忽略 `X-Forwarded-For`。不要用任意代理全信任配置。所有写请求及 WebSocket 都检查精确 Origin。
-
-没有下列环境变量时，真实登录起不来（测试仍用 mock，不需要这些值）：
-
-- `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`（两个都有才开放 GitHub）
-- `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`（两个都有才开放 Google）
-- `APP_ORIGIN`（浏览器实际 origin）
-- `ADMIN_EMAILS`（可选。留空即可：第一个成功登录的人成为管理员。填入已验证邮箱后，这些邮箱之后注册也会成为管理员）
-
-## 存储与维护
-
-`ClipboardService` 依赖 `Repository`、`FileStorage`、`Broadcaster` 接口，具体实现分别是 `repository.ts`、`files.ts`、`events.ts`；组合根为 `backend.ts` / `index.ts`。SQLite 驱动和 SQL 只存在于 repository，迁移使用 `user_version` 并在事务内执行。
-
-原始文件下载是带鉴权的 attachment，支持单段 `Range` 断点续传。图片预览只用 sharp 重编码的 WebP 缩略图。视频和音频另有 `/media`：服务端按文件头判断类型，忽略上传时声明的 MIME，并支持单段 `Range` 以便播放器拖动。SVG/HTML 不内联。上传流按实际字节限额，并在事务里核对配额。定时清理会删除过期记录和文件；删除失败保留队列待重试，进程中断遗留文件在一小时后回收。备份应使用 SQLite backup API，或停服后复制整个数据目录。
-
-## 分享链接
-
-条目作者或空间所有者可以为一条文本或文件生成只读链接；临时房间里，持有房间链接的人都可以生成和撤销。有效期为 1 小时、1 天、7 天或不过期，查看次数可以是一次、若干次或不限。公开页面在 `/s/<token>`，不需要登录。文件通过同一链接下载，图片缩略图同样走这条链接。令牌是 256 位随机值，数据库只存 SHA-256，创建时返回一次；未知、过期、撤销、用尽和格式不对都是同一个 `404`，没有枚举接口。
-
-链接本身设成「不过期」也不会比条目活得更久：保留期到了、房间关了、条目被撤回，链接一起失效。打开页面计一次查看；返回的 `access` 在 10 分钟内可以下载文件或缩略图，不再额外计数。直接请求文件地址、不带 `access`，这一次下载本身计一次查看。配额、登录和成员关系对创建、列出、撤销仍然生效。分享链接是能力凭据：局域网里拿到 URL 的人就能读。不要把 8787 暴露到公网。
-
-## 标签和置顶
-
-条目作者或空间所有者可以给文本和文件加最多 8 个标签，也可以置顶。临时房间里，持有房间链接的人都可以改。标签会随 `item.updated` 同步到同一空间的其他设备；列表按置顶在前、再按创建时间排列。搜索框会匹配标签文本，点一个标签可以只看带它的条目。改标签或置顶不改变创建时间，也不算一次文本编辑。已有数据库在启动时把这两列补上，旧条目标签为空、未置顶。
-
-## 文本和媒体预览
-
-文本默认按纯文本显示。内容像 Markdown 时可以切到「渲染」：只画标题、列表、引用、代码、强调和 `http`/`https` 链接，不解析原始 HTML，也不插入图片。图片条目显示缩略图。扩展名或声明类型像视频、音频时，播放器请求 `/media`；服务端确认文件头后才内联，否则该地址是 `404`，文件仍可下载。分享页使用同一次 `access`，不再额外计查看次数。
-
-在剪贴板或房间页按 Ctrl/⌘ K 打开命令面板，可以按文本、文件名和标签跳到一条内容，或把焦点放回输入框。临时房间页可以把当前房间地址画成二维码，方便另一台设备扫码打开同一个链接；二维码里只有这个地址，没有会话。侧栏「在线」显示当前这条 WebSocket 频道上的连接数，有人加入或离开时会更新。
-
-本期为单进程/单实例：限流、广播和在线人数都驻内存。网页对大于服务端分片的文件、命令行对不小于 256 KiB 的文件提供分片断点续传；命令行还可以用 `--jobs` 并行 `Range` 下载。普通下载支持单段 `Range`。没有多实例一致性。前端按 API 文档重连并用服务端 snapshot 替换本地列表。真实 OAuth 联调需要用户提供凭据，自动化用例均使用 mock。
+用户表为空时，第一个成功登录的身份成为管理员（在 SQLite `BEGIN IMMEDIATE` 事务中完成，并发首登只会产生一个管理员），无需预先配置 `ADMIN_EMAILS`。之后的新用户需持有效邀请，或由管理员按邮箱预创建（首次已验证 OAuth 登录时绑定）。不同 provider 的身份不会按邮箱自动合并。会话为服务端保存的随机令牌，数据库只存 SHA-256。
 
 ## 命令行
 
-`apps/cli` 提供命令 `dropit`（包名 `@dropit/cli`）。它覆盖设备码登录、发送文本、上传、列出、下载、删除、分享、实时监听和临时房间。个人访问令牌不会打印到终端；分享链接和房间链接是能力凭据，会打印出来。
+`apps/cli` 提供命令 `dropit`（包名 `@dropit/cli`，未发布到 npm registry，请从仓库安装）。
 
 ```bash
 pnpm --filter @dropit/cli build
 npm install -g ./apps/cli
-dropit login --url http://127.0.0.1:8787
+
+dropit login --url https://dropit.example.com   # 设备码登录，在浏览器批准
+dropit send "一行文本"
+dropit push ./photo.png ./large.bin             # ≥ 256 KiB 自动分片、可续传
+dropit ls
+dropit get latest -o ./downloads --jobs 4
+dropit share latest --expires 1d --max-views 1
+dropit watch --exec -- ./on-item.sh
+dropit room new
 ```
 
-未全局安装时，在仓库里运行 `npx --yes ./apps/cli --help`。用法、配置文件和环境变量见 [apps/cli/README.md](apps/cli/README.md)。
+脚本/CI 可用 `DROPIT_URL` + `DROPIT_TOKEN`（个人访问令牌）代替交互登录。完整用法见 [apps/cli/README.md](apps/cli/README.md)。
 
-## CI
+## API
 
-GitHub Actions 执行 lint、类型检查、测试、构建，并单独构建 Docker 镜像。
+同源 HTTP API 位于 `/api`，浏览器使用会话 Cookie，命令行和脚本使用 `Authorization: Bearer <PAT>`；实时事件通过 `.../ws` WebSocket 推送。端点、错误码、上传会话协议、分享链接和重连语义见 [docs/api.md](docs/api.md)。
+
+## 架构
+
+```
+apps/
+  server/   Hono + @hono/node-server 2.x，better-sqlite3（WAL），sharp，OAuth
+  web/      React 19 + React Router + Vite + Tailwind CSS 4
+  cli/      dropit 命令行客户端（TypeScript）
+docs/       API 契约、后端配置
+scripts/    浏览器 / Docker 验收脚本
+```
+
+- `ClipboardService` 依赖 `Repository`、`FileStorage`、`Broadcaster` 接口，实现分别在 `repository.ts`、`files.ts`、`events.ts`；组合根为 `backend.ts` / `index.ts`。
+- SQL 只存在于 repository；迁移使用 `user_version`，在事务内执行。
+- 上传按实际字节计数并在事务里核对配额；定时清理删除过期记录与文件，删除失败留在队列重试，中断遗留文件一小时后回收。
+
+## 安全
+
+- 无密码登录；OAuth 使用 state + PKCE，测试用 mock 登录不会在生产开放。
+- 会话、邀请、房间、分享、个人访问令牌均为随机值，数据库只存哈希。
+- Cookie 及匿名写请求校验精确 `Origin`；Bearer 请求不接受 Cookie 叠加权限；URL 中的令牌不被接受（分享/房间链接除外，它们本身就是能力凭据）。
+- 文本仅作纯文本或安全 Markdown 子集渲染；媒体按文件头白名单内联，原始文件以 attachment + `nosniff` 下载。
+- 分享链接与房间链接是能力凭据：拿到 URL 的人即可访问，请谨慎传播。
+
+## 开发
+
+```bash
+pnpm lint        # oxlint
+pnpm typecheck
+pnpm test        # 后端使用 mock OAuth，含真实 HTTP / WebSocket / SQLite / 磁盘用例
+pnpm build
+```
+
+生产构建后可用 `pnpm --filter @dropit/server start` 托管 `apps/web/dist`。GitHub Actions 在每次 push / PR 上执行 lint、类型检查、测试、构建，并单独构建 Docker 镜像。
+
+## 文档
+
+- [API 与 WebSocket 契约](docs/api.md)
+- [后端环境变量与运行时限额](docs/backend-config.md)
+- [命令行用法](apps/cli/README.md)
+- [Wiki 草稿](docs/wiki/Home.md)
