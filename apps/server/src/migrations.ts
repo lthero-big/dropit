@@ -158,3 +158,20 @@ UPDATE sessions SET id=lower(hex(randomblob(16))) WHERE id IS NULL;
 CREATE UNIQUE INDEX session_id ON sessions(id);
 PRAGMA user_version=11;
 `;
+
+// RHEA-190 m11: OAuth apps configurable from 设置, and several providers bound to
+// one account. clientSecret never leaves the server (the API only returns a
+// masked hint). identities gain the provider email and link time for display;
+// flows remember which signed-in user started a "bind" flow.
+export const migration12 = `
+CREATE TABLE oauth_apps (
+ provider TEXT PRIMARY KEY, clientId TEXT NOT NULL, clientSecret TEXT NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 1, updatedAt INTEGER NOT NULL, updatedBy TEXT,
+ checkedAt INTEGER, checkOk INTEGER, checkCode TEXT
+);
+ALTER TABLE identities ADD COLUMN email TEXT;
+ALTER TABLE identities ADD COLUMN linkedAt INTEGER;
+ALTER TABLE flows ADD COLUMN linkUserId TEXT;
+CREATE INDEX identity_user ON identities(userId);
+PRAGMA user_version=12;
+`;

@@ -12,7 +12,7 @@ import { parseByteRange, sniffMedia } from './media.js';
 import { SqliteRepository, type Repository } from './repository.js';
 import { DiskFileStorage, type FileStorage } from './files.js';
 import { MemoryBroadcaster, type Broadcaster } from './events.js';
-import { oauthProviders, type OAuthProvider } from './oauth.js';
+import { checkOAuthCredentials, createOAuthProvider, envOAuthApps, isSupportedProvider, providerInfo, supportedProviders, type OAuthProvider } from './oauth.js';
 import { ClipboardService } from './service.js';
 import { clientIpResolver, RateLimiter } from './rate-limit.js';
 import { limitRanges, RuntimeLimits } from './limits.js';
@@ -23,6 +23,10 @@ type Ctx = Context<Env>;
 export interface BackendOptions {
   config?: Config; repo?: Repository; files?: FileStorage; events?: Broadcaster;
   providers?: Record<string, OAuthProvider>; now?: () => number; remoteAddress?: (c: Context) => string;
+  /** Environment holding *_CLIENT_ID / *_CLIENT_SECRET (default process.env). */
+  oauthEnv?: NodeJS.ProcessEnv;
+  /** fetch used by OAuth adapters and the credential check (tests inject a mock). */
+  oauthFetch?: typeof fetch;
 }
 
 async function json(c: Ctx, limit: number): Promise<Record<string, unknown>> {
@@ -53,7 +57,12 @@ function string(value: unknown, max = 200): string {
 const oauthBrowserErrors = new Set([
   'OAUTH_STATE_INVALID', 'OAUTH_DENIED', 'OAUTH_PROVIDER_ERROR', 'INVITE_INVALID',
   'INVITATION_REQUIRED', 'USER_DISABLED', 'VERIFIED_EMAIL_REQUIRED', 'RATE_LIMITED', 'INTERNAL_ERROR',
+  'ACCOUNT_EXISTS', 'IDENTITY_IN_USE', 'PROVIDER_ALREADY_LINKED', 'UNAUTHENTICATED',
 ]);
+/** Shows that a secret is stored without revealing it (last 4 chars only for long secrets). */
+function maskSecret(secret: string) {
+  return secret.length >= 16 ? `••••••••${secret.slice(-4)}` : '••••••••';
+}
 function integer(value: unknown, min: number, max: number): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new ApiError(400, 'INVALID_INPUT');
   return value;
@@ -107,7 +116,28 @@ export function createBackend(options: BackendOptions = {}) {
   const limits = new RuntimeLimits(config, repo);
   const files = options.files ?? new DiskFileStorage(join(config.dataDir, 'files'));
   const events = options.events ?? new MemoryBroadcaster();
-  const providers = options.providers ?? oauthProviders();
+  const oauthEnv = options.oauthEnv ?? process.env;
+  const oauthFetch = options.oauthFetch ?? fetch;
+  // RHEA-190 m11: credentials saved in 设置 override the environment; a saved but
+  // disabled app turns that provider off. Resolved per request so saving needs no restart.
+  const oauthApps = () => {
+    const env = envOAuthApps(oauthEnv);
+    const stored = new Map(repo.oauthApps().map(app => [app.provider, app]));
+    return supportedProviders.map(provider => {
+      const db = stored.get(provider);
+      const source = db ? 'database' as const : env[provider] ? 'env' as const : 'none' as const;
+      const credentials = db ? { clientId: db.clientId, clientSecret: db.clientSecret } : env[provider];
+      return { provider, source, db, credentials, enabled: db ? Boolean(db.enabled) : Boolean(env[provider]) };
+    });
+  };
+  const activeProviders = (): Record<string, OAuthProvider> => {
+    if (options.providers) return options.providers;
+    const result: Record<string, OAuthProvider> = {};
+    for (const app of oauthApps()) if (app.enabled && app.credentials)
+      result[app.provider] = createOAuthProvider(app.provider, app.credentials.clientId, app.credentials.clientSecret, oauthFetch);
+    return result;
+  };
+  const callbackUrl = (provider: string) => `${config.origin}/api/auth/${provider}/callback`;
   const service = new ClipboardService(config, repo, files, events, now);
   const app = new Hono<Env>();
   const limiter = new RateLimiter(config.rateWindowMs);
@@ -179,7 +209,7 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND' } }, 404));
   app.get('/healthz', c => c.json({ status: 'ok' }));
-  app.get('/api/auth/providers', c => c.json({ providers: Object.keys(providers) }));
+  app.get('/api/auth/providers', c => c.json({ providers: Object.keys(activeProviders()) }));
   const browserSession = (c: Ctx) => {
     const auth = service.requireSession(c.get('session'));
     if (auth.bearer) throw new ApiError(403, 'BROWSER_SESSION_REQUIRED');
@@ -267,9 +297,18 @@ export function createBackend(options: BackendOptions = {}) {
   app.get('/api/auth/:provider', c => {
     limit(c, 'auth', config.rateAuth, false);
     const providerName = c.req.param('provider');
+    const providers = activeProviders();
     const provider = Object.hasOwn(providers, providerName) ? providers[providerName] : undefined;
     if (!provider) throw new ApiError(404, 'PROVIDER_UNAVAILABLE');
-    const invite = c.req.query('invite');
+    // ?link=1 binds this provider to the signed-in account instead of signing in.
+    // It needs a browser session; the callback re-checks that the same user is still signed in.
+    let linkUserId: string | null = null;
+    if (c.req.query('link') !== undefined) {
+      const auth = c.get('session');
+      if (!auth || auth.bearer) return c.redirect(`${config.origin}/login?error=UNAUTHENTICATED`);
+      linkUserId = auth.user.id;
+    }
+    const invite = linkUserId ? undefined : c.req.query('invite');
     const inviteHash = invite ? hash(invite) : null;
     const liveInvite = inviteHash ? repo.invite(inviteHash, now()) : undefined;
     // Invite-first applies after the installation has an account. An unknown
@@ -279,14 +318,16 @@ export function createBackend(options: BackendOptions = {}) {
     const browser = token();
     const verifier = token();
     repo.saveFlow({ stateHash: hash(state), browserHash: hash(browser), provider: providerName, verifier,
-      inviteHash: liveInvite ? inviteHash : null, expiresAt: now() + 600000 });
+      inviteHash: liveInvite ? inviteHash : null, expiresAt: now() + 600000, linkUserId });
     setCookie(c, flowCookie, browser, { ...cookie, path: '/api/auth', maxAge: 600 });
-    return c.redirect(provider.authorizationUrl(state, hash(verifier), `${config.origin}/api/auth/${providerName}/callback`));
+    return c.redirect(provider.authorizationUrl(state, hash(verifier), callbackUrl(providerName)));
   });
   app.get('/api/auth/:provider/callback', async c => {
+    let linking = false;
     try {
       limit(c, 'auth', config.rateAuth, false);
       const providerName = c.req.param('provider');
+      const providers = activeProviders();
       const provider = Object.hasOwn(providers, providerName) ? providers[providerName] : undefined;
       const state = c.req.query('state');
       const browser = getCookie(c, flowCookie);
@@ -294,21 +335,105 @@ export function createBackend(options: BackendOptions = {}) {
       const flow = repo.consumeFlow(hash(state), hash(browser), providerName, now());
       if (!flow) throw new ApiError(400, 'OAUTH_STATE_INVALID');
       deleteCookie(c, flowCookie, { ...cookie, path: '/api/auth' });
+      linking = Boolean(flow.linkUserId);
       const code = c.req.query('code');
       // Provider error text stays off the redirect. Only a fixed code is shown.
       if (!code || code.length > 4096 || c.req.query('error')) throw new ApiError(400, 'OAUTH_DENIED');
-      const identity = await provider.exchange(code, flow.verifier, `${config.origin}/api/auth/${providerName}/callback`);
+      const identity = await provider.exchange(code, flow.verifier, callbackUrl(providerName));
       if (identity.provider !== providerName) throw new ApiError(400, 'OAUTH_PROVIDER_ERROR');
       const retry = limiter.consume(`auth:identity:${hash(`${providerName}:${identity.subject}`)}`, config.rateAuth, now());
       if (retry) { c.header('Retry-After', String(retry)); throw new ApiError(429, 'RATE_LIMITED'); }
+      // A completed exchange proves id, secret and the registered callback URL.
+      if (!options.providers && repo.oauthApps().some(app => app.provider === providerName)) repo.recordOAuthCheck(providerName, true, 'LOGIN_OK', now());
+      if (flow.linkUserId) {
+        const auth = c.get('session');
+        // The browser that started the bind must still be signed in as the same user.
+        if (!auth || auth.bearer || auth.user.id !== flow.linkUserId) throw new ApiError(401, 'UNAUTHENTICATED');
+        const added = repo.linkIdentity(auth.user.id, identity, now());
+        return c.redirect(`${config.origin}/settings?${new URLSearchParams({ linked: providerName, ...(added ? {} : { already: '1' }) })}#login-methods`);
+      }
       const session = token();
       repo.login(identity, flow.inviteHash, config.adminEmails, hash(session), now() + config.sessionMs, now(),
         { userAgent: c.req.header('user-agent') ?? null, ipSummary: ipSummary(c.get('ip')) });
       setCookie(c, sessionCookie, session, { ...cookie, maxAge: Math.floor(config.sessionMs / 1000) });
       return c.redirect(`${config.origin}/`);
     } catch (error) {
+      if (linking) {
+        const code = error instanceof ApiError && oauthBrowserErrors.has(error.code) ? error.code : 'INTERNAL_ERROR';
+        return c.redirect(`${config.origin}/settings?link_error=${code}#login-methods`);
+      }
       return oauthFailure(c, error);
     }
+  });
+  // RHEA-190 m11: 登录方式 — several providers on one account.
+  app.get('/api/me/identities', c => {
+    const auth = browserSession(c);
+    return c.json({ identities: repo.identities(auth.user.id), available: Object.keys(activeProviders()) });
+  });
+  app.delete('/api/me/identities/:provider', c => {
+    const auth = browserSession(c);
+    limit(c, 'identity', config.rateAuth);
+    repo.unlinkIdentity(auth.user.id, c.req.param('provider'));
+    return c.body(null, 204);
+  });
+  // RHEA-190 m11: OAuth app configuration (admins). Secrets are write-only.
+  const oauthView = () => ({ origin: config.origin, providers: oauthApps().map(app => ({
+    provider: app.provider, label: providerInfo[app.provider].label,
+    consoleUrl: providerInfo[app.provider].consoleUrl, docsUrl: providerInfo[app.provider].docsUrl,
+    callbackUrl: callbackUrl(app.provider), homepageUrl: config.origin,
+    source: app.source, enabled: app.enabled, active: Object.hasOwn(activeProviders(), app.provider),
+    clientId: app.credentials?.clientId ?? '', secretSet: Boolean(app.credentials?.clientSecret),
+    secretHint: app.credentials?.clientSecret ? maskSecret(app.credentials.clientSecret) : null,
+    envConfigured: Boolean(envOAuthApps(oauthEnv)[app.provider]),
+    updatedAt: app.db?.updatedAt ?? null,
+    check: app.db?.checkedAt ? { at: app.db.checkedAt, ok: Boolean(app.db.checkOk), code: app.db.checkCode } : null,
+  })) });
+  const oauthProviderParam = (c: Ctx) => {
+    const provider = c.req.param('provider') ?? '';
+    if (!isSupportedProvider(provider)) throw new ApiError(404, 'PROVIDER_UNSUPPORTED');
+    return provider;
+  };
+  const adminBrowser = (c: Ctx) => {
+    const auth = service.admin(c.get('session'));
+    if (auth.bearer) throw new ApiError(403, 'BROWSER_SESSION_REQUIRED');
+    return auth;
+  };
+  app.get('/api/admin/oauth', c => { adminBrowser(c); return c.json(oauthView()); });
+  app.put('/api/admin/oauth/:provider', async c => {
+    const auth = adminBrowser(c);
+    limit(c, 'oauth-config', config.rateAuth);
+    const provider = oauthProviderParam(c);
+    const body = await json(c, 4096);
+    const clientId = string(typeof body.clientId === 'string' ? body.clientId.trim() : body.clientId, 256);
+    if (!/^[A-Za-z0-9._\-]+$/.test(clientId)) throw new ApiError(400, 'INVALID_CLIENT_ID');
+    let clientSecret: string | null = null;
+    if (body.clientSecret !== undefined && body.clientSecret !== null && body.clientSecret !== '') {
+      clientSecret = string(typeof body.clientSecret === 'string' ? body.clientSecret.trim() : body.clientSecret, 512);
+      if (/\s/.test(clientSecret)) throw new ApiError(400, 'INVALID_INPUT');
+    }
+    if (body.enabled !== undefined && typeof body.enabled !== 'boolean') throw new ApiError(400, 'INVALID_INPUT');
+    // Keeping the secret falls back to the environment one when the app is first copied from env.
+    if (clientSecret === null && !repo.oauthApps().some(app => app.provider === provider)) {
+      clientSecret = envOAuthApps(oauthEnv)[provider]?.clientSecret ?? null;
+    }
+    repo.saveOAuthApp({ provider, clientId, clientSecret, enabled: body.enabled !== false, now: now(), actor: auth.user.email });
+    return c.json(oauthView());
+  });
+  app.delete('/api/admin/oauth/:provider', c => {
+    adminBrowser(c);
+    limit(c, 'oauth-config', config.rateAuth);
+    repo.deleteOAuthApp(oauthProviderParam(c));
+    return c.json(oauthView());
+  });
+  app.post('/api/admin/oauth/:provider/verify', async c => {
+    adminBrowser(c);
+    limit(c, 'oauth-verify', 10);
+    const provider = oauthProviderParam(c);
+    const app = oauthApps().find(entry => entry.provider === provider)!;
+    if (!app.credentials) throw new ApiError(400, 'PROVIDER_UNAVAILABLE');
+    const result = await checkOAuthCredentials(provider, app.credentials.clientId, app.credentials.clientSecret, callbackUrl(provider), oauthFetch);
+    if (app.db) repo.recordOAuthCheck(provider, result.ok, result.code, now());
+    return c.json({ ...result, checkedAt: now(), source: app.source, ...oauthView() });
   });
   app.get('/api/me', c => {
     const auth = service.requireSession(c.get('session'));
