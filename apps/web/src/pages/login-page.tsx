@@ -51,18 +51,18 @@ export function LoginPage({ invite }: { invite?: string }) {
 
   return (
     <main className="mx-auto flex min-h-svh max-w-md flex-col justify-center px-6 py-16">
-      <p className="text-xs font-extrabold tracking-widest uppercase">云剪贴板</p>
-      <h1 className="mt-3 border-l-[14px] border-primary pl-4 text-6xl font-black tracking-tight">dropit</h1>
+      <p className="text-xs font-medium">云剪贴板</p>
+      <h1 className="mt-3 text-6xl font-semibold tracking-tight">dropit</h1>
       <p className="mt-4 text-sm text-muted-foreground">跨设备传递文本和文件。没有密码，使用 GitHub 或 Google 登录。</p>
-      <div className="mt-8 flex flex-col gap-3 border-t-2 border-foreground pt-6">
+      <div className="mt-8 flex flex-col gap-3 border-t border-line-1 pt-6">
         {loginError ? (
-          <p role="alert" className="border-l-4 border-primary bg-secondary px-3 py-2 text-sm">
+          <p role="alert" className="rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">
             {loginError}
           </p>
         ) : null}
         {providers === null ? <p className="text-sm text-muted-foreground">正在读取登录方式…</p> : null}
         {providers?.length === 0 ? (
-          <p className="border-l-4 border-primary bg-secondary px-3 py-2 text-sm">
+          <p className="rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">
             尚未配置 GitHub / Google。凭据通过环境变量提供，配置后刷新此页。
           </p>
         ) : null}

@@ -36,7 +36,7 @@ export function CommandPalette({ items, onJump }: { items: Item[]; onJump: (id: 
       <div
         role="dialog"
         aria-label="命令面板"
-        className="w-full max-w-xl border-2 border-foreground bg-background p-3"
+        className="w-full max-w-xl rounded-md border border-line-2 bg-background p-3"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <label className="sr-only" htmlFor="palette">
@@ -48,7 +48,7 @@ export function CommandPalette({ items, onJump }: { items: Item[]; onJump: (id: 
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="搜索文本、文件名或标签"
-          className="w-full border border-foreground bg-transparent px-3 py-2 text-sm outline-none"
+          className="w-full border border-line-2 bg-transparent px-3 py-2 text-sm outline-none"
         />
         <ul className="mt-2">
           <li>

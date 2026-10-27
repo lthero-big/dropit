@@ -69,7 +69,7 @@ export function HomePage() {
   if (status === 'error') {
     return (
       <main className="mx-auto max-w-md px-6 py-16">
-        <h1 className="text-3xl font-black">无法连接</h1>
+        <h1 className="text-3xl font-semibold">无法连接</h1>
         <Button type="button" className="mt-6" onClick={() => void refresh()}>
           重试
         </Button>

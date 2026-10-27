@@ -87,9 +87,9 @@ export function SharePanel({
   }
 
   return (
-    <div className="mt-3 border border-foreground p-3">
+    <div className="mt-3 border border-line-2 p-3">
       <div className="flex items-center gap-2">
-        <h3 className="text-xs font-extrabold tracking-widest uppercase">分享链接</h3>
+        <h3 className="text-xs font-medium">分享链接</h3>
         <button type="button" className="ml-auto text-xs" onClick={onClose}>
           关闭
         </button>
@@ -102,7 +102,7 @@ export function SharePanel({
             aria-label="有效期"
             value={expiresIn}
             onChange={(event) => setExpiresIn(event.target.value as (typeof expiryOptions)[number][0])}
-            className="mt-1 block border border-foreground bg-transparent px-2 py-1"
+            className="mt-1 block border border-line-2 bg-transparent px-2 py-1"
           >
             {expiryOptions.map(([value, label]) => (
               <option key={value} value={value}>
@@ -117,7 +117,7 @@ export function SharePanel({
             aria-label="查看次数"
             value={maxViews}
             onChange={(event) => setMaxViews(event.target.value)}
-            className="mt-1 block border border-foreground bg-transparent px-2 py-1"
+            className="mt-1 block border border-line-2 bg-transparent px-2 py-1"
           >
             {viewOptions.map(([value, label]) => (
               <option key={label} value={value}>
@@ -132,7 +132,7 @@ export function SharePanel({
       </div>
       {createdUrl ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <input readOnly aria-label="分享链接" value={createdUrl} className="min-w-0 flex-1 border border-foreground bg-transparent px-2 py-1 text-xs" />
+          <input readOnly aria-label="分享链接" value={createdUrl} className="min-w-0 flex-1 border border-line-2 bg-transparent px-2 py-1 text-xs" />
           <Button
             type="button"
             variant="outline"
@@ -152,8 +152,8 @@ export function SharePanel({
           const views = share.maxViews === null ? `${share.views} 次 · 不限` : `${share.views} / ${share.maxViews}`
           const expiry = share.expiresAt === null ? '链接本身不过期' : state === '已过期' ? '已过期' : `剩余 ${formatRemain(share.expiresAt - now)}`
           return (
-            <li key={share.id} className="flex flex-wrap items-center gap-2 border-t border-foreground py-2 text-xs">
-              <span className="font-extrabold">{state}</span>
+            <li key={share.id} className="flex flex-wrap items-center gap-2 border-t border-line-2 py-2 text-xs">
+              <span className="font-medium">{state}</span>
               <span className="text-muted-foreground">{views}</span>
               <span className="text-muted-foreground">{expiry}</span>
               {state === '有效' ? (

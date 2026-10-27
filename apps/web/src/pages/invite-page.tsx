@@ -29,9 +29,9 @@ export function InvitePage() {
   if (missing) {
     return (
       <main className="mx-auto flex min-h-svh max-w-md flex-col justify-center px-6">
-        <h1 className="border-l-[14px] border-primary pl-4 text-4xl font-black">邀请无效</h1>
+        <h1 className="text-4xl font-semibold">邀请无效</h1>
         <p className="mt-4 text-sm text-muted-foreground">链接已过期、已撤销或已用完。</p>
-        <Link to="/login" className="mt-6 text-sm font-extrabold tracking-widest uppercase">
+        <Link to="/login" className="mt-6 text-sm font-medium">
           返回登录
         </Link>
       </main>
@@ -44,7 +44,7 @@ export function InvitePage() {
 
   return (
     <div>
-      <p className="mx-auto mt-10 max-w-md border-l-4 border-primary bg-secondary px-3 py-2 text-sm">
+      <p className="mx-auto mt-10 max-w-md rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">
         登录成功后自动加入「{preview.spaceName === 'Private space' ? '私人空间' : preview.spaceName}」· 剩余 {preview.remainingUses} 次 ·{' '}
         {formatRemain(preview.expiresAt - now)}
       </p>

@@ -18,7 +18,7 @@ import { useSession } from '@/lib/session.tsx'
 import type { SpaceSummary } from '@/lib/types.ts'
 import { useTheme } from './theme-provider.tsx'
 
-const themeIconClass = 'inline-flex size-10 shrink-0 items-center justify-center border-2 border-foreground bg-background text-foreground hover:bg-foreground hover:text-background focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary'
+const themeIconClass = 'inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-line-2 bg-background text-foreground hover:bg-surface-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary'
 const menuItemClass = 'min-h-10 min-w-10 rounded-none px-3 text-sm font-bold tracking-normal normal-case'
 const menuItemStyle = { minHeight: 40, minWidth: 40 }
 const hitTarget = { minHeight: 40, minWidth: 40 }
@@ -87,9 +87,9 @@ export function Shell({
 
   return (
     <div className="min-h-svh bg-background text-foreground">
-      <header className="sticky top-0 z-20 border-b-2 border-foreground bg-background">
+      <header className="sticky top-0 z-20 border-b border-line-1 bg-background">
         <div className="mx-auto flex max-w-[1240px] items-center gap-x-3 gap-y-3 px-4 py-3 md:flex-wrap md:gap-x-5 md:px-8">
-          <Link to="/" className="shrink-0 text-[22px] font-black tracking-tight">
+          <Link to="/" className="shrink-0 text-[22px] font-semibold tracking-tight">
             dropit
           </Link>
           {me && current && onSpace ? (
@@ -108,11 +108,11 @@ export function Shell({
               </DropdownMenuContent>
             </DropdownMenu>
           ) : null}
-          <nav className="hidden items-center gap-4 text-xs font-extrabold tracking-widest uppercase md:flex">
-            <Link to="/" className={location.pathname === '/' ? 'border-b-2 border-primary' : ''}>
+          <nav className="hidden items-center gap-4 text-xs font-medium md:flex">
+            <Link to="/" className={location.pathname === '/' ? 'border-b border-primary' : ''}>
               剪贴板
             </Link>
-            <button type="button" className="inline-flex min-h-10 min-w-10 items-center uppercase" style={hitTarget} onClick={() => void newRoom()}>
+            <button type="button" className="inline-flex min-h-10 min-w-10 items-center" style={hitTarget} onClick={() => void newRoom()}>
               临时房间
             </button>
           </nav>
@@ -128,11 +128,11 @@ export function Shell({
                     aria-label="账户菜单"
                     aria-expanded={menuOpen}
                     aria-haspopup="menu"
-                    className="inline-flex h-10 min-h-10 min-w-10 max-w-[11rem] items-center gap-2 border-2 border-foreground bg-background px-1.5 text-foreground hover:bg-foreground hover:text-background focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                    className="inline-flex h-10 min-h-10 min-w-10 max-w-[11rem] items-center gap-2 rounded-md border border-line-2 bg-background px-1.5 text-foreground hover:bg-surface-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                     style={hitTarget}
                     onClick={() => setMenuOpen(true)}
                   >
-                    <span className="grid size-7 shrink-0 place-items-center bg-foreground text-xs font-black text-background" aria-hidden="true">
+                    <span className="grid size-7 shrink-0 place-items-center bg-foreground text-xs font-semibold text-background" aria-hidden="true">
                       {initial}
                     </span>
                   </button>
@@ -161,13 +161,13 @@ export function Shell({
                   <button
                     type="button"
                     aria-label="账户菜单"
-                    className="inline-flex h-10 min-h-10 min-w-10 max-w-[11rem] items-center gap-2 border-2 border-foreground bg-background px-1.5 text-foreground hover:bg-foreground hover:text-background focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                    className="inline-flex h-10 min-h-10 min-w-10 max-w-[11rem] items-center gap-2 rounded-md border border-line-2 bg-background px-1.5 text-foreground hover:bg-surface-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                     style={hitTarget}
                   >
-                    <span className="grid size-7 shrink-0 place-items-center bg-foreground text-xs font-black text-background" aria-hidden="true">
+                    <span className="grid size-7 shrink-0 place-items-center bg-foreground text-xs font-semibold text-background" aria-hidden="true">
                       {initial}
                     </span>
-                    <span className="hidden min-w-0 truncate text-xs font-extrabold tracking-wide lg:block">{displayName}</span>
+                    <span className="hidden min-w-0 truncate text-xs font-medium tracking-wide lg:block">{displayName}</span>
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="min-w-64 p-0" onCloseAutoFocus={(event) => event.preventDefault()}>
@@ -198,11 +198,11 @@ export function Shell({
         </div>
       </header>
       <div className="mx-auto max-w-[1240px] px-4 pt-6 pb-24 md:px-8 md:pb-12">{children}</div>
-      <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-2 border-t-2 border-foreground bg-background md:hidden">
-        <Link to="/" className="flex min-h-11 items-center justify-center text-xs font-extrabold tracking-widest uppercase">
+      <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-2 border-t border-line-1 bg-background md:hidden">
+        <Link to="/" className="flex min-h-11 items-center justify-center text-xs font-medium">
           剪贴板
         </Link>
-        <button type="button" className="min-h-11 min-w-10 text-xs font-extrabold tracking-widest uppercase" style={hitTarget} onClick={() => void newRoom()}>
+        <button type="button" className="min-h-11 min-w-10 text-xs font-medium" style={hitTarget} onClick={() => void newRoom()}>
           房间
         </button>
       </nav>
@@ -235,11 +235,11 @@ function AccountDrawer({
   return (
     <div className="fixed inset-0 z-50 flex items-end pb-16">
       <button type="button" aria-label="关闭账户菜单" className="absolute inset-0 bg-foreground/30" onClick={onClose} />
-      <div role="dialog" aria-label="账户" className="relative w-full border-t-2 border-foreground bg-popover p-3 pb-4">
+      <div role="dialog" aria-label="账户" className="relative w-full border-t border-line-1 bg-popover p-3 pb-4">
         <div className="px-3 py-3">
-          <p className="truncate text-sm font-black tracking-tight">{name}</p>
+          <p className="truncate text-sm font-semibold tracking-tight">{name}</p>
           <p className="mt-0.5 truncate text-xs font-medium text-muted-foreground">{email}</p>
-          <p className="mt-3 text-[10px] font-extrabold tracking-widest uppercase">配额</p>
+          <p className="mt-3 text-[10px] font-medium">配额</p>
           <p className="mt-1 text-xs font-bold">
             {formatBytes(usedBytes)} / {formatBytes(quotaBytes)}
           </p>
@@ -255,7 +255,7 @@ function AccountDrawer({
             <span className={`block h-full ${bar}`} style={{ width: `${ratio}%` }} />
           </span>
         </div>
-        <div className="mt-1 border-t-2 border-foreground pt-1">
+        <div className="mt-1 border-t border-line-1 pt-1">
           <button type="button" className={`${menuItemClass} flex w-full items-center gap-1.5`} style={menuItemStyle} onClick={() => onNavigate('/settings')}>
             <SettingsIcon className="size-4" aria-hidden="true" />
             设置
@@ -267,7 +267,7 @@ function AccountDrawer({
             </button>
           ) : null}
         </div>
-        <div className="mt-1 border-t-2 border-foreground pt-1">
+        <div className="mt-1 border-t border-line-1 pt-1">
           <button type="button" className={`${menuItemClass} flex w-full items-center gap-1.5 text-destructive`} style={menuItemStyle} onClick={onLogout}>
             <LogOutIcon className="size-4" aria-hidden="true" />
             退出
@@ -301,9 +301,9 @@ function AccountMenuBody({
   return (
     <>
       <DropdownMenuLabel className="px-3 py-3 text-foreground">
-        <span className="block truncate text-sm font-black tracking-tight normal-case">{name}</span>
+        <span className="block truncate text-sm font-semibold tracking-tight normal-case">{name}</span>
         <span className="mt-0.5 block truncate text-xs font-medium text-muted-foreground normal-case">{email}</span>
-        <span className="mt-3 block text-[10px] font-extrabold tracking-widest uppercase">配额</span>
+        <span className="mt-3 block text-[10px] font-medium">配额</span>
         <span className="mt-1 block text-xs font-bold normal-case">
           {formatBytes(usedBytes)} / {formatBytes(quotaBytes)}
         </span>
@@ -343,8 +343,8 @@ function AccountMenuBody({
 
 export function PageTitle({ title, sub }: { title: string; sub?: string }) {
   return (
-    <header className="mb-6 border-b-2 border-foreground pb-3">
-      <h1 className="border-l-[14px] border-primary pl-4 text-4xl font-black tracking-tight md:text-[56px] md:leading-none">
+    <header className="mb-6 border-b border-line-1 pb-3">
+      <h1 className="text-3xl font-semibold tracking-tight text-fg md:text-[40px] md:leading-none">
         {title}
       </h1>
       {sub ? <p className="mt-3 text-sm text-muted-foreground">{sub}</p> : null}

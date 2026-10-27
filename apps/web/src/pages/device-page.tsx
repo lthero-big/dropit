@@ -21,7 +21,7 @@ export function DevicePage() {
   if (status === 'error') {
     return (
       <main className="mx-auto max-w-md px-6 py-16">
-        <h1 className="text-3xl font-black">无法连接</h1>
+        <h1 className="text-3xl font-semibold">无法连接</h1>
         <Button type="button" className="mt-6" onClick={() => void refresh()}>
           重试
         </Button>
@@ -31,11 +31,11 @@ export function DevicePage() {
   if (!me) {
     return (
       <main className="mx-auto flex min-h-svh max-w-md flex-col justify-center px-6 py-16">
-        <p className="text-xs font-extrabold tracking-widest uppercase">设备登录</p>
-        <h1 className="mt-3 border-l-[14px] border-primary pl-4 text-4xl font-black tracking-tight">确认设备</h1>
-        {code ? <p className="mt-6 font-mono text-3xl font-black tracking-[0.3em]">{code}</p> : null}
+        <p className="text-xs font-medium">设备登录</p>
+        <h1 className="mt-3 text-4xl font-semibold tracking-tight">确认设备</h1>
+        {code ? <p className="mt-6 font-mono text-3xl font-semibold tracking-[0.3em]">{code}</p> : null}
         <p className="mt-4 text-sm text-muted-foreground">请先登录。登录后会回到此页，核对设备名和网络概要再允许。</p>
-        <Link to="/login" className="mt-6 inline-flex border-2 border-foreground px-3 py-2 text-xs font-extrabold tracking-widest uppercase">
+        <Link to="/login" className="mt-6 inline-flex rounded-md border border-line-2 px-3 py-2 text-xs font-medium">
           登录后继续
         </Link>
       </main>
@@ -47,7 +47,7 @@ export function DevicePage() {
       <PageTitle title="确认设备" sub="只批准你认识的终端。设备码十分钟内有效，且只能用一次。" />
       <DeviceConfirm initialCode={code} initialVerificationId={verificationId} auto />
       <p className="mt-6 text-sm">
-        <Link to="/settings" className="font-extrabold tracking-widest uppercase">
+        <Link to="/settings" className="font-medium">
           管理已有令牌
         </Link>
       </p>
