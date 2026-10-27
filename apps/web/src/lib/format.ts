@@ -1,13 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ConnectionStatus, SpaceSummary } from './types.ts'
-
-export const connectionText: Record<ConnectionStatus, string> = {
-  idle: '未连接',
-  connecting: '正在连接',
-  live: '在线',
-  reconnecting: '正在重连',
-  stopped: '已断开',
-}
+import type { SpaceSummary } from './types.ts'
 
 export function quotaTone(used: number, quota: number): 'ok' | 'warn' | 'over' {
   if (quota <= 0) return 'ok'

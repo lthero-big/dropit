@@ -15,6 +15,7 @@ import { HoldToConfirm, MediaViewer, type ViewerMedia } from '@/components/clip-
 import { CodeLines, GridBody, RowBody, shortLeft, type ClipVisual } from '@/components/clip-visual.tsx'
 import { ConfirmRetract } from '@/components/confirm-retract.tsx'
 import { SharePanel } from '@/components/share-panel.tsx'
+import { TagChip } from '@/components/tag-chip.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { MarkdownText } from '@/lib/markdown.tsx'
 import { AGING_WINDOW, clipKind, codeSource, parseColor, parseLink } from '@/lib/clip-kind.ts'
@@ -145,7 +146,17 @@ export type BoardCardProps = {
   /** RHEA-190 step 5: known groups; with onMoveGroup the footer shows a group badge */
   groups?: string[]
   onMoveGroup?: (group: string | null) => void
+  /**
+   * RHEA-190 step 7, pin-drag only: the pointer is at (x, y) while dragging;
+   * returns the group chip under it (or null). With `drop` the board files the
+   * card into that group and the drag is consumed.
+   */
+  onGroupDrag?: (x: number, y: number, drop: boolean) => string | null
 }
+
+/** While over a group chip the card shrinks into a small ghost that sits below-right of the pointer, so the chip's name stays readable. */
+export const GHOST_SCALE = 0.36
+const GHOST_OFFSET = { x: 22, y: 30 }
 
 export function BoardCard(props: BoardCardProps) {
   const { item, base, now, variant, gesture, reduced, sender, canEdit, canRetract, canShare, open, onOpen, copied, pending, editing } = props
@@ -158,6 +169,8 @@ export function BoardCard(props: BoardCardProps) {
   const copyHint = useTransform(x, [0, SWIPE], [0, 1])
   const undoHint = useTransform(x, [-SWIPE, 0], [1, 0])
   const overTrash = useRef(false)
+  const overGroup = useRef(false)
+  const grabAt = useRef({ x: 0, y: 0 })
   const dragged = useRef(false)
   const armedAtStart = useRef(false)
   const [hover, setHover] = useState(false)
@@ -234,12 +247,26 @@ export function BoardCard(props: BoardCardProps) {
     const px = info.point.x - window.scrollX
     const py = info.point.y - window.scrollY
     const trash = canRetract && (props.trashRef.current?.track(px, py) ?? false)
-    if (trash !== overTrash.current) {
+    const group = !trash && (props.onGroupDrag?.(px, py, false) ?? null) !== null
+    if (trash !== overTrash.current || group !== overGroup.current) {
       overTrash.current = trash
+      overGroup.current = group
       const el = cardRef.current
-      if (el && !reduced) void animate(el, trash ? { scale: 0.62, rotate: 4, opacity: 0.86 } : { scale: 1.04, rotate: -1.5, opacity: 1 }, springBounce)
+      if (el) {
+        if (group) {
+          // Shrink toward a point below-right of the pointer: scaling about origin O maps the grab point g to O + s(g - O),
+          // so O = g + offset / (1 - s) lands the grab point exactly `offset` away from the cursor.
+          const k = 1 / (1 - GHOST_SCALE)
+          el.style.transformOrigin = `${grabAt.current.x + GHOST_OFFSET.x * k}px ${grabAt.current.y + GHOST_OFFSET.y * k}px`
+        }
+        if (group) el.dataset.ghost = ''
+        else delete el.dataset.ghost
+        const pose = trash ? { scale: 0.62, rotate: 4, opacity: 0.86 } : group ? { scale: GHOST_SCALE, rotate: -4, opacity: 0.82 } : { scale: 1.04, rotate: -1.5, opacity: 1 }
+        if (reduced) void animate(el, { scale: pose.scale, opacity: pose.opacity }, { duration: 0 })
+        else void animate(el, pose, springBounce)
+      }
     }
-    props.onPinHover(canShare && !item.pinned && !trash && inside(props.pinBarRef.current, px, py))
+    props.onPinHover(canShare && !item.pinned && !trash && !group && inside(props.pinBarRef.current, px, py))
   }
 
   const handleDragEnd = (_: unknown, info: PanInfo) => {
@@ -264,6 +291,8 @@ export function BoardCard(props: BoardCardProps) {
     const py = info.point.y - window.scrollY
     const trash = canRetract && ((props.trashRef.current?.track(px, py) ?? false) || overTrash.current)
     overTrash.current = false
+    const wasGhost = overGroup.current
+    overGroup.current = false
     props.onPinHover(false)
     const mouth = props.trashRef.current?.mouth()
     const el = cardRef.current
@@ -282,6 +311,15 @@ export function BoardCard(props: BoardCardProps) {
     props.onDragPhase({ id: item.id, end: 'cancel' })
     window.clearTimeout(liftTimer.current)
     liftTimer.current = window.setTimeout(() => setLifted(false), 600)
+    const ghost = cardRef.current
+    if (ghost && wasGhost) {
+      delete ghost.dataset.ghost
+      // grow back while it snaps home; the origin resets once it is full size again
+      void animate(ghost, { scale: 1, rotate: 0, opacity: 1 }, reduced ? { duration: 0 } : springBounce).then(() => {
+        ghost.style.transformOrigin = ''
+      })
+    }
+    if ((props.onGroupDrag?.(px, py, true) ?? null) !== null) return
     const overBar = inside(props.pinBarRef.current, px, py)
     if (!canShare) return
     if (overBar && !item.pinned) props.onPin(true)
@@ -402,6 +440,8 @@ export function BoardCard(props: BoardCardProps) {
           transition={springBounce}
           onPointerDown={(event) => {
             if (gesture !== 'pin-drag' || !canDrag || event.button !== 0 || event.pointerType === 'touch' || isInteractive(event.target)) return
+            const r = event.currentTarget.getBoundingClientRect()
+            grabAt.current = { x: event.clientX - r.left, y: event.clientY - r.top }
             controls.start(event)
           }}
           onHoverStart={() => setHover(true)}
@@ -457,18 +497,12 @@ export function BoardCard(props: BoardCardProps) {
             )}
           </div>
           {tags.length > 0 || props.tagOpen ? (
-            <div className="flex flex-wrap items-center gap-1 px-2 pb-1">
-              {tags.map((name) => (
-                <button
-                  key={name}
-                  type="button"
-                  className="inline-flex min-h-10 min-w-10 items-center justify-center px-0.5"
-                  style={touchTarget}
-                  onClick={() => props.onTag(name)}
-                >
-                  <span className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors duration-(--dur-fast) ${props.activeTag === name ? 'border-[var(--brand)] bg-[var(--brand)] text-[var(--brand-fg)]' : 'border-[var(--line-2)] text-[var(--fg-2)] hover:border-[var(--line-3)] hover:text-[var(--fg)]'}`}>#{name}</span>
-                </button>
-              ))}
+            <div className="flex min-h-10 flex-wrap items-center gap-1 px-2 pb-1" data-tag-row="">
+              <AnimatePresence initial={false} mode="popLayout">
+                {tags.map((name) => (
+                  <TagChip key={name} name={name} active={props.activeTag === name} reduced={reduced} onFilter={() => props.onTag(name)} onRemove={canShare ? () => props.onRemoveTag(name) : undefined} />
+                ))}
+              </AnimatePresence>
             </div>
           ) : null}
           {props.tagOpen ? (
@@ -492,11 +526,9 @@ export function BoardCard(props: BoardCardProps) {
               <Button type="submit" size="sm">
                 添加
               </Button>
-              {tags.map((name) => (
-                <Button key={name} type="button" variant="outline" size="sm" onClick={() => props.onRemoveTag(name)}>
-                  移除 #{name}
-                </Button>
-              ))}
+              <Button type="button" variant="ghost" size="sm" onClick={props.onToggleTag}>
+                完成
+              </Button>
             </form>
           ) : null}
           <footer className={`flex items-center gap-2 border-t border-[var(--line-1)] py-2 pl-3 ${aging ? 'pr-6' : 'pr-3'} text-[11px] text-[var(--fg-3)]`}>

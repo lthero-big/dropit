@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText, loginErrorText } from '@/lib/api.ts'
+import { openTempRoom } from '@/lib/temp-room.ts'
 import { takeReturn } from '@/lib/machine.ts'
 import { useSession } from '@/lib/session.tsx'
 import { Logo } from '@/components/logo.tsx'
@@ -39,7 +40,7 @@ export function LoginPage({ invite }: { invite?: string }) {
   async function createRoom() {
     setBusy(true)
     try {
-      const room = await api<{ token: string }>('/api/rooms', { method: 'POST' })
+      const room = await openTempRoom()
       navigate(`/rooms/${room.token}`)
     } catch (error) {
       toast.error(errorText(error))

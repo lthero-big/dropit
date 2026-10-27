@@ -18,7 +18,7 @@ import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
 import { adoptResume, browserResumeStore, browserTransport, discardSession, discardUpload, matchResumeFile, receivedRatio, uploadMaybeChunked, type ChunkTransport, type ResumeRecord, type ResumeStore } from '@/lib/chunked-upload.ts'
 import { useChannel } from '@/lib/channel.ts'
 import { PRESENCE_SLOT, deviceColor, itemHeaders, localDevice, setUploadGroup } from '@/lib/device.ts'
-import { groupName } from '@/lib/groups.ts'
+import { chipAt, groupName } from '@/lib/groups.ts'
 import { CLAIMS_KEY, claimUpload, heartbeatUploads, ownsUpload, releaseUploads, tabId } from '@/lib/upload-claims.ts'
 import { createUploadQueue, type UploadQueue, type UploadRow } from '@/lib/upload-queue.ts'
 import { copyText, formatBytes, formatRemain, quotaTone, useClock, utf8Size } from '@/lib/format.ts'
@@ -173,6 +173,10 @@ export function ClipboardBoard({
   const [groupFilter, setGroupFilter] = useState<GroupFilter>(null)
   const [target, setTarget] = useState('')
   const [groupPulse, setGroupPulse] = useState<Record<string, number>>({})
+  // RHEA-190 step 7: drag a card straight onto a group chip (desktop pin-drag)
+  const [dragging, setDragging] = useState(false)
+  const [groupHover, setGroupHover] = useState<string | null>(null)
+  const chipEls = useRef(new Map<string, HTMLElement>())
   const docked = useDockedComposer()
   const [composerFocus, setComposerFocus] = useState(false)
   const [collapsed, setCollapsed] = useScrollCollapse(docked, composerFocus || draft.trim().length > 0 || dragOver || sending)
@@ -788,6 +792,8 @@ export function ClipboardBoard({
 
   function onDragPhase(phase: DragPhase) {
     window.clearTimeout(gulpTimer.current)
+    setDragging('rect' in phase)
+    if (!('rect' in phase)) setGroupHover(null)
     if ('rect' in phase) {
       setOpenCard(null)
       setTrash({ anchor: trashAnchorFor(phase.rect), gulp: false })
@@ -799,6 +805,22 @@ export function ClipboardBoard({
     }
     setTrash((current) => (current ? { ...current, gulp: true } : current))
     gulpTimer.current = window.setTimeout(() => setTrash(null), 560)
+  }
+
+  /**
+   * Which group chip the dragged card's pointer is over ('' = 未分组), with a
+   * generous hit area around each chip. With `drop` it also files the card there.
+   */
+  function onGroupDrag(item: Item, x: number, y: number, drop: boolean): string | null {
+    const hit = chipAt([...chipEls.current].map(([key, el]) => [key, el.getBoundingClientRect()] as const), x, y)
+    setGroupHover(drop ? null : hit)
+    if (drop && hit !== null) {
+      if ((item.group ?? '') !== hit) {
+        moveToGroup(item, hit || null)
+        toast(hit ? `已移到「${hit}」` : '已移出分组')
+      }
+    }
+    return hit
   }
 
   function copyValue(item: Item): string {
@@ -1002,6 +1024,7 @@ export function ClipboardBoard({
         imageOpen={openId === item.id}
         groups={groups}
         onMoveGroup={canShare(item) && (groups.length > 0 || item.group) ? (group) => moveToGroup(item, group) : undefined}
+        onGroupDrag={gesture === 'pin-drag' && canShare(item) && groups.length > 0 ? (x, y, drop) => onGroupDrag(item, x, y, drop) : undefined}
       />
     )
   }
@@ -1032,6 +1055,7 @@ export function ClipboardBoard({
           void saveLabels(item, { tags: [...(item.tags ?? []), next] })
           setTagDraft('')
         }}
+        onRemoveTag={(name) => void saveLabels(item, { tags: (item.tags ?? []).filter((tag) => tag !== name) })}
         onCopy={() => copyItem(item)}
         onUnpin={() => {
           setOpenCard(null)
@@ -1148,7 +1172,7 @@ export function ClipboardBoard({
             </button>
             {groups.length > 0 ? (
               <span className="flex min-h-10 items-center">
-                <GroupTarget groups={groups} value={target} onChange={setTarget} compact={docked} />
+                <GroupTarget groups={groups} value={target} onChange={setTarget} compact={docked} reduced={reduced} />
               </span>
             ) : null}
             <label className="sr-only" htmlFor="draft">
@@ -1218,7 +1242,7 @@ export function ClipboardBoard({
   const onlineIds = new Set(dots.filter((dot) => dot.online).map((dot) => dot.key))
 
   return (
-    <section className={docked ? 'pb-[calc(76px+env(safe-area-inset-bottom))]' : undefined}>
+    <section className={`dd-noselect ${docked ? 'pb-[calc(76px+env(safe-area-inset-bottom))]' : ''}`} data-board-root="">
       <div className="flex flex-col gap-4">
         <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <h1 className="dd-display text-[19px] font-semibold tracking-tight text-fg">{title}</h1>
@@ -1257,10 +1281,13 @@ export function ClipboardBoard({
                   counts={groupCounts}
                   total={looseAll.length}
                   reduced={reduced}
-                  dragging={false}
-                  dropHover={null}
+                  dragging={dragging && gesture === 'pin-drag' && groups.length > 0}
+                  dropHover={groupHover}
                   pulse={groupPulse}
-                  chipRef={() => {}}
+                  chipRef={(key, el) => {
+                    if (el) chipEls.current.set(key, el)
+                    else chipEls.current.delete(key)
+                  }}
                   onFilter={setGroupFilter}
                   onCreate={createGroup}
                   onRename={renameGroup}

@@ -12,7 +12,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu.tsx'
-import { api, errorText } from '@/lib/api.ts'
+import { errorText } from '@/lib/api.ts'
+import { openTempRoom } from '@/lib/temp-room.ts'
 import { formatBytes, quotaTone, spaceLabel } from '@/lib/format.ts'
 import { useSession } from '@/lib/session.tsx'
 import type { SpaceSummary } from '@/lib/types.ts'
@@ -80,7 +81,7 @@ export function Shell({
 
   async function newRoom() {
     try {
-      const room = await api<{ token: string }>('/api/rooms', { method: 'POST' })
+      const room = await openTempRoom()
       navigate(`/rooms/${room.token}`)
     } catch (error) {
       toast.error(errorText(error))
@@ -89,7 +90,7 @@ export function Shell({
 
   return (
     <div className="min-h-svh bg-background text-foreground">
-      <header className="sticky top-0 z-40 border-b border-line-1 bg-[color-mix(in_oklab,var(--bg)_82%,transparent)] backdrop-blur-md">
+      <header className="dd-noselect sticky top-0 z-40 border-b border-line-1 bg-[color-mix(in_oklab,var(--bg)_82%,transparent)] backdrop-blur-md">
         <div className="mx-auto flex min-h-14 max-w-[1120px] items-center gap-x-2 px-3 py-1.5 sm:gap-x-3 sm:px-6">
           <Link to="/" aria-label="dropit" className="flex min-h-10 shrink-0 items-center no-underline">
             <Logo />

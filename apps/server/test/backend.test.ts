@@ -13,7 +13,7 @@ import sharp from 'sharp';
 import { createBackend } from '../src/backend.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { ApiError, hash, type Identity } from '../src/domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8 } from '../src/migrations.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9 } from '../src/migrations.js';
 import type { OAuthProvider } from '../src/oauth.js';
 import { parseByteRange, sniffMedia } from '../src/media.js';
 import { SqliteRepository } from '../src/repository.js';
@@ -1389,4 +1389,67 @@ test('RHEA-190 step 5: migration 9 keeps existing items ungrouped with no device
   repo.createGroup('s1', '旧组', 3, 24);
   assert.equal(repo.updateLabels('i1', { group: '旧组' }, 4).group, '旧组');
   assert.throws(() => repo.updateLabels('i1', { group: '没有' }, 4), /GROUP_NOT_FOUND/);
+});
+
+test('RHEA-190 step 7: one live temporary room per browser key', async t => {
+  const f = await fixture({ rateRoom: 2 }); t.after(() => f.dispose());
+  const key = 'k'.repeat(43);
+  const first = await f.json('/api/rooms', { deviceKey: key });
+  assert.equal(first.status, 201);
+  const room = await first.json();
+  assert.equal(room.reused, false);
+  assert.equal(Buffer.from(room.token, 'base64url').length, 32);
+  // clicking 临时房间 again from the same browser re-enters the same live room,
+  // and doing so does not spend the room-create rate limit
+  for (let i = 0; i < 5; i++) {
+    const again = await f.json('/api/rooms', { deviceKey: key });
+    assert.equal(again.status, 200);
+    const body = await again.json();
+    assert.equal(body.token, room.token);
+    assert.equal(body.expiresAt, room.expiresAt);
+    assert.equal(body.reused, true);
+  }
+  assert.equal((await f.request(`/api/rooms/${room.token}`)).status, 200);
+  // another browser gets its own room
+  const other = await f.json('/api/rooms', { deviceKey: 'o'.repeat(43) });
+  assert.equal(other.status, 201);
+  assert.notEqual((await other.json()).token, room.token);
+  // malformed keys are rejected; keyless requests still mint an unbound room
+  for (const bad of ['short', 'x'.repeat(129), 'has space'.padEnd(40, 'x'), 42]) {
+    assert.equal((await f.json('/api/rooms', { deviceKey: bad })).status, 400);
+  }
+  // the room list never leaks the binding
+  const user = await f.admin();
+  const spaces = await (await f.request('/api/spaces', {}, user.cookie)).json();
+  assert.ok(spaces.spaces.every((space: Record<string, unknown>) => !('deviceHash' in space)));
+  // only after the old room expires does the same browser get a new one
+  f.advance(86400001);
+  assert.equal((await f.request(`/api/rooms/${room.token}`)).status, 404);
+  const fresh = await f.json('/api/rooms', { deviceKey: key });
+  assert.equal(fresh.status, 201);
+  const next = await fresh.json();
+  assert.notEqual(next.token, room.token);
+  assert.equal((await f.json('/api/rooms', { deviceKey: key })).status, 200);
+  assert.equal((await (await f.json('/api/rooms', { deviceKey: key })).json()).token, next.token);
+});
+
+test('RHEA-190 step 7: migration 10 adds the per-browser room binding to old databases', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dropit-m10-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'db.sqlite');
+  const db = new Database(path);
+  for (const migration of [migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9]) db.exec(migration);
+  assert.equal(db.pragma('user_version', { simple: true }), 9);
+  db.prepare("INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES ('s1','room',NULL,9999999999999,'rh')").run();
+  db.close();
+  const repo = new SqliteRepository(path);
+  t.after(() => repo.close());
+  assert.equal(repo.room('rh', 1)?.id, 's1');
+  assert.equal(repo.deviceRoom('dh', 1), undefined);
+  repo.createRoom({ id: 's2', name: 'Temporary room', ownerId: null, expiresAt: 9999999999999, roomHash: 'rh2' }, 'dh');
+  assert.equal(repo.deviceRoom('dh', 1)?.id, 's2');
+  assert.equal(repo.deviceRoom('dh', 9999999999999), undefined);
+  const check = new Database(path, { readonly: true });
+  t.after(() => check.close());
+  assert.equal(check.pragma('user_version', { simple: true }), 10);
 });

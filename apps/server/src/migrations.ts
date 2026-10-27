@@ -134,3 +134,11 @@ ALTER TABLE items ADD COLUMN deviceKind TEXT;
 CREATE INDEX item_group ON items(spaceId,groupName);
 PRAGMA user_version=9;
 `;
+
+// Step 7 (RHEA-190): a browser keeps one temporary room at a time. deviceHash
+// is sha256 of the browser's secret room key; only live rooms may hold it.
+export const migration10 = `
+ALTER TABLE spaces ADD COLUMN deviceHash TEXT;
+CREATE UNIQUE INDEX room_device ON spaces(deviceHash) WHERE deviceHash IS NOT NULL;
+PRAGMA user_version=10;
+`;

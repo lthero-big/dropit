@@ -412,9 +412,24 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.get('/api/spaces', c => {
     const auth = service.requireSession(c.get('session'));
-    return c.json({ spaces: repo.spaces(auth.user.id).map(({ roomHash: _room, ...space }) => space) });
+    return c.json({ spaces: repo.spaces(auth.user.id).map(({ roomHash: _room, deviceHash: _device, ...space }) => space) });
   });
-  app.post('/api/rooms', c => { limit(c, 'room-create', config.rateRoom); return c.json(service.createRoom(), 201); });
+  // RHEA-190 step 7: browsers send their secret room key so 临时房间 re-enters the
+  // one live room they already have instead of minting a new room per click.
+  app.post('/api/rooms', async c => {
+    let deviceKey: string | undefined;
+    if (c.req.header('content-type')?.startsWith('application/json')) {
+      const body = await json(c, 2048);
+      if (body.deviceKey !== undefined) {
+        if (typeof body.deviceKey !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(body.deviceKey)) throw new ApiError(400, 'INVALID_INPUT');
+        deviceKey = body.deviceKey;
+      }
+    }
+    const existing = deviceKey ? service.deviceRoom(deviceKey) : null;
+    if (existing) return c.json(existing, 200);
+    limit(c, 'room-create', config.rateRoom);
+    return c.json(service.createRoom(deviceKey), 201);
+  });
   const shareLimit = (c: Ctx, raw: string) => {
     limit(c, 'share', config.rateAuth, false);
     limit(c, `share:${hash(raw).slice(0, 32)}`, config.rateUpload, false);

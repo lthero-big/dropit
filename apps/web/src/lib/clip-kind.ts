@@ -3,17 +3,6 @@ import type { Item } from '@/lib/types.ts'
 
 export type ClipKind = 'link' | 'color' | 'code' | 'text' | 'image' | 'video' | 'audio' | 'file'
 
-export const clipKindLabel: Record<ClipKind, string> = {
-  link: '链接',
-  color: '色值',
-  code: '代码',
-  text: '文本',
-  image: '图片',
-  video: '视频',
-  audio: '音频',
-  file: '文件',
-}
-
 const COLOR = /^(#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})|(?:rgba?|hsla?|oklch|oklab|lab|lch)\([^()\n]{1,60}\))$/i
 const CODE_HINTS = [
   /^\s*(?:import|export|const|let|var|function|class|def|return|if|for|while|package|#include|using|SELECT|INSERT|UPDATE)\b/m,

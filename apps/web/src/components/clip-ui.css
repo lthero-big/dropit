@@ -13,6 +13,22 @@
   --radius-lg: 10px;
 }
 
+/*
+ * RHEA-190 step 7: like the demo, dragging the mouse across the board never
+ * paints a text selection (cards are dragged / tapped, copying uses the copy
+ * button). Anything you type into stays selectable.
+ */
+.dd-noselect {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.dd-noselect :is(input, textarea, select, [contenteditable]:not([contenteditable="false"]), .dd-selectable) {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
 .dd-display {
   font-family: "Geist Variable", "Noto Sans SC Variable", "PingFang SC", system-ui, sans-serif;
 }
@@ -21,11 +37,6 @@
   font-feature-settings: "zero";
 }
 
-.dd-surface {
-  background: var(--surface-1);
-  border: 1px solid var(--line-1);
-  box-shadow: var(--elev-1);
-}
 .dd-chip {
   display: inline-flex;
   align-items: center;

@@ -12,6 +12,7 @@ import { DeviceGlyph } from '@/components/device-glyph.tsx'
 import type { PresenceDot } from '@/lib/board-hooks.ts'
 import { deviceColor } from '@/lib/device.ts'
 import { useIsolatePointer } from '@/components/clip-media.tsx'
+import { TagChip } from '@/components/tag-chip.tsx'
 import type { ClipVisual } from '@/components/clip-visual.tsx'
 import { groupColor, groupName } from '@/lib/groups.ts'
 import { dur, easeIn, springBounce, springSettle, springTether } from '@/lib/motion.ts'
@@ -184,6 +185,7 @@ export function PinChip(props: {
   onToggleTag: () => void
   onTagDraft: (value: string) => void
   onAddTag: () => void
+  onRemoveTag?: (name: string) => void
 }) {
   const { item, visual, reduced, open, copied, canLabel } = props
   const [pull, setPull] = useState(0)
@@ -253,15 +255,7 @@ export function PinChip(props: {
             className="flex items-center gap-0.5 overflow-hidden"
           >
             {tags.map((name) => (
-              <button
-                key={name}
-                type="button"
-                data-action=""
-                onClick={() => props.onTag(name)}
-                className={`mx-0.5 shrink-0 whitespace-nowrap rounded-full border px-1.5 py-px text-[10.5px] ${props.activeTag === name ? 'border-[var(--brand)] bg-[var(--brand)] text-[var(--brand-fg)]' : 'border-[var(--line-2)] text-[var(--fg-2)] hover:border-[var(--line-3)]'}`}
-              >
-                #{name}
-              </button>
+              <TagChip key={name} compact name={name} active={props.activeTag === name} reduced={reduced} onFilter={() => props.onTag(name)} onRemove={canLabel && props.onRemoveTag ? () => props.onRemoveTag?.(name) : undefined} />
             ))}
             {item.kind === 'text' || item.kind === 'file' ? (
               <ChipAction label={copied ? '已复制' : '复制'} onClick={props.onCopy}>

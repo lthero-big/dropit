@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ApiError, type AccessToken, type DeviceAuthorization, type Flow, type Identity, type Invite, type Item, type ItemDevice, type Session, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9 } from './migrations.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10 } from './migrations.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
 type UserRow = User & { quotaBytes: number | null };
@@ -60,7 +60,9 @@ export interface Repository {
   spaces(userId: string): Space[];
   space(id: string): Space | undefined;
   room(roomHash: string, now: number): Space | undefined;
-  createRoom(space: Space): void;
+  createRoom(space: Space, deviceHash?: string | null): void;
+  /** the live temporary room bound to this browser, if any */
+  deviceRoom(deviceHash: string, now: number): Space | undefined;
   isMember(spaceId: string, userId: string): boolean;
   invite(tokenHash: string, now: number): Invite | undefined;
   createInvite(invite: Invite): void;
@@ -108,8 +110,8 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 9) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 9) this.db.transaction(() => {
+    if (version > 10) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 10) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
@@ -118,7 +120,8 @@ export class SqliteRepository implements Repository {
       if (version < 6) this.db.exec(migration6);
       if (version < 7) this.db.exec(migration7);
       if (version < 8) this.db.exec(migration8);
-      this.db.exec(migration9);
+      if (version < 9) this.db.exec(migration9);
+      this.db.exec(migration10);
     })();
   }
   limitOverrides(): LimitOverrides {
@@ -331,7 +334,17 @@ export class SqliteRepository implements Repository {
   spaces(userId: string) { return this.db.prepare('SELECT s.* FROM spaces s JOIN members m ON m.spaceId=s.id WHERE m.userId=?').all(userId) as Space[]; }
   space(id: string) { return this.db.prepare('SELECT * FROM spaces WHERE id=?').get(id) as Space | undefined; }
   room(roomHash: string, now: number) { return this.db.prepare('SELECT * FROM spaces WHERE roomHash=? AND expiresAt>?').get(roomHash, now) as Space | undefined; }
-  createRoom(space: Space) { this.db.prepare('INSERT INTO spaces VALUES (@id,@name,@ownerId,@expiresAt,@roomHash)').run(space); }
+  createRoom(space: Space, deviceHash: string | null = null) {
+    this.db.transaction(() => {
+      // an expired room that cleanup has not removed yet gives up its browser binding
+      if (deviceHash) this.db.prepare('UPDATE spaces SET deviceHash=NULL WHERE deviceHash=?').run(deviceHash);
+      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash,deviceHash) VALUES (?,?,?,?,?,?)')
+        .run(space.id, space.name, space.ownerId, space.expiresAt, space.roomHash, deviceHash);
+    })();
+  }
+  deviceRoom(deviceHash: string, now: number) {
+    return this.db.prepare('SELECT * FROM spaces WHERE deviceHash=? AND roomHash IS NOT NULL AND expiresAt>?').get(deviceHash, now) as Space | undefined;
+  }
   isMember(spaceId: string, userId: string) { return Boolean(this.db.prepare('SELECT 1 FROM members WHERE spaceId=? AND userId=?').get(spaceId, userId)); }
   invite(tokenHash: string, now: number) {
     return this.db.prepare('SELECT * FROM invites WHERE tokenHash=? AND revoked=0 AND uses<maxUses AND expiresAt>?').get(tokenHash, now) as Invite | undefined;

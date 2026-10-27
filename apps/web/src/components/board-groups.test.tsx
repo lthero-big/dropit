@@ -147,7 +147,10 @@ describe('groups on the board', () => {
     expect(screen.queryByText('loose note')).toBeNull()
     expect(screen.getByText('1 条')).toBeTruthy()
 
-    fireEvent.change(screen.getByLabelText('发送到分组'), { target: { value: '工作' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送到分组' }))
+    fireEvent.click(within(screen.getByRole('listbox', { name: '发送到分组' })).getByRole('option', { name: '工作' }))
+    await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull())
+    expect(screen.getByRole('button', { name: '发送到分组' }).getAttribute('data-group-target')).toBe('工作')
     fireEvent.change(screen.getByLabelText('要发送的文本'), { target: { value: 'for work' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     await waitFor(() => expect(calls.some((call) => call.url === '/api/spaces/s1/items/text')).toBe(true))
