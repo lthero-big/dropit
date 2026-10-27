@@ -2,6 +2,9 @@
 import voiceMemo from './media/voice-memo.mp3'
 import screenRec from './media/screen-rec.mp4'
 import screenRecPoster from './media/screen-rec-poster.jpg'
+import { formatSize, hexToRgb, readableOn } from '@/components/clip-visual.tsx'
+
+export { formatSize, hexToRgb, readableOn }
 
 export type DeviceKind = 'mac' | 'phone' | 'pad' | 'pc'
 export type Device = { id: string; name: string; kind: DeviceKind; online: boolean }
@@ -154,12 +157,6 @@ export function clipCopyText(c: Clip): string {
   }
 }
 
-export function formatSize(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`
-  return `${(n / 1024 ** 3).toFixed(2)} GB`
-}
 
 export function formatLeft(ms: number): string {
   if (ms <= 0) return '已过期'
@@ -183,27 +180,7 @@ export function formatAgo(ms: number): string {
   return `${Math.floor(h / 24)} 天前`
 }
 
-export function dayLabel(ts: number, now: number): string {
-  const d = new Date(ts)
-  const today = new Date(now)
-  const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()
-  if (ts >= startToday) return '今天'
-  if (ts >= startToday - 86_400_000) return '昨天'
-  return `${d.getMonth() + 1} 月 ${d.getDate()} 日`
-}
+export { dayLabel } from '@/lib/day-label.ts'
 
 /** WCAG relative luminance, used to pick text on color swatches. */
-export function readableOn(hex: string): '#000' | '#fff' {
-  const n = parseInt(hex.slice(1), 16)
-  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => {
-    const c = v / 255
-    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
-  })
-  const l = 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
-  return l > 0.4 ? '#000' : '#fff'
-}
 
-export function hexToRgb(hex: string): string {
-  const n = parseInt(hex.slice(1), 16)
-  return `${(n >> 16) & 255} ${(n >> 8) & 255} ${n & 255}`
-}

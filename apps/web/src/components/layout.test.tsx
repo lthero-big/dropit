@@ -207,5 +207,11 @@ describe('clipboard layout', () => {
     expect(screen.getByRole('list').getAttribute('data-layout')).toBe('list')
     FakeSocket.instances.at(-1)?.emit({ type: 'presence', devices: 3 })
     expect(await screen.findByRole('status', { name: '3 台设备在线' })).toBeTruthy()
+    // one device dot per online device in the status pill
+    expect(screen.getByRole('status', { name: '3 台设备在线' }).querySelectorAll('[data-device-dot]')).toHaveLength(3)
+    fireEvent.click(screen.getByRole('button', { name: '时间线' }))
+    expect(localStorage.getItem('dropit-layout')).toBe('timeline')
+    expect(screen.getByRole('heading', { name: /今天/ })).toBeTruthy()
+    expect(screen.getByText('setup.exe').closest('[data-layout="timeline"]')).toBeTruthy()
   })
 })

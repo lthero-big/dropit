@@ -530,7 +530,13 @@ describe('dropit web', () => {
       type: 'item.updated',
       item: item({ id: 'new', text: 'newer note', createdAt: 200, pinned: true, tags: ['上线'] }),
     })
-    await waitFor(() => expect(screen.getAllByText('置顶')).toHaveLength(2))
+    // Pinned clips live in the 置顶栏 above the board (RHEA-190 step 4), newest pin first by board order.
+    await waitFor(() => {
+      const bar = screen.getByRole('region', { name: '置顶栏' })
+      expect(within(bar).getByText('newer note')).toBeTruthy()
+      expect(within(bar).getByText('older note')).toBeTruthy()
+    })
+    expect(screen.getAllByText('置顶')).toHaveLength(1)
   })
 
   it('filters clipboard text on the current snapshot', async () => {

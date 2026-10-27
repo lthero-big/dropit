@@ -6,7 +6,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'motion/react'
 import { CheckIcon, EllipsisIcon, FolderIcon, FolderPlusIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
-import { useIsolatePointer } from './media.tsx'
+import { useIsolatePointer } from '@/components/clip-media.tsx'
 import { groupColor, groupName } from './visuals.ts'
 import { dur, easeIn, easeOut, springBounce } from '../lib/motion.ts'
 

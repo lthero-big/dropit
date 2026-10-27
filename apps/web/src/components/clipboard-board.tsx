@@ -1,38 +1,29 @@
 import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react'
-import { MotionConfig, motion, type PanInfo } from 'motion/react'
-import { CopyIcon, DownloadIcon, EllipsisIcon, LayoutGridIcon, ListIcon, PencilIcon, PinIcon, PinOffIcon, Share2Icon, TagIcon, Undo2Icon } from 'lucide-react'
+import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion } from 'motion/react'
+import { ArrowUpIcon, CalendarDaysIcon, LayoutGridIcon, ListIcon, PaperclipIcon } from 'lucide-react'
 import { toast } from 'sonner'
-import { CodeBody, ColorBody, KindTag, LinkBody, SourceBadge } from '@/components/clip-content.tsx'
+import { BoardCard, type Arrival, type DragPhase } from '@/components/board-card.tsx'
+import { BoardEmpty, BoardSkeletons, DeviceDot, MagnetDropZone, PinBarShell, TimelineSection } from '@/components/board-chrome.tsx'
 import { CommandPalette } from '@/components/command-palette.tsx'
-import { ExpandCapsule } from '@/components/expand-capsule.tsx'
 import { ImageLightbox, type LightboxSlide } from '@/components/image-lightbox.tsx'
-import { SharePanel } from '@/components/share-panel.tsx'
-import { Button } from '@/components/ui/button.tsx'
+import { TrashBin } from '@/components/trash-bin.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
 import { adoptResume, browserResumeStore, browserTransport, discardSession, discardUpload, matchResumeFile, receivedRatio, uploadMaybeChunked, type ChunkTransport, type ResumeRecord, type ResumeStore } from '@/lib/chunked-upload.ts'
 import { useChannel } from '@/lib/channel.ts'
 import { CLAIMS_KEY, claimUpload, heartbeatUploads, ownsUpload, releaseUploads, tabId } from '@/lib/upload-claims.ts'
 import { createUploadQueue, type UploadQueue, type UploadRow } from '@/lib/upload-queue.ts'
 import { formatEta, formatSpeed } from '@/lib/upload-speed.ts'
-import { copyText, formatBytes, formatRemain, formatWhen, quotaTone, useClock, utf8Size } from '@/lib/format.ts'
-import { MarkdownText } from '@/lib/markdown.tsx'
-import { AGING_WINDOW, clipKind, codeSource, lifeOpacity } from '@/lib/clip-kind.ts'
-import { mediaKind } from '@/lib/media.ts'
-import { dur, easeOut, springBounce, springSettle } from '@/lib/motion.ts'
+import { copyText, formatBytes, formatRemain, quotaTone, useClock, utf8Size } from '@/lib/format.ts'
+import { clipKind, codeSource } from '@/lib/clip-kind.ts'
+import { dayLabel } from '@/lib/day-label.ts'
+import { dur, easeIn, easeOut, springBounce, springSettle } from '@/lib/motion.ts'
+import { trashAnchorFor, type TrashAnchor, type TrashHandle } from '@/lib/trash-anchor.ts'
 import type { ConnectionStatus, Item } from '@/lib/types.ts'
 
 function filesFromList(list: FileList | File[] | null | undefined): File[] {
   return Array.from(list ?? [])
 }
 
-const iconButtonClass =
-  'inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-line-2 bg-surface-1 text-fg-2 transition-[color,background-color,border-color] duration-(--dur-fast) ease-out hover:border-line-3 hover:bg-surface-2 hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring'
-const confirmButtonClass =
-  'inline-flex h-10 min-w-10 shrink-0 items-center justify-center gap-1 rounded-md border border-primary bg-primary px-2 text-xs font-semibold text-primary-foreground transition-colors duration-(--dur-fast) hover:bg-primary/85'
-const capsuleIconClass =
-  'inline-flex size-10 shrink-0 items-center justify-center rounded-md bg-transparent text-fg-2 transition-colors duration-(--dur-fast) hover:bg-surface-2 hover:text-fg'
-/** Horizontal travel (px) a touch swipe needs: right copies, left arms 撤回. */
-const SWIPE = 72
 const COPIED_MS = 1400
 
 function useCoarsePointer(): boolean {
@@ -49,36 +40,6 @@ function useCoarsePointer(): boolean {
 const touchTarget = { minWidth: 40, minHeight: 40 }
 const RETRACT_MS = 3000
 
-function IconAction({
-  label,
-  onClick,
-  children,
-  confirm = false,
-  expanded,
-}: {
-  label: string
-  onClick: () => void
-  children: ReactNode
-  confirm?: boolean
-  expanded?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-expanded={expanded}
-      data-retract={confirm ? 'confirm' : undefined}
-      onClick={onClick}
-      className={confirm ? confirmButtonClass : iconButtonClass}
-      style={touchTarget}
-    >
-      {children}
-      {confirm ? <span>确认</span> : null}
-    </button>
-  )
-}
-
 const uploadStatusLabel: Record<UploadRow['status'], string> = {
   queued: '排队中',
   uploading: '上传中',
@@ -93,30 +54,30 @@ const queueActionClass =
   'inline-flex min-h-10 min-w-10 items-center rounded-md border border-line-2 bg-surface-1 px-2 text-xs font-medium text-fg-2 transition-colors duration-(--dur-fast) hover:border-line-3 hover:bg-surface-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring'
 const EXPIRED = '会话已过期，请重新上传'
 
-function extension(name: string): string {
-  const dot = name.lastIndexOf('.')
-  if (dot <= 0) return 'FILE'
-  return name.slice(dot + 1, dot + 5).toUpperCase()
-}
-
 const layoutKey = 'dropit-layout'
-type BoardLayout = 'grid' | 'list'
+type BoardLayout = 'grid' | 'list' | 'timeline'
+/** top-bar device dots cycle through the paper device tints */
+const DOT_COLORS = ['var(--dev-mac)', 'var(--dev-phone)', 'var(--dev-pad)', 'var(--dev-pc)']
 
 function readLayout(): BoardLayout {
   try {
-    return localStorage.getItem(layoutKey) === 'list' ? 'list' : 'grid'
+    const saved = localStorage.getItem(layoutKey)
+    return saved === 'list' || saved === 'timeline' ? saved : 'grid'
   } catch {
     return 'grid'
   }
 }
 
-function plainLines(text: string): string[] {
-  return text.split('\n')
-}
-
-function textOverflows(text: string): boolean {
-  const lines = plainLines(text)
-  return lines.length > 6 || lines.some((line) => line.length > 42)
+/** Day sections for the timeline layout, newest day first (items keep board order). */
+function timeline(items: Item[], now: number): Array<[string, Item[]]> {
+  const days = new Map<string, Item[]>()
+  for (const item of items) {
+    const key = dayLabel(item.createdAt, now)
+    const list = days.get(key)
+    if (list) list.push(item)
+    else days.set(key, [item])
+  }
+  return [...days.entries()]
 }
 
 export function ClipboardBoard({
@@ -186,6 +147,20 @@ export function ClipboardBoard({
   const [expandedText, setExpandedText] = useState<Record<string, boolean>>({})
   const [copiedId, setCopiedId] = useState<string | null>(null)
   const coarse = useCoarsePointer()
+  const gesture = coarse ? 'swipe' : 'pin-drag'
+  const reduced = useReducedMotion() ?? false
+  const [openCard, setOpenCard] = useState<string | null>(null)
+  const [pinHover, setPinHover] = useState(false)
+  const pinBarRef = useRef<HTMLElement | null>(null)
+  const zoneRef = useRef<HTMLFormElement | null>(null)
+  const trashRef = useRef<TrashHandle | null>(null)
+  const [trash, setTrash] = useState<{ anchor: TrashAnchor; gulp: boolean } | null>(null)
+  const gulpTimer = useRef(0)
+  const [arrivals, setArrivals] = useState<Record<string, Arrival>>({})
+  const [ripples, setRipples] = useState<Record<number, number>>({})
+  const dotRefs = useRef<Array<HTMLElement | null>>([])
+  const seenIds = useRef<Set<string> | null>(null)
+  const localIds = useRef(new Set<string>())
   const fileRef = useRef<HTMLInputElement>(null)
   const resumeRef = useRef<HTMLInputElement>(null)
   const resumeTarget = useRef<string | null>(null)
@@ -228,7 +203,6 @@ export function ClipboardBoard({
     : []
   const openIndex = openId === null ? -1 : slides.findIndex((slide) => slide.key === openId)
   const roomUsed = usedBytes ?? channel.items.reduce((sum, item) => sum + item.size, 0)
-  const grid = layout === 'grid'
 
   useEffect(() => {
     onStatus?.(channel.status)
@@ -328,6 +302,7 @@ export function ClipboardBoard({
         releaseUploads([session.uploadId], ownerRef.current)
       },
       onItem: (item) => {
+        localIds.current.add(item.id)
         channelRef.current.upsert(item)
         onActivityRef.current?.()
       },
@@ -460,6 +435,7 @@ export function ClipboardBoard({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
       })
+      localIds.current.add(result.item.id)
       channel.upsert(result.item)
       setDraft('')
       onActivity?.()
@@ -556,6 +532,11 @@ export function ClipboardBoard({
       armPending(item.id)
       return
     }
+    await removeItem(item)
+  }
+
+  async function removeItem(item: Item) {
+    if (!base) return
     clearPending()
     try {
       await api(`${base}/items/${item.id}`, { method: 'DELETE' })
@@ -565,6 +546,69 @@ export function ClipboardBoard({
     } catch (error) {
       toast.error(errorText(error))
     }
+  }
+
+  // New items after the first snapshot fly in: our own sends drop from above,
+  // everything else flies from a peer's dot in the top bar (which ripples).
+  useEffect(() => {
+    if (channel.status === 'connecting' || channel.status === 'idle') return
+    const seen = seenIds.current
+    if (!seen) {
+      seenIds.current = new Set(channel.items.map((item) => item.id))
+      return
+    }
+    const fresh = channel.items.filter((item) => !seen.has(item.id))
+    if (!fresh.length) return
+    for (const item of fresh) seen.add(item.id)
+    if (reduced) return
+    const next: Record<string, Arrival> = {}
+    let remote = false
+    for (const item of fresh) {
+      const mine = localIds.current.has(item.id)
+      next[item.id] = mine ? 'landed' : 'arrived'
+      remote ||= !mine
+    }
+    setArrivals((current) => ({ ...current, ...next }))
+    if (remote) {
+      const dot = channel.devices > 1 ? 1 : 0
+      setRipples((current) => ({ ...current, [dot]: (current[dot] ?? 0) + 1 }))
+    }
+  }, [channel.items, channel.status, channel.devices, reduced])
+
+  useEffect(() => {
+    if (!openCard) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target
+      const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null
+      if (element?.closest(`[data-clip-id="${openCard}"]`)) return
+      setOpenCard(null)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpenCard(null)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [openCard])
+
+  useEffect(() => () => window.clearTimeout(gulpTimer.current), [])
+
+  function onDragPhase(phase: DragPhase) {
+    window.clearTimeout(gulpTimer.current)
+    if ('rect' in phase) {
+      setOpenCard(null)
+      setTrash({ anchor: trashAnchorFor(phase.rect), gulp: false })
+      return
+    }
+    if (phase.end === 'cancel') {
+      setTrash(null)
+      return
+    }
+    setTrash((current) => (current ? { ...current, gulp: true } : current))
+    gulpTimer.current = window.setTimeout(() => setTrash(null), 560)
   }
 
   function copyValue(item: Item): string {
@@ -587,10 +631,6 @@ export function ClipboardBoard({
     })
   }
 
-  function onSwipeEnd(item: Item, info: PanInfo) {
-    if (info.offset.x >= SWIPE) copyItem(item)
-    else if (info.offset.x <= -SWIPE && canRetract(item) && pendingRef.current !== item.id) armPending(item.id)
-  }
 
   const ratio = quotaBytes > 0 ? Math.min(100, Math.round((roomUsed / quotaBytes) * 100)) : 0
   const tone = quotaTone(roomUsed, quotaBytes)
@@ -680,46 +720,128 @@ export function ClipboardBoard({
     if (file) queue.enqueue([file], maxFileRef.current)
   }
 
+  const pinnedShown = shown.filter((item) => item.pinned)
+  const looseShown = shown.filter((item) => !item.pinned)
+  const showPinBar = pinnedShown.length > 0 || (gesture === 'pin-drag' && visible.some((item) => canShare(item)))
+  const dotCount = Math.max(1, Math.min(channel.devices, 6))
+  const live = channel.status === 'live'
+
+  function cardFor(item: Item, variant: 'grid' | 'row') {
+    return (
+      <BoardCard
+        key={item.id}
+        item={item}
+        base={base}
+        now={now}
+        variant={variant}
+        gesture={gesture}
+        reduced={reduced}
+        sender={sender(item)}
+        canEdit={canEdit(item)}
+        canRetract={canRetract(item)}
+        canShare={canShare(item)}
+        open={openCard === item.id}
+        onOpen={(next) => setOpenCard(next ? item.id : null)}
+        copied={copiedId === item.id}
+        pending={pending === item.id}
+        editing={editing === item.id}
+        editDraft={editDraft}
+        savingEdit={savingEdit}
+        onEditDraft={setEditDraft}
+        onStartEdit={() => {
+          setEditing(item.id)
+          setEditDraft(item.text ?? '')
+          clearPending()
+        }}
+        onSaveEdit={() => void saveEdit(item)}
+        onCancelEdit={() => setEditing(null)}
+        shareOpen={shareFor === item.id}
+        onToggleShare={() => {
+          setShareFor((current) => (current === item.id ? null : item.id))
+          clearPending()
+        }}
+        tagOpen={tagFor === item.id}
+        onToggleTag={() => {
+          setTagFor((current) => (current === item.id ? null : item.id))
+          setTagDraft('')
+        }}
+        tagDraft={tagDraft}
+        onTagDraft={setTagDraft}
+        onAddTag={() => {
+          const next = tagDraft.trim().replace(/^#+/, '')
+          if (!next) return
+          void saveLabels(item, { tags: [...(item.tags ?? []), next] })
+          setTagDraft('')
+        }}
+        onRemoveTag={(name) => void saveLabels(item, { tags: (item.tags ?? []).filter((tag) => tag !== name) })}
+        activeTag={activeTag}
+        onTag={(name) => setActiveTag((current) => (current === name ? null : name))}
+        textOpen={expandedText[item.id] === true}
+        onToggleText={() => setExpandedText((current) => ({ ...current, [item.id]: !current[item.id] }))}
+        arrival={arrivals[item.id] ?? null}
+        arrivalDot={() => dotRefs.current[dotCount > 1 ? 1 : 0] ?? null}
+        onArrived={() => setArrivals(({ [item.id]: _done, ...rest }) => rest)}
+        pinBarRef={pinBarRef}
+        onPinHover={setPinHover}
+        trashRef={trashRef}
+        onDragPhase={onDragPhase}
+        onCopy={() => copyItem(item)}
+        onRetractClick={() => void retract(item)}
+        onRetractNow={() => void removeItem(item)}
+        onPin={(pinned) => void saveLabels(item, { pinned })}
+        onOpenImage={() => setOpenId(item.id)}
+      />
+    )
+  }
+
+  const layoutButton = (value: BoardLayout, label: string, icon: ReactNode, first = false) => (
+    <button
+      type="button"
+      aria-pressed={layout === value}
+      aria-label={label}
+      title={label}
+      className={`relative inline-flex size-10 items-center justify-center transition-colors duration-(--dur-fast) ${first ? '' : 'border-l border-[var(--line-2)]'} ${layout === value ? 'bg-[var(--surface-2)] text-fg' : 'text-fg-3 hover:text-fg'}`}
+      style={touchTarget}
+      onClick={() => chooseLayout(value)}
+    >
+      {icon}
+    </button>
+  )
+
   return (
     <section>
       <div>
-        <header className="mb-6 border-b border-line-1 pb-4">
+        <header className="mb-5 border-b border-[var(--line-1)] pb-4">
           <div className="flex flex-wrap items-end justify-between gap-3">
-            <h1 className="text-3xl font-semibold tracking-tight text-fg md:text-[40px] md:leading-none">{title}</h1>
+            <h1 className="dd-display text-3xl font-semibold tracking-tight text-fg md:text-[40px] md:leading-none">{title}</h1>
             <span className="inline-flex items-center gap-2">
               <span
-                className="inline-flex min-h-10 items-center gap-1.5 rounded-md border border-line-2 bg-surface-1 px-2.5 text-xs font-medium text-fg-2 tabular-nums"
+                className="inline-flex min-h-10 items-center gap-0.5 rounded-full border border-[var(--line-2)] bg-[var(--surface-1)] pr-2.5 pl-1 text-xs font-medium text-fg-2 tabular-nums"
                 tabIndex={0}
                 role="status"
                 title={`${channel.devices} 台设备在线`}
                 aria-label={`${channel.devices} 台设备在线`}
               >
-                <span className={`size-2 rounded-full ${channel.status === 'live' ? 'bg-ok motion-safe:animate-pulse' : 'bg-fg-4'}`} aria-hidden="true" />
+                <span className="flex items-center" aria-hidden="true">
+                  {Array.from({ length: dotCount }, (_, index) => (
+                    <DeviceDot
+                      key={index}
+                      color={DOT_COLORS[index % DOT_COLORS.length]}
+                      online={live && index < channel.devices}
+                      title={index === 0 ? '本设备' : `设备 ${index + 1}`}
+                      ripple={reduced ? 0 : (ripples[index] ?? 0)}
+                      dotRef={(el) => {
+                        dotRefs.current[index] = el
+                      }}
+                    />
+                  ))}
+                </span>
                 {channel.devices}
               </span>
-              <span className="inline-flex overflow-hidden rounded-md border border-line-2 bg-surface-1" role="group" aria-label="布局">
-                <button
-                  type="button"
-                  aria-pressed={layout === 'grid'}
-                  aria-label="网格"
-                  title="网格"
-                  className={`inline-flex size-10 items-center justify-center transition-colors duration-(--dur-fast) ${layout === 'grid' ? 'bg-surface-2 text-fg' : 'text-fg-3 hover:text-fg'}`}
-                  style={touchTarget}
-                  onClick={() => chooseLayout('grid')}
-                >
-                  <LayoutGridIcon className="size-4" aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={layout === 'list'}
-                  aria-label="列表"
-                  title="列表"
-                  className={`inline-flex size-10 items-center justify-center border-l border-line-2 transition-colors duration-(--dur-fast) ${layout === 'list' ? 'bg-surface-2 text-fg' : 'text-fg-3 hover:text-fg'}`}
-                  style={touchTarget}
-                  onClick={() => chooseLayout('list')}
-                >
-                  <ListIcon className="size-4" aria-hidden="true" />
-                </button>
+              <span className="inline-flex overflow-hidden rounded-[var(--radius-md)] border border-[var(--line-2)] bg-[var(--surface-1)]" role="group" aria-label="布局">
+                {layoutButton('grid', '网格', <LayoutGridIcon className="size-4" aria-hidden="true" />, true)}
+                {layoutButton('list', '列表', <ListIcon className="size-4" aria-hidden="true" />)}
+                {layoutButton('timeline', '时间线', <CalendarDaysIcon className="size-4" aria-hidden="true" />)}
               </span>
             </span>
           </div>
@@ -738,59 +860,90 @@ export function ClipboardBoard({
             </p>
           ) : null}
         </header>
-        <form
-          className="rounded-lg border border-line-2 bg-surface-1 p-4 shadow-elev-1 transition-[border-color,box-shadow] duration-(--dur-base) focus-within:border-line-3 focus-within:shadow-elev-2"
+        <motion.form
+          ref={zoneRef}
+          aria-label="投放区"
+          data-dragging={dragOver || undefined}
+          className="dd-board relative overflow-hidden rounded-[var(--radius-lg)] border bg-[var(--surface-1)]"
+          animate={dragOver ? { borderColor: 'var(--brand)', boxShadow: '0 0 0 4px var(--brand-soft), var(--elev-3)', scale: reduced ? 1 : 1.01 } : { borderColor: 'var(--line-2)', boxShadow: 'var(--elev-1)', scale: 1 }}
+          transition={{ ...springSettle, borderColor: { duration: dur.base }, boxShadow: { duration: dur.base } }}
           onSubmit={(event) => {
             event.preventDefault()
             void sendText()
           }}
         >
-          <label className="sr-only" htmlFor="draft">
-            要发送的文本
-          </label>
-          <textarea
-            id="draft"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                event.preventDefault()
-                void sendText()
-              }
-            }}
-            placeholder="写点什么，或粘贴截图"
-            className="min-h-20 w-full resize-y bg-transparent text-base text-fg outline-none placeholder:text-fg-4"
-          />
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <Button type="submit" disabled={!base || sending}>
-              发送
-            </Button>
-            <Button type="button" variant="outline" onClick={() => fileRef.current?.click()} disabled={!base}>
-              文件
-            </Button>
-            <input
-              ref={fileRef}
-              type="file"
-              multiple
-              className="sr-only"
-              aria-label="选择文件"
-              onChange={(event) => {
-                const files = filesFromList(event.target.files)
-                event.target.value = ''
-                if (files.length) void sendFiles(files)
+          <AnimatePresence initial={false}>
+            {dragOver ? (
+              <motion.div
+                key="zone"
+                initial={{ opacity: 0, height: 64 }}
+                animate={{ opacity: 1, height: 168, transition: { ...springSettle, opacity: { duration: dur.base, ease: easeOut } } }}
+                exit={{ opacity: 0, height: 64, transition: { duration: dur.fast, ease: easeIn } }}
+                className="dd-grid-bg pointer-events-none grid place-items-center"
+              >
+                <MagnetDropZone zoneRef={zoneRef} reduced={reduced} hint="文件会直接上传，图片会出现在看板里" />
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+          <div className={`flex items-end gap-2 p-2.5 ${dragOver ? 'hidden' : ''}`}>
+            <button
+              type="button"
+              aria-label="文件"
+              title="添加文件"
+              onClick={() => fileRef.current?.click()}
+              disabled={!base}
+              className="grid size-10 shrink-0 place-items-center rounded-[var(--radius-md)] text-[var(--fg-3)] hover:bg-[var(--surface-2)] hover:text-[var(--fg)] disabled:opacity-50"
+              style={touchTarget}
+            >
+              <PaperclipIcon className="size-4" aria-hidden="true" />
+            </button>
+            <label className="sr-only" htmlFor="draft">
+              要发送的文本
+            </label>
+            <textarea
+              id="draft"
+              value={draft}
+              rows={2}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault()
+                  void sendText()
+                }
               }}
+              placeholder="粘贴、输入，或把文件拖到这里…"
+              className="min-h-10 flex-1 resize-y bg-transparent py-2 text-[15px] text-[var(--fg)] outline-none placeholder:text-[var(--fg-4)]"
             />
-            <input
-              ref={resumeRef}
-              type="file"
-              className="sr-only"
-              aria-label="选择要续传的文件"
-              onChange={onResumePicked}
-            />
-            <span className="text-xs text-fg-3">拖入文件，或直接粘贴截图 · Ctrl/⌘ Enter 发送</span>
+            <motion.button
+              type="submit"
+              aria-label="发送"
+              title="发送（Ctrl/⌘ Enter）"
+              disabled={!base || sending}
+              whileTap={reduced ? undefined : { scale: 0.9 }}
+              animate={{ opacity: draft.trim() ? 1 : 0.45 }}
+              transition={springBounce}
+              className="grid size-10 shrink-0 place-items-center rounded-[var(--radius-md)] bg-[var(--brand)] text-[var(--brand-fg)] disabled:cursor-not-allowed"
+              style={touchTarget}
+            >
+              <ArrowUpIcon className="size-4" aria-hidden="true" />
+            </motion.button>
           </div>
+          <input
+            ref={fileRef}
+            type="file"
+            multiple
+            className="sr-only"
+            aria-label="选择文件"
+            onChange={(event) => {
+              const files = filesFromList(event.target.files)
+              event.target.value = ''
+              if (files.length) void sendFiles(files)
+            }}
+          />
+          <input ref={resumeRef} type="file" className="sr-only" aria-label="选择要续传的文件" onChange={onResumePicked} />
+          <p className={`border-t border-[var(--line-1)] px-3 py-1.5 text-[11px] text-[var(--fg-4)] ${dragOver ? 'hidden' : ''}`}>拖入文件，或直接粘贴截图 · Ctrl/⌘ Enter 发送</p>
           {rows.length > 0 ? (
-            <div className="mt-3 max-w-full overflow-hidden rounded-md border border-line-2 bg-surface-0" role="region" aria-label="上传队列">
+            <div className="m-2.5 mt-0 max-w-full overflow-hidden rounded-[var(--radius-md)] border border-[var(--line-2)] bg-[var(--surface-0)]" role="region" aria-label="上传队列">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line-1 px-3 py-2">
                 <p className="text-xs font-medium text-fg-2">上传</p>
                 {uploadBusy ? (
@@ -904,8 +1057,8 @@ export function ClipboardBoard({
               </ul>
             </div>
           ) : null}
-        </form>
-        <label className="mt-6 block rounded-md border border-line-2 bg-surface-1 transition-colors duration-(--dur-fast) focus-within:border-line-3">
+        </motion.form>
+        <label className="mt-4 block rounded-[var(--radius-md)] border border-[var(--line-2)] bg-[var(--surface-1)] transition-colors duration-(--dur-fast) focus-within:border-[var(--line-3)]">
           <span className="sr-only">搜索</span>
           <input
             type="search"
@@ -916,296 +1069,45 @@ export function ClipboardBoard({
             className="w-full bg-transparent px-3 py-2.5 text-sm text-fg outline-none placeholder:text-fg-4"
           />
         </label>
-        {dragOver ? (
-          <div className="pointer-events-none fixed inset-3 z-30 grid place-items-center rounded-xl border-2 border-dashed border-primary/60 bg-background/85 backdrop-blur-sm motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-150">
-            <p className="rounded-lg border border-line-2 bg-surface-1 px-6 py-4 text-sm font-medium text-fg shadow-elev-3">松开以上传</p>
-          </div>
-        ) : null}
         {channel.status === 'connecting' || channel.status === 'reconnecting' ? (
-          <p className="py-8 text-sm text-fg-3" role="status">
+          <p className="pt-4 text-sm text-fg-3" role="status">
             {channel.status === 'reconnecting' ? '连接中断，正在重连并补拉…' : '正在同步…'}
           </p>
         ) : null}
-        {channel.status !== 'connecting' && visible.length === 0 ? (
-          <p className="mt-4 rounded-lg border border-dashed border-line-2 py-10 text-center text-sm text-fg-3">还没有内容。发送文本或文件，其他设备会实时收到。</p>
-        ) : null}
         {activeTag ? (
-          <button type="button" className="mt-3 inline-flex min-h-10 min-w-10 items-center justify-center rounded-md border border-line-2 bg-surface-1 px-2.5 text-xs font-medium text-fg-2 hover:border-line-3" style={touchTarget} onClick={() => setActiveTag(null)}>
+          <button type="button" className="mt-3 inline-flex min-h-10 min-w-10 items-center justify-center rounded-[var(--radius-md)] border border-[var(--line-2)] bg-[var(--surface-1)] px-2.5 text-xs font-medium text-fg-2 hover:border-[var(--line-3)]" style={touchTarget} onClick={() => setActiveTag(null)}>
             #{activeTag} · 清除标签
           </button>
         ) : null}
-        {visible.length > 0 && shown.length === 0 ? (
-          <p className="py-8 text-center text-sm text-fg-3">没有匹配的内容。</p>
-        ) : null}
         <MotionConfig reducedMotion="user">
-        <ul className={grid ? 'clip-board mt-4 columns-1 gap-3 sm:columns-2 xl:columns-3' : 'mt-4 grid gap-2.5'} data-layout={layout}>
-          {shown.map((item, index) => {
-            const compactFile = item.kind === 'file' && !item.hasThumbnail && mediaKind(item) === null
-            const textOpen = expandedText[item.id] === true
-            const textLong = item.kind === 'text' && textOverflows(item.text ?? '')
-            const kind = clipKind(item)
-            const remaining = item.expiresAt - now
-            const life = lifeOpacity(remaining)
-            const copied = copiedId === item.id
-            const pinnedEdge = item.pinned && !shown[index + 1]?.pinned
-            return (
-            <motion.li
-              id={`clip-${item.id}`}
-              tabIndex={-1}
-              key={item.id}
-              data-interactive-card=""
-              data-clip-card=""
-              data-pinned={item.pinned ? '' : undefined}
-              data-aging={remaining < AGING_WINDOW ? '' : undefined}
-              data-copied={copied ? '' : undefined}
-              layout="position"
-              initial={{ opacity: 0, y: 10, scale: 0.985 }}
-              animate={{ opacity: life, y: 0, scale: 1 }}
-              transition={{ layout: item.pinned ? springBounce : springSettle, opacity: { duration: dur.slow, ease: easeOut }, y: springSettle, scale: springSettle }}
-              drag={coarse && editing !== item.id ? 'x' : false}
-              dragDirectionLock
-              dragSnapToOrigin
-              dragConstraints={{ left: 0, right: 0 }}
-              dragElastic={0.35}
-              onDragEnd={(_event, info) => onSwipeEnd(item, info)}
-              className={`group/card relative rounded-lg border bg-surface-1 px-3.5 py-3 shadow-elev-1 transition-[border-color,box-shadow] duration-(--dur-base) ease-out hover:shadow-elev-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${copied ? 'border-ok' : item.pinned ? 'border-line-3' : 'border-line-2 hover:border-line-3'} ${grid ? 'mb-3 break-inside-avoid' : ''} ${pinnedEdge && !grid ? 'mb-3' : ''} ${compactFile ? 'flex min-h-16 items-center gap-3 py-2.5' : ''}`}
-            >
-              {item.pinned ? <span className="absolute inset-y-3 left-0 w-0.5 rounded-full bg-primary" aria-hidden="true" /> : null}
-              {copied ? (
-                <span className="pointer-events-none absolute top-2 right-2 rounded-full bg-ok px-2 py-0.5 text-[11px] font-medium text-white motion-safe:animate-in motion-safe:fade-in-0 motion-safe:zoom-in-95" aria-hidden="true">
-                  已复制
-                </span>
+          <LayoutGroup>
+            <div className="dd-board mt-4 flex flex-col gap-4" data-gesture={gesture} data-reduced={reduced || undefined}>
+              {channel.status === 'connecting' && visible.length === 0 ? <BoardSkeletons view={layout === 'grid' ? 'grid' : 'rows'} /> : null}
+              {channel.status !== 'connecting' && visible.length === 0 ? (
+                <BoardEmpty title="这里还空着" body="还没有内容。发送文本或文件，其他设备会实时收到。到期的内容会自己褪色消失。" />
               ) : null}
-              {compactFile ? (
-                <span className="grid size-10 shrink-0 place-items-center rounded-md border border-line-2 bg-surface-2 font-mono text-[10px] font-semibold text-fg-2">
-                  {extension(item.filename || 'file')}
-                </span>
-              ) : (
-              <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                <SourceBadge label={sender(item)} />
-                <KindTag kind={kind} />
-                <span className="text-fg-3 tabular-nums">{formatWhen(item.createdAt, now)}</span>
-                {item.pinned ? <span className="font-medium text-primary">置顶</span> : null}
-                {item.updatedAt > item.createdAt ? <span className="text-fg-3">已编辑</span> : null}
-                <span className={`ml-auto tabular-nums ${remaining < AGING_WINDOW ? 'text-primary' : 'text-fg-4'}`}>剩余 {formatRemain(remaining)}</span>
-              </div>
-              )}
-              {item.kind === 'text' && editing === item.id ? (
-                <form
-                  onSubmit={(event) => {
-                    event.preventDefault()
-                    void saveEdit(item)
-                  }}
-                >
-                  <label className="sr-only" htmlFor={`edit-${item.id}`}>
-                    编辑文本
-                  </label>
-                  <textarea
-                    id={`edit-${item.id}`}
-                    value={editDraft}
-                    onChange={(event) => setEditDraft(event.target.value)}
-                    className="min-h-20 w-full resize-y rounded-md border border-line-2 bg-surface-0 p-2 text-[15px] text-fg outline-none focus:border-line-3"
-                  />
-                  <div className="mt-2 flex gap-2">
-                    <Button type="submit" size="sm" disabled={savingEdit}>
-                      保存
-                    </Button>
-                    <Button type="button" variant="outline" size="sm" onClick={() => setEditing(null)}>
-                      取消
-                    </Button>
-                  </div>
-                </form>
-              ) : kind === 'link' ? (
-                <LinkBody text={item.text ?? ''} />
-              ) : kind === 'color' ? (
-                <ColorBody text={item.text ?? ''} />
-              ) : item.kind === 'text' ? (
-                <div>
-                  {kind === 'code' ? <CodeBody text={item.text ?? ''} collapsed={!textOpen} /> : <MarkdownText text={item.text ?? ''} collapsed={!textOpen} />}
-                  {textLong ? (
-                    <button
-                      type="button"
-                      className="mt-1 inline-flex min-h-10 min-w-10 items-center justify-center rounded-md px-2 text-xs font-medium text-fg-3 hover:text-fg"
-                      style={touchTarget}
-                      aria-expanded={textOpen}
-                      onClick={() => setExpandedText((current) => ({ ...current, [item.id]: !textOpen }))}
-                    >
-                      {textOpen ? '收起' : '展开'}
-                    </button>
-                  ) : null}
-                </div>
-              ) : compactFile ? (
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-fg">{item.filename}</p>
-                  <p className="text-xs text-fg-3 tabular-nums">{formatBytes(item.size)} · {sender(item)} · 剩余 {formatRemain(remaining)}</p>
-                </div>
-              ) : (
-                <div>
-                  {item.hasThumbnail ? (
-                    <button
-                      type="button"
-                      aria-label={`查看 ${item.filename?.trim() || '图片'}`}
-                      className="mb-2 block min-h-10 min-w-10 max-w-full overflow-hidden rounded-md border-0 bg-transparent p-0 text-left"
-                      style={touchTarget}
-                      onClick={() => setOpenId(item.id)}
-                    >
-                      <img src={`${base}/items/${item.id}/thumbnail`} alt="" className="max-h-80 w-full rounded-md border border-line-1 bg-surface-sunken object-contain transition-transform duration-(--dur-slow) ease-out motion-safe:group-hover/card:scale-[1.01]" />
-                    </button>
-                  ) : mediaKind(item) === 'video' ? (
-                    <video controls preload="metadata" src={`${base}/items/${item.id}/media`} className="mb-2 max-h-80 w-full rounded-md bg-surface-sunken" />
-                  ) : mediaKind(item) === 'audio' ? (
-                    <audio controls preload="metadata" src={`${base}/items/${item.id}/media`} className="mb-2 w-full" />
-                  ) : (
-                    <span className="mb-2 grid size-10 place-items-center rounded-md border border-line-2 bg-surface-2 font-mono text-[10px] font-semibold text-fg-2">
-                      {extension(item.filename || 'file')}
-                    </span>
-                  )}
-                  <p className="text-sm font-medium break-words text-fg">{item.filename}</p>
-                  <p className="text-xs text-fg-3 tabular-nums">{formatBytes(item.size)}</p>
-                </div>
-              )}
-              <div className={`${compactFile ? 'ml-auto shrink-0' : 'mt-3'} flex flex-wrap items-center gap-2`}>
-                {item.kind === 'text' || item.kind === 'file' ? (
-                  <IconAction
-                    label="复制"
-                    onClick={() => copyItem(item)}
-                  >
-                    <CopyIcon className="size-5" aria-hidden="true" />
-                  </IconAction>
-                ) : null}
-                {canShare(item) ? (
-                  <IconAction
-                    label="分享"
-                    expanded={shareFor === item.id}
-                    onClick={() => {
-                      setShareFor((current) => (current === item.id ? null : item.id))
-                      clearPending()
-                    }}
-                  >
-                    <Share2Icon className="size-5" aria-hidden="true" />
-                  </IconAction>
-                ) : null}
-                {canRetract(item) ? (
-                  <IconAction label={pending === item.id ? '确认撤回' : '撤回'} confirm={pending === item.id} onClick={() => void retract(item)}>
-                    <Undo2Icon className="size-5" aria-hidden="true" />
-                  </IconAction>
-                ) : null}
-                {(canEdit(item) && editing !== item.id) || item.kind === 'file' || canShare(item) ? (
-                  <ExpandCapsule label="更多" icon={<EllipsisIcon className="size-5" aria-hidden="true" />}>
-                    {canEdit(item) && editing !== item.id ? (
-                      <button
-                        type="button"
-                        title="编辑"
-                        aria-label="编辑"
-                        className={capsuleIconClass}
-                        style={touchTarget}
-                        onClick={() => {
-                          setEditing(item.id)
-                          setEditDraft(item.text ?? '')
-                          clearPending()
-                        }}
-                      >
-                        <PencilIcon className="size-5" aria-hidden="true" />
-                      </button>
-                    ) : null}
-                    {item.kind === 'file' ? (
-                      <a
-                        href={`${base}/items/${item.id}/download`}
-                        title="下载"
-                        aria-label="下载"
-                        className={capsuleIconClass}
-                        style={touchTarget}
-                      >
-                        <DownloadIcon className="size-5" aria-hidden="true" />
-                      </a>
-                    ) : null}
-                    {canShare(item) ? (
-                      <button
-                        type="button"
-                        title={item.pinned ? '取消置顶' : '置顶'}
-                        aria-label={item.pinned ? '取消置顶' : '置顶'}
-                        className={capsuleIconClass}
-                        style={touchTarget}
-                        onClick={() => void saveLabels(item, { pinned: !item.pinned })}
-                      >
-                        {item.pinned ? <PinOffIcon className="size-5" aria-hidden="true" /> : <PinIcon className="size-5" aria-hidden="true" />}
-                      </button>
-                    ) : null}
-                    {canShare(item) ? (
-                      <button
-                        type="button"
-                        title="标签"
-                        aria-label="标签"
-                        className={capsuleIconClass}
-                        style={touchTarget}
-                        onClick={() => {
-                          setTagFor((current) => (current === item.id ? null : item.id))
-                          setTagDraft('')
-                        }}
-                      >
-                        <TagIcon className="size-5" aria-hidden="true" />
-                      </button>
-                    ) : null}
-                  </ExpandCapsule>
-                ) : null}
-              </div>
-              {(item.tags ?? []).length > 0 ? (
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {(item.tags ?? []).map((name) => (
-                    <button
-                      key={name}
-                      type="button"
-                      className={`inline-flex min-h-10 min-w-10 items-center justify-center rounded-md border px-2 text-xs transition-colors duration-(--dur-fast) ${activeTag === name ? 'border-primary bg-primary text-primary-foreground' : 'border-line-2 text-fg-2 hover:border-line-3 hover:text-fg'}`}
-                      style={touchTarget}
-                      onClick={() => setActiveTag((current) => (current === name ? null : name))}
-                    >
-                      #{name}
-                    </button>
+              {showPinBar && visible.length > 0 ? (
+                <PinBarShell barRef={pinBarRef} hover={pinHover} reduced={reduced} empty={pinnedShown.length === 0} layout="stack">
+                  {pinnedShown.length > 0 ? <ul className="flex flex-col gap-2">{pinnedShown.map((item) => cardFor(item, 'row'))}</ul> : null}
+                </PinBarShell>
+              ) : null}
+              {visible.length > 0 && shown.length === 0 ? <p className="py-8 text-center text-sm text-fg-3">没有匹配的内容。</p> : null}
+              {layout === 'timeline' ? (
+                <div className="flex flex-col gap-5" data-layout="timeline">
+                  {timeline(looseShown, now).map(([day, list]) => (
+                    <TimelineSection key={day} reduced={reduced} title={day} count={list.length}>
+                      <ul className="flex flex-col gap-2">{list.map((item) => cardFor(item, 'row'))}</ul>
+                    </TimelineSection>
                   ))}
                 </div>
-              ) : null}
-              {tagFor === item.id ? (
-                <form
-                  className="mt-2 flex flex-wrap items-center gap-2"
-                  onSubmit={(event) => {
-                    event.preventDefault()
-                    const next = tagDraft.trim().replace(/^#+/, '')
-                    if (!next) return
-                    void saveLabels(item, { tags: [...(item.tags ?? []), next] })
-                    setTagDraft('')
-                  }}
-                >
-                  <label className="sr-only" htmlFor={`tag-${item.id}`}>
-                    新标签
-                  </label>
-                  <input
-                    id={`tag-${item.id}`}
-                    value={tagDraft}
-                    onChange={(event) => setTagDraft(event.target.value)}
-                    placeholder="输入标签后回车"
-                    className="rounded-md border border-line-2 bg-surface-0 px-2 py-1 text-xs text-fg outline-none focus:border-line-3"
-                  />
-                  <Button type="submit" size="sm">
-                    添加
-                  </Button>
-                  {(item.tags ?? []).map((name) => (
-                    <Button
-                      key={name}
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void saveLabels(item, { tags: (item.tags ?? []).filter((tag) => tag !== name) })}
-                    >
-                      移除 #{name}
-                    </Button>
-                  ))}
-                </form>
-              ) : null}
-              {shareFor === item.id && base ? <SharePanel base={base} itemId={item.id} now={now} onClose={() => setShareFor(null)} /> : null}
-            </motion.li>
-            )
-          })}
-        </ul>
+              ) : (
+                <ul className={layout === 'grid' ? 'clip-board grid grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3' : 'clip-board flex flex-col gap-2'} data-layout={layout}>
+                  {looseShown.map((item) => cardFor(item, layout === 'grid' ? 'grid' : 'row'))}
+                </ul>
+              )}
+            </div>
+          </LayoutGroup>
+          {gesture === 'pin-drag' ? <TrashBin handle={trashRef} anchor={trash?.anchor ?? null} gulp={trash?.gulp ?? false} reduced={reduced} /> : null}
         </MotionConfig>
       </div>
       {openIndex >= 0 ? (
