@@ -14,7 +14,7 @@ export type ClipVisual =
   | { id: string; kind: 'code'; lang: string; code: string }
   | { id: string; kind: 'color'; value: string; name?: string }
   | { id: string; kind: 'text'; text: string }
-  | { id: string; kind: 'image'; name: string; src: string; w?: number; h?: number; tone?: string; meta?: string }
+  | { id: string; kind: 'image'; name: string; src: string; full?: string; w?: number; h?: number; tone?: string; meta?: string }
   | {
       id: string
       kind: 'file'
@@ -145,6 +145,7 @@ export function Favicon({ site, size = 28 }: { site: string; size?: number }) {
 const imageMedia = (clip: Extract<ClipVisual, { kind: 'image' }>): ViewerMedia => ({
   type: 'image',
   src: clip.src,
+  full: clip.full,
   name: clip.name,
   meta: clip.meta ?? (clip.w && clip.h ? `${clip.w}×${clip.h}` : undefined),
   layoutId: `img-${clip.id}`,
@@ -170,7 +171,7 @@ function ZoomableThumb({ clip, viewing, onView, slots, className }: BodyProps & 
       {viewing ? (
         <img src={clip.src} alt="" draggable={false} className={`${className} opacity-0`} />
       ) : (
-        <motion.img layoutId={slots?.openImage ? undefined : `img-${clip.id}`} src={clip.src} alt="" draggable={false} className={className} />
+        <motion.img layoutId={`img-${clip.id}`} src={clip.src} alt="" draggable={false} className={className} />
       )}
       <span aria-hidden className="absolute inset-0 grid place-items-center rounded-[var(--radius-xs)] bg-black/30 text-white opacity-0 transition-opacity group-hover/zoom:opacity-100 group-focus-visible/zoom:opacity-100">
         <ZoomInIcon className="size-4" />

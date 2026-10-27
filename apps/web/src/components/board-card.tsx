@@ -25,7 +25,8 @@ import type { TrashHandle } from '@/lib/trash-anchor.ts'
 import type { Item } from '@/lib/types.ts'
 
 export type BoardGesture = 'pin-drag' | 'swipe'
-export type Arrival = 'arrived' | 'landed'
+/** arrived: a peer's clip flies in · landed: our text drops in · uploaded: our finished upload turns opaque where its placeholder was */
+export type Arrival = 'arrived' | 'landed' | 'uploaded'
 export type DragPhase = { id: string; rect: DOMRect } | { id: string; end: 'cancel' | 'deleted' }
 
 /** Horizontal travel (px) a touch swipe needs: right copies, left opens 确认撤回. */
@@ -139,6 +140,8 @@ export type BoardCardProps = {
   onRetractNow: () => void
   onPin: (pinned: boolean) => void
   onOpenImage: () => void
+  /** the board's image viewer is showing this card's image (its thumbnail hands over the shared layoutId) */
+  imageOpen?: boolean
   /** RHEA-190 step 5: known groups; with onMoveGroup the footer shows a group badge */
   groups?: string[]
   onMoveGroup?: (group: string | null) => void
@@ -198,7 +201,10 @@ export function BoardCard(props: BoardCardProps) {
       finish()
       return
     }
-    if (arrival === 'arrived') {
+    if (arrival === 'uploaded') {
+      // The upload placeholder was translucent; the real card picks up where it left off.
+      void animate(el, { opacity: [0.6, 1] }, { duration: dur.base, ease: easeOut }).then(finish)
+    } else if (arrival === 'arrived') {
       const dot = arrivalDot()
       const a = dot?.getBoundingClientRect()
       if (!a || a.width === 0) {
@@ -447,7 +453,7 @@ export function BoardCard(props: BoardCardProps) {
                 </div>
               </form>
             ) : (
-              <Body clip={visual} viewing={viewer !== null} onView={setViewer} slots={slots} />
+              <Body clip={visual} viewing={viewer !== null || props.imageOpen === true} onView={setViewer} slots={slots} />
             )}
           </div>
           {tags.length > 0 || props.tagOpen ? (

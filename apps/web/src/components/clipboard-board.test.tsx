@@ -195,7 +195,7 @@ describe('upload queue', () => {
     queued.focus()
     expect(document.activeElement).toBe(queued)
     fireEvent.click(queued)
-    expect(screen.queryByRole('progressbar', { name: 'd.txt' })).toBeNull()
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'd.txt' })).toBeNull())
     expect(gate.held.map((entry) => entry.name)).not.toContain('d.txt')
 
     fireEvent.click(screen.getByRole('button', { name: '取消 a.txt' }))
@@ -206,12 +206,12 @@ describe('upload queue', () => {
     expect(document.getElementById('clip-item-a.txt')).toBeNull()
   })
 
-  it('cancel-all drops queued rows and aborts the active ones', () => {
+  it('cancel-all drops queued rows and aborts the active ones', async () => {
     const gate = holdUpload()
     renderBoard(gate.upload)
     choose(['a.txt', 'b.txt', 'c.txt', 'd.txt'].map((name) => namedFile(name)))
     fireEvent.click(screen.getByRole('button', { name: '全部取消' }))
-    expect(screen.queryByRole('progressbar', { name: 'd.txt' })).toBeNull()
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'd.txt' })).toBeNull())
     expect(rowFor('a.txt').textContent).toContain('已取消')
     expect(gate.held.every((entry) => entry.signal.aborted)).toBe(true)
     expect(document.getElementById('clip-item-a.txt')).toBeNull()
@@ -241,8 +241,9 @@ describe('upload queue', () => {
     })
     expect(rowFor('bad.txt').textContent).toContain('失败')
     expect(rowFor('bad.txt').textContent).toContain('服务暂时不可用')
-    expect(rowFor('good.txt').textContent).toContain('完成')
+    // a finished upload hands its placeholder over to the real card
     expect(document.getElementById('clip-item-good.txt')).not.toBeNull()
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'good.txt' })).toBeNull())
     expect(document.getElementById('clip-item-bad.txt')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: '重试 bad.txt' }))
@@ -250,9 +251,8 @@ describe('upload queue', () => {
     await act(async () => {
       again?.succeed()
     })
-    expect(rowFor('bad.txt').textContent).toContain('完成')
     expect(document.getElementById('clip-item-bad.txt')).not.toBeNull()
-    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'good.txt' })).toBeNull(), { timeout: 4000 })
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'bad.txt' })).toBeNull())
     expect(document.getElementById('clip-item-good.txt')).not.toBeNull()
   })
 
@@ -312,8 +312,8 @@ describe('upload queue', () => {
     await act(async () => {
       gate.held[1]?.succeed()
     })
-    expect(rowFor('notes.txt').textContent).toContain('完成')
     expect(document.getElementById('clip-item-notes.txt')).not.toBeNull()
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'notes.txt' })).toBeNull())
   })
 })
 
@@ -408,7 +408,8 @@ describe('restored upload queue', () => {
     fireEvent.click(await screen.findByRole('button', { name: '继续 notes.txt' }))
     expect(screen.queryByText('上传中')).toBeNull()
     pickResume(original)
-    await waitFor(() => expect(rowFor('notes.txt').textContent).toContain('完成'))
+    await waitFor(() => expect(document.querySelector('[data-clip-id]')).not.toBeNull())
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'notes.txt' })).toBeNull())
     expect(calls.create).toBe(0)
   })
 
@@ -438,7 +439,8 @@ describe('restored upload queue', () => {
     pickResume(stampedFile('notes.txt', 8, original.lastModified + 5))
     expect(rowFor('notes.txt').textContent).toContain('修改时间不一致，仍要续传？')
     fireEvent.click(screen.getByRole('button', { name: '仍要续传 notes.txt' }))
-    await waitFor(() => expect(rowFor('notes.txt').textContent).toContain('完成'))
+    await waitFor(() => expect(document.querySelector('[data-clip-id]')).not.toBeNull())
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'notes.txt' })).toBeNull())
     expect(calls.create).toBe(0)
   })
 
@@ -489,5 +491,75 @@ describe('restored upload queue', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: '继续 notes.txt' })).toBeNull())
     expect(calls.cancel).toEqual([])
     expect(store.list()).toHaveLength(1)
+  })
+})
+
+describe('upload placeholder cards (RHEA-190 step 6)', () => {
+  const native = { create: URL.createObjectURL, revoke: URL.revokeObjectURL }
+  afterEach(() => {
+    URL.createObjectURL = native.create
+    URL.revokeObjectURL = native.revoke
+  })
+
+  it('drops a translucent card into the board the moment a file is picked, with its own progress line', async () => {
+    const gate = holdUpload()
+    renderBoard(gate.upload)
+    choose([namedFile('notes.txt')])
+    const card = rowFor('notes.txt')
+    expect(card.hasAttribute('data-upload-card')).toBe(true)
+    expect(card.closest('.clip-board')).not.toBeNull()
+    expect(card.querySelector('.dd-card-body')?.className).toContain('opacity-55')
+    const bar = screen.getByRole('progressbar', { name: 'notes.txt' })
+    expect(bar.getAttribute('aria-valuenow')).toBe('0')
+    expect(bar.className).toContain('h-[2px]')
+    await act(async () => {
+      gate.held[0]?.progress(0.5)
+    })
+    expect(screen.getByRole('progressbar', { name: 'notes.txt' }).getAttribute('aria-valuenow')).toBe('50')
+    expect(rowFor('notes.txt').textContent).toContain('50%')
+    // each card carries its own progress: a second pick gets a second bar
+    choose([namedFile('more.txt')])
+    expect(screen.getAllByRole('progressbar')).toHaveLength(2)
+  })
+
+  it('previews a picked image from a local object URL and frees it once the upload has landed', async () => {
+    const created: string[] = []
+    const revoked: string[] = []
+    URL.createObjectURL = (file: Blob) => {
+      const url = `blob:local/${(file as File).name}`
+      created.push(url)
+      return url
+    }
+    URL.revokeObjectURL = (url: string) => {
+      revoked.push(url)
+    }
+    const gate = holdUpload()
+    renderBoard(gate.upload)
+    choose([new File([new Uint8Array(4)], 'photo.png', { type: 'image/png' })])
+    const img = rowFor('photo.png').querySelector('[data-upload-preview="image"]')
+    expect(img?.getAttribute('src')).toBe('blob:local/photo.png')
+    await act(async () => {
+      gate.held[0]?.succeed()
+    })
+    expect(document.getElementById('clip-item-photo.png')).not.toBeNull()
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'photo.png' })).toBeNull())
+    await waitFor(() => expect(revoked).toContain('blob:local/photo.png'), { timeout: 4000 })
+    expect(created).toEqual(['blob:local/photo.png'])
+  })
+
+  it('keeps a failed upload on the board with 重试 and 移除', async () => {
+    const gate = holdUpload()
+    renderBoard(gate.upload)
+    choose([namedFile('bad.txt')])
+    await act(async () => {
+      gate.held[0]?.fail(new ApiError(500, 'INTERNAL_ERROR', null))
+    })
+    const card = rowFor('bad.txt')
+    expect(card.getAttribute('data-upload-status')).toBe('failed')
+    expect(card.textContent).toContain('服务暂时不可用')
+    expect(screen.getByRole('button', { name: '重试 bad.txt' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '移除 bad.txt' }))
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'bad.txt' })).toBeNull())
+    expect(document.getElementById('clip-item-bad.txt')).toBeNull()
   })
 })
