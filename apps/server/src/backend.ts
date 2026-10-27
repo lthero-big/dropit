@@ -728,7 +728,13 @@ export function createBackend(options: BackendOptions = {}) {
     const seen = new Map<string, ItemDevice>();
     for (const peer of peersBySpace.get(spaceId)?.values() ?? []) if (!seen.has(peer.id)) seen.set(peer.id, peer);
     const devices = events.count(spaceId);
-    return seen.size ? { type: 'presence', devices, peers: [...seen.values()] } : { type: 'presence', devices };
+    if (!seen.size) return { type: 'presence', devices };
+    // `devices` counts sockets (two tabs of one browser = 2). Sockets that never named a
+    // device (CLI, API, old clients) are reported as `others`, so the UI can count unique
+    // devices instead of connections (RHEA-190 m12).
+    const others = Math.max(0, devices - (peersBySpace.get(spaceId)?.size ?? 0));
+    const peers = [...seen.values()];
+    return others ? { type: 'presence', devices, peers, others } : { type: 'presence', devices, peers };
   };
   for (const base of ['/api/spaces/:space', '/api/rooms/:room']) {
     app.get(`${base}/ws`, c => {

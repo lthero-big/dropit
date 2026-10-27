@@ -39,8 +39,10 @@ type Message =
   | {type: 'item.created'; item: Item}
   | {type: 'item.updated'; item: Item}
   | {type: 'item.deleted'; id: string}
-  | {type: 'presence'; devices: number; peers?: Array<{id: string; name: string; kind: string}>};
+  | {type: 'presence'; devices: number; peers?: Array<{id: string; name: string; kind: string}>; others?: number};
 ```
+
+`presence.devices` 是连接数（同一浏览器开多个标签页算多个）；`peers` 是去重后的具名设备；`others` 是未声明设备的连接数（如 CLI）。界面上的「在线设备」数 = 在线具名设备数 +（有 `others` 时）1 行「其他客户端」，与列表中标为在线的行数一致。
 
 每次连接都用第一条 `snapshot` 替换本地列表，再按 `id` 应用增量事件；断线后指数退避（含抖动，最长 30 秒）重连。遇到 401/403/404 停止重试。
 

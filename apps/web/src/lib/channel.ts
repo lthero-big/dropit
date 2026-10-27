@@ -28,6 +28,7 @@ export function useChannel(base: string | null) {
   const [authLost, setAuthLost] = useState(0)
   const [devices, setDevices] = useState(0)
   const [peers, setPeers] = useState<ItemDevice[] | null>(null)
+  const [others, setOthers] = useState(0)
   const [groups, setGroups] = useState<string[]>([])
 
   useEffect(() => {
@@ -35,6 +36,7 @@ export function useChannel(base: string | null) {
       setItems([])
       setDevices(0)
       setPeers(null)
+      setOthers(0)
       setGroups([])
       setStatus('idle')
       setExpiresAt(null)
@@ -48,6 +50,7 @@ export function useChannel(base: string | null) {
       setItems([])
       setDevices(0)
       setPeers(null)
+      setOthers(0)
       setGroups([])
       setStatus('connecting')
 
@@ -88,6 +91,7 @@ export function useChannel(base: string | null) {
         if (message.type === 'presence' && Number.isInteger(message.devices) && message.devices >= 0) {
           setDevices(message.devices)
           setPeers(Array.isArray(message.peers) ? message.peers : null)
+          setOthers(Number.isInteger(message.others) && (message.others ?? 0) > 0 ? (message.others as number) : 0)
         }
       }
       ws.onclose = (event) => {
@@ -120,6 +124,8 @@ export function useChannel(base: string | null) {
     devices,
     /** Named peers when the server reports them; null on older servers. */
     peers,
+    /** Live connections that named no device (CLI / API / old clients). */
+    others,
     groups,
     setGroups,
     upsert(item: Item) {
