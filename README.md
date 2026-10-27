@@ -12,8 +12,9 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/lthero1/dropit?logo=docker)](https://hub.docker.com/r/lthero1/dropit)
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-339933?logo=node.js&logoColor=white)
 ![pnpm](https://img.shields.io/badge/pnpm-11-F69220?logo=pnpm&logoColor=white)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
 
-[功能](#功能) · [快速开始](#快速开始) · [部署](#生产部署) · [配置](#配置) · [命令行](#命令行) · [API](docs/api.md) · [开发](#开发)
+[功能](#功能) · [快速开始](#快速开始) · [部署](#生产部署) · [配置](#配置) · [命令行](#命令行) · [API](docs/api.md) · [开发](#开发) · [许可证](#许可证)
 
 </div>
 
@@ -238,4 +239,13 @@ pnpm build
 - [API 与 WebSocket 契约](docs/api.md)
 - [后端环境变量与运行时限额](docs/backend-config.md)
 - [命令行用法](apps/cli/README.md)
-- [Wiki 草稿](docs/wiki/Home.md)
+- [Wiki](https://github.com/lthero-big/dropit/wiki)（源文件在 [docs/wiki/](docs/wiki/Home.md)）
+
+## 许可证
+
+本项目以 [GNU AGPL-3.0-only](LICENSE) 发布。
+
+- 可以免费使用、修改、分发，**也可以商用**。
+- 分发本项目或修改版时，必须同样以 AGPL-3.0 开放完整源代码。
+- 修改后**作为网络服务对外提供**（例如部署给他人访问），也必须向这些用户提供修改后的完整源代码。
+- 本软件按「原样」提供，不附带任何担保。具体条款以 [LICENSE](LICENSE) 原文为准。

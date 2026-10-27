@@ -25,3 +25,4 @@ dropit 是一个自托管的跨设备云剪贴板：在一台设备上粘贴文�
 - 源码：<https://github.com/lthero-big/dropit>
 - 镜像：[`lthero1/dropit`](https://hub.docker.com/r/lthero1/dropit)（`latest` 及按提交号的标签）
 - 运行要求：Node.js 22+（源码）或 Docker
+- 许可证：[GNU AGPL-3.0-only](https://github.com/lthero-big/dropit/blob/main/LICENSE)（可商用；修改后对外提供网络服务须公开源码，详见 [常见问题](FAQ.md)）
