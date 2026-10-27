@@ -7,7 +7,7 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import { upgradeWebSocket } from '@hono/node-server';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { loadConfig, type Config } from './config.js';
-import { ApiError, hash, parseDevice, token, type AccessToken, type Item, type ItemDevice, type ItemMeta, type Session, type TokenScope } from './domain.js';
+import { ApiError, hash, parseDevice, token, type AccessToken, type BrowserSession, type Item, type ItemDevice, type ItemMeta, type Session, type TokenScope } from './domain.js';
 import { parseByteRange, sniffMedia } from './media.js';
 import { SqliteRepository, type Repository } from './repository.js';
 import { DiskFileStorage, type FileStorage } from './files.js';
@@ -16,6 +16,7 @@ import { oauthProviders, type OAuthProvider } from './oauth.js';
 import { ClipboardService } from './service.js';
 import { clientIpResolver, RateLimiter } from './rate-limit.js';
 import { limitRanges, RuntimeLimits } from './limits.js';
+import { describeAgent } from './agent.js';
 
 type Env = { Variables: { session: Session | undefined; ip: string } };
 type Ctx = Context<Env>;
@@ -152,7 +153,11 @@ export function createBackend(options: BackendOptions = {}) {
       if (!auth) { c.header('WWW-Authenticate', 'Bearer'); throw new ApiError(401, 'UNAUTHENTICATED'); }
       c.set('session', auth);
       consume(c, `${chunkRequest ? 'chunk-token' : 'token'}:${auth.bearer!.id}`, chunkRequest ? config.rateChunk : config.rateToken);
-    } else c.set('session', rawSession ? repo.session(hash(rawSession), now()) : undefined);
+    } else {
+      const browser = rawSession ? repo.session(hash(rawSession), now()) : undefined;
+      if (browser) repo.touchSession(browser.sessionHash, now(), ipSummary(ip));
+      c.set('session', browser);
+    }
     const auth = c.get('session');
     if (auth) consume(c, `${chunkRequest ? 'chunk' : 'general'}:user:${auth.user.id}`, chunkRequest ? config.rateChunk : config.rateGeneral);
     const safe = ['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
@@ -297,7 +302,8 @@ export function createBackend(options: BackendOptions = {}) {
       const retry = limiter.consume(`auth:identity:${hash(`${providerName}:${identity.subject}`)}`, config.rateAuth, now());
       if (retry) { c.header('Retry-After', String(retry)); throw new ApiError(429, 'RATE_LIMITED'); }
       const session = token();
-      repo.login(identity, flow.inviteHash, config.adminEmails, hash(session), now() + config.sessionMs, now());
+      repo.login(identity, flow.inviteHash, config.adminEmails, hash(session), now() + config.sessionMs, now(),
+        { userAgent: c.req.header('user-agent') ?? null, ipSummary: ipSummary(c.get('ip')) });
       setCookie(c, sessionCookie, session, { ...cookie, maxAge: Math.floor(config.sessionMs / 1000) });
       return c.redirect(`${config.origin}/`);
     } catch (error) {
@@ -316,6 +322,54 @@ export function createBackend(options: BackendOptions = {}) {
     else repo.logout(auth.sessionHash);
     events.revalidate();
     if (!auth.bearer) deleteCookie(c, sessionCookie, cookie);
+    return c.body(null, 204);
+  });
+  // RHEA-190 r4: 登录设备. Each browser login is listed with a readable name and
+  // can be signed out on its own. Only cookie sessions may manage sessions; a
+  // bearer token cannot sign browsers out (tokens are managed under 令牌).
+  const socketsBySession = new Map<string, number>();
+  const sessionView = (row: BrowserSession, currentId: string | undefined, online: boolean) => {
+    const agent = describeAgent(row.userAgent);
+    return { id: row.id, current: row.id === currentId, online, createdAt: row.createdAt, lastSeenAt: row.lastSeenAt,
+      expiresAt: row.expiresAt, ipSummary: row.ipSummary, browser: agent.browser, os: agent.os, device: row.device };
+  };
+  const listSessions = (userId: string, auth: Session) => {
+    const onlineIds = new Set<string>();
+    for (const [sessionHash, count] of socketsBySession) if (count > 0) {
+      const live = repo.session(sessionHash, now());
+      if (live?.sessionId && live.user.id === userId) onlineIds.add(live.sessionId);
+    }
+    return repo.browserSessions(userId, now()).map(row => sessionView(row, auth.sessionId, onlineIds.has(row.id)));
+  };
+  app.get('/api/sessions', c => {
+    const auth = browserSession(c);
+    return c.json({ sessions: listSessions(auth.user.id, auth) });
+  });
+  app.delete('/api/sessions/:id', c => {
+    const auth = browserSession(c);
+    limit(c, 'session-revoke', config.rateAuth);
+    const removed = repo.revokeSession(c.req.param('id'), auth.user.id);
+    events.revalidate();
+    if (removed === auth.sessionHash) deleteCookie(c, sessionCookie, cookie);
+    return c.body(null, 204);
+  });
+  app.post('/api/sessions/revoke-others', c => {
+    const auth = browserSession(c);
+    limit(c, 'session-revoke', config.rateAuth);
+    const revoked = repo.revokeOtherSessions(auth.user.id, auth.sessionHash);
+    events.revalidate();
+    return c.json({ revoked });
+  });
+  app.get('/api/admin/users/:id/sessions', c => {
+    const auth = service.admin(c.get('session'));
+    if (!repo.users().some(user => user.id === c.req.param('id'))) throw new ApiError(404, 'NOT_FOUND');
+    return c.json({ sessions: listSessions(c.req.param('id'), auth) });
+  });
+  app.delete('/api/admin/sessions/:id', c => {
+    const auth = service.admin(c.get('session'));
+    const removed = repo.revokeSession(c.req.param('id'));
+    events.revalidate();
+    if (removed === auth.sessionHash) deleteCookie(c, sessionCookie, cookie);
     return c.body(null, 204);
   });
   app.get('/api/invites/:token', c => {
@@ -692,6 +746,7 @@ export function createBackend(options: BackendOptions = {}) {
       };
       const peer = parseDevice(c.req.query('device'), c.req.query('name'), c.req.query('kind'), false);
       const peerKey = {};
+      const sessionKey = auth && !auth.bearer ? auth.sessionHash : undefined;
       let unsubscribe: (() => void) | undefined;
       let opened = false;
       const release = () => {
@@ -701,7 +756,9 @@ export function createBackend(options: BackendOptions = {}) {
         if (peers?.delete(peerKey) && !peers.size) peersBySpace.delete(space.id);
         if (!opened) return;
         opened = false;
-        for (const [map, key] of [[socketsByIp, ip], [socketsByUser, userKey]] as const) {
+        const counters: [Map<string, number>, string][] = [[socketsByIp, ip], [socketsByUser, userKey]];
+        if (sessionKey) counters.push([socketsBySession, sessionKey]);
+        for (const [map, key] of counters) {
           const count = (map.get(key) ?? 1) - 1;
           if (count) map.set(key, count); else map.delete(key);
         }
@@ -716,6 +773,10 @@ export function createBackend(options: BackendOptions = {}) {
           opened = true;
           socketsByIp.set(ip, (socketsByIp.get(ip) ?? 0) + 1);
           socketsByUser.set(userKey, (socketsByUser.get(userKey) ?? 0) + 1);
+          if (sessionKey) {
+            socketsBySession.set(sessionKey, (socketsBySession.get(sessionKey) ?? 0) + 1);
+            if (peer) repo.tagSession(sessionKey, peer);
+          }
           unsubscribe = events.subscribe(space.id, {
             send(data) { if (((ws.raw as WebSocket | undefined)?.bufferedAmount ?? 0) > 1024 ** 2) { ws.close(1013, 'Slow consumer'); release(); } else ws.send(data); },
             close(code, reason) { ws.close(code, reason); release(); },

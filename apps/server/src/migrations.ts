@@ -142,3 +142,19 @@ ALTER TABLE spaces ADD COLUMN deviceHash TEXT;
 CREATE UNIQUE INDEX room_device ON spaces(deviceHash) WHERE deviceHash IS NOT NULL;
 PRAGMA user_version=10;
 `;
+
+// RHEA-190 r4: every browser login becomes a manageable device. Old rows get a
+// random id and stay "unknown device" until the browser is seen again.
+export const migration11 = `
+ALTER TABLE sessions ADD COLUMN id TEXT;
+ALTER TABLE sessions ADD COLUMN createdAt INTEGER;
+ALTER TABLE sessions ADD COLUMN lastSeenAt INTEGER;
+ALTER TABLE sessions ADD COLUMN userAgent TEXT;
+ALTER TABLE sessions ADD COLUMN ipSummary TEXT;
+ALTER TABLE sessions ADD COLUMN deviceId TEXT;
+ALTER TABLE sessions ADD COLUMN deviceName TEXT;
+ALTER TABLE sessions ADD COLUMN deviceKind TEXT;
+UPDATE sessions SET id=lower(hex(randomblob(16))) WHERE id IS NULL;
+CREATE UNIQUE INDEX session_id ON sessions(id);
+PRAGMA user_version=11;
+`;

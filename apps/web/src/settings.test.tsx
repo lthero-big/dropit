@@ -219,6 +219,7 @@ describe('settings and device confirmation', () => {
     stubFetch((url) => {
       if (url === '/api/me') return json(me)
       if (url === '/api/tokens') return json({ tokens: [] })
+      if (url === '/api/sessions') return json({ sessions: [] })
       if (url.startsWith('/api/auth/device?')) return json({ error: { code: 'NOT_FOUND', detail: '<script>' } }, 404)
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })

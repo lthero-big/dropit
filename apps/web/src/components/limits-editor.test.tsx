@@ -243,3 +243,34 @@ describe('LimitsEditor', () => {
     expect(within(row('maxTextBytes')).getByRole('button', { name: '恢复默认' })).toHaveProperty('disabled', true)
   })
 })
+
+describe('limits secondary nav (RHEA-190 r4)', () => {
+  it('lists 容量 / 时间 / 限流 / 变更记录 with counts and jumps to the subsection', async () => {
+    server = sample()
+    audit = { entries: [], nextCursor: null }
+    stubFetch()
+    const scrolled: string[] = []
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id)
+    }
+    try {
+      render(<Harness />)
+      const nav = screen.getByRole('navigation', { name: '限制分类' })
+      const links = within(nav).getAllByRole('link')
+      expect(links.map((link) => link.textContent)).toEqual(['容量7', '时间5', '限流11', '变更记录0'])
+      expect(within(nav).getByRole('link', { name: /容量/ }).getAttribute('aria-current')).toBe('location')
+      for (const id of ['limits-capacity', 'limits-time', 'limits-rate', 'limits-audit']) expect(document.getElementById(id)).toBeTruthy()
+      expect(document.getElementById('limits-capacity')?.querySelector('[data-limit="maxFileBytes"]')).toBeTruthy()
+      expect(document.getElementById('limits-rate')?.querySelector('[data-limit="rateChunk"]')).toBeTruthy()
+      fireEvent.click(within(nav).getByRole('link', { name: /限流/ }))
+      expect(scrolled).toEqual(['limits-rate'])
+      expect(within(nav).getByRole('link', { name: /限流/ }).getAttribute('aria-current')).toBe('location')
+      expect(within(nav).getByRole('link', { name: /容量/ }).getAttribute('aria-current')).toBeNull()
+      expect(window.location.hash).toBe('#limits-rate')
+      await waitFor(() => expect(screen.queryByText('正在加载变更记录…')).toBeNull())
+    } finally {
+      Element.prototype.scrollIntoView = original
+    }
+  })
+})

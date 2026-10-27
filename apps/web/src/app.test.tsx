@@ -325,7 +325,7 @@ describe('dropit web', () => {
     expect(created?.init?.body).toBe(JSON.stringify({ email: 'new@example.com', name: 'New', role: 'admin', quotaBytes: 2 * 1024 * 1024 }))
 
     fireEvent.click(screen.getAllByRole('button', { name: '编辑' })[1]!)
-    fireEvent.click(screen.getByRole('button', { name: '强制下线' }))
+    fireEvent.click(screen.getByRole('button', { name: '强制下线（全部设备）' }))
     await waitFor(() => expect(calls.some((call) => call.url === '/api/admin/users/u2/logout' && call.init?.method === 'POST')).toBe(true))
     fireEvent.change(screen.getByLabelText('角色'), { target: { value: 'admin' } })
     fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
