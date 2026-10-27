@@ -1451,5 +1451,5 @@ test('RHEA-190 step 7: migration 10 adds the per-browser room binding to old dat
   assert.equal(repo.deviceRoom('dh', 9999999999999), undefined);
   const check = new Database(path, { readonly: true });
   t.after(() => check.close());
-  assert.equal(check.pragma('user_version', { simple: true }), 10);
+  assert.equal(check.pragma('user_version', { simple: true }), 11);
 });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
+import { DeviceSessions } from '@/components/device-sessions.tsx'
 import { LimitsEditor } from '@/components/limits-editor.tsx'
 import { PageTitle, Shell } from '@/components/shell.tsx'
 import { Button } from '@/components/ui/button.tsx'
@@ -475,10 +476,16 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
         <Button type="button" variant="outline" onClick={onClose}>取消</Button>
         {creating ? null : (
           <Button type="button" variant="outline" disabled={busy} onClick={() => void forceLogout()}>
-            强制下线
+            强制下线（全部设备）
           </Button>
         )}
       </div>
+      {!creating && user && !user.pending ? (
+        <section className="mt-6 border-t border-line-1 pt-4">
+          <h3 className="mb-3 text-xs font-medium">登录设备</h3>
+          <DeviceSessions userId={user.id} onSelfSignedOut={() => window.location.assign('/login')} />
+        </section>
+      ) : null}
     </form>
   )
 }

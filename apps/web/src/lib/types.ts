@@ -194,3 +194,17 @@ export type ServerMessage =
   | { type: 'groups'; groups: string[] }
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'stopped'
+
+/** RHEA-190 r4: one browser login as listed under 登录设备. */
+export interface DeviceSession {
+  id: string
+  current: boolean
+  online: boolean
+  createdAt: number | null
+  lastSeenAt: number | null
+  expiresAt: number
+  ipSummary: string | null
+  browser: string
+  os: string
+  device: { id: string; name: string; kind: 'mac' | 'phone' | 'pad' | 'pc' | 'cli' } | null
+}

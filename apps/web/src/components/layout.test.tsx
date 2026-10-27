@@ -127,7 +127,7 @@ describe('account menu', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '账户' })).toBeNull())
   })
 
-  it('gives the space switcher and room button a 40px hit area', async () => {
+  it('shows a single space as a plain label (no dropdown) and keeps the room button at 40px', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -147,10 +147,44 @@ describe('account menu', () => {
         </SessionProvider>
       </ThemeProvider>,
     )
+    const label = await screen.findByText('私人空间')
+    expect(label.hasAttribute('data-space-label')).toBe(true)
+    expect(screen.queryByRole('button', { name: '私人空间' })).toBeNull()
+    expect(label.style.minHeight).toBe('40px')
+    expect(screen.getByRole('button', { name: '临时房间' }).style.minHeight).toBe('40px')
+  })
+
+  it('offers a 40px space switcher only when the account belongs to more than one space', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url === '/api/me') return Response.json(me)
+        return Response.json({ error: { code: 'NOT_FOUND' } }, { status: 404 })
+      }),
+    )
+    render(
+      <ThemeProvider>
+        <SessionProvider>
+          <MemoryRouter>
+            <Shell
+              spaces={[
+                { id: 's1', name: 'Private space', ownerId: 'u1', expiresAt: null },
+                { id: 's2', name: 'Private space', ownerId: 'u9', expiresAt: null },
+              ]}
+              spaceId="s1"
+              onSpace={() => {}}
+            >
+              <p>内容</p>
+            </Shell>
+          </MemoryRouter>
+        </SessionProvider>
+      </ThemeProvider>,
+    )
     const space = await screen.findByRole('button', { name: '私人空间' })
     expect(space.style.minHeight).toBe('40px')
     expect(space.style.minWidth).toBe('40px')
-    expect(screen.getByRole('button', { name: '临时房间' }).style.minHeight).toBe('40px')
+    expect(space.getAttribute('title')).toBe('切换空间')
   })
 
   it('toggles theme from the header icon', async () => {

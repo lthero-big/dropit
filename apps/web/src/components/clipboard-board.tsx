@@ -1069,6 +1069,7 @@ export function ClipboardBoard({
         if (el) dotRefs.current.set(key, el)
         else dotRefs.current.delete(key)
       }}
+      manageHref={base?.startsWith('/api/spaces/') ? '/settings#devices' : undefined}
     />
   )
 

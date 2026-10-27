@@ -78,6 +78,8 @@ export interface DeviceAuthorization {
 }
 export interface Session {
   user: User; sessionHash: string; expiresAt: number;
+  /** Public id of a browser session (never the cookie or its hash). */
+  sessionId?: string;
   bearer?: { id: string; scopes: TokenScope[] };
 }
 
@@ -98,3 +100,10 @@ export function publicShareItem(item: Item) {
     pinned: pub.pinned, tags: pub.tags,
   };
 }
+
+/** What a browser login looks like in 登录设备. Never exposes the cookie or its hash. */
+export interface BrowserSession {
+  id: string; userId: string; createdAt: number | null; lastSeenAt: number | null; expiresAt: number;
+  userAgent: string | null; ipSummary: string | null; device: ItemDevice | null;
+}
+export interface SessionMeta { userAgent?: string | null; ipSummary?: string | null }

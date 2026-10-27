@@ -9,6 +9,7 @@ import { CheckIcon, ChevronDownIcon, CopyIcon, PinOffIcon } from 'lucide-react'
 import { DeviceDot } from '@/components/board-chrome.tsx'
 import { GroupDot, type GroupFilter } from '@/components/board-groups.tsx'
 import { DeviceGlyph } from '@/components/device-glyph.tsx'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu.tsx'
 import type { PresenceDot } from '@/lib/board-hooks.ts'
 import { deviceColor } from '@/lib/device.ts'
 import { useIsolatePointer } from '@/components/clip-media.tsx'
@@ -71,8 +72,10 @@ export function PresencePill(props: {
   reduced: boolean
   ripples: Record<string, number>
   dotRef: (key: string, el: HTMLElement | null) => void
+  /** RHEA-190 r4: where 登录设备 lives (spaces only; rooms have no accounts). */
+  manageHref?: string
 }) {
-  const { count, dots, live, reduced, ripples, dotRef } = props
+  const { count, dots, live, reduced, ripples, dotRef, manageHref } = props
   const label = `${count} 台设备在线`
   const body = (
     <>
@@ -105,17 +108,64 @@ export function PresencePill(props: {
       </span>
     </>
   )
+  const online = dots.filter((dot) => live && dot.online)
+  const offline = dots.filter((dot) => !(live && dot.online))
   return (
-    <span
-      className="inline-flex min-h-8 items-center gap-0.5 rounded-full py-0.5 pl-1 text-xs font-medium text-fg-2 sm:border sm:border-[var(--line-1)] sm:bg-[var(--surface-1)] sm:pr-2.5"
-      tabIndex={0}
-      role="status"
-      title={label}
-      aria-label={label}
-      data-presence=""
-    >
-      {body}
-    </span>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex min-h-8 items-center rounded-full text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+          aria-label={`${label}，查看设备`}
+          aria-haspopup="menu"
+          data-presence-trigger=""
+        >
+          <span
+            className="inline-flex min-h-8 items-center gap-0.5 rounded-full py-0.5 pl-1 text-xs font-medium text-fg-2 sm:border sm:border-[var(--line-1)] sm:bg-[var(--surface-1)] sm:pr-2.5"
+            role="status"
+            title={label}
+            aria-label={label}
+            data-presence=""
+          >
+            {body}
+          </span>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-72 p-0" data-presence-list="">
+        <DropdownMenuLabel className="px-3 pt-3 pb-1 text-[11px] font-medium text-muted-foreground normal-case">
+          {live ? `在线设备 · ${count}` : '离线 · 正在重新连接'}
+        </DropdownMenuLabel>
+        <ul className="px-1 pb-1" aria-label="在线设备">
+          {[...online, ...offline].map((dot) => {
+            const on = live && dot.online
+            return (
+              <li key={dot.key} className="flex min-h-9 items-center gap-2 rounded-md px-2 text-sm" data-presence-row={dot.key}>
+                <span
+                  aria-hidden="true"
+                  className="size-2 shrink-0 rounded-full"
+                  style={{ background: on ? (dot.kind ? deviceColor(dot.kind) : 'var(--primary)') : 'transparent', boxShadow: on ? undefined : 'inset 0 0 0 1.5px var(--line-3)' }}
+                />
+                {dot.kind ? <DeviceGlyph kind={dot.kind} className="size-3.5 shrink-0 text-fg-2" /> : null}
+                <span className="min-w-0 flex-1 truncate">
+                  {dot.name}
+                  {dot.self ? <span className="text-muted-foreground">（本设备）</span> : null}
+                </span>
+                <span className={`text-[11px] ${on ? 'text-primary' : 'text-muted-foreground'}`}>{on ? '在线' : '离线'}</span>
+              </li>
+            )
+          })}
+        </ul>
+        {manageHref ? (
+          <>
+            <DropdownMenuSeparator className="my-0" />
+            <a href={manageHref} className="flex min-h-10 items-center justify-between px-3 text-xs font-medium no-underline hover:bg-surface-2" data-presence-manage="">
+              管理登录设备（可单独登出）
+              <span aria-hidden="true">→</span>
+            </a>
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 

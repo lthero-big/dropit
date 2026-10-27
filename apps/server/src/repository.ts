@@ -2,8 +2,8 @@ import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ApiError, type AccessToken, type DeviceAuthorization, type Flow, type Identity, type Invite, type Item, type ItemDevice, type Session, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10 } from './migrations.js';
+import { ApiError, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11 } from './migrations.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
 type UserRow = User & { quotaBytes: number | null };
@@ -40,9 +40,17 @@ export interface Repository {
   limitAudit(limit: number, cursor?: number): LimitAudit[];
   saveFlow(flow: Flow): void;
   consumeFlow(stateHash: string, browserHash: string, provider: string, now: number): Flow | undefined;
-  login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number): User;
+  login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number, meta?: SessionMeta): User;
   session(sessionHash: string, now: number): Session | undefined;
   logout(sessionHash: string): void;
+  /** Throttled "last active" bump for a browser session. */
+  touchSession(sessionHash: string, now: number, ipSummary: string): void;
+  /** Remember which device (localStorage identity) a browser session belongs to. */
+  tagSession(sessionHash: string, device: ItemDevice): void;
+  browserSessions(userId: string, now: number): BrowserSession[];
+  /** Deletes one browser session; userId scopes it to its owner (omit for admins). Returns its hash. */
+  revokeSession(id: string, userId?: string): string;
+  revokeOtherSessions(userId: string, keepHash: string): number;
   createAccessToken(record: AccessToken, tokenHash: string): void;
   accessTokens(userId?: string): AccessToken[];
   tokenSession(tokenHash: string, now: number, touch?: boolean): Session | undefined;
@@ -110,8 +118,8 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 10) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 10) this.db.transaction(() => {
+    if (version > 11) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 11) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
@@ -121,7 +129,8 @@ export class SqliteRepository implements Repository {
       if (version < 7) this.db.exec(migration7);
       if (version < 8) this.db.exec(migration8);
       if (version < 9) this.db.exec(migration9);
-      this.db.exec(migration10);
+      if (version < 10) this.db.exec(migration10);
+      this.db.exec(migration11);
     })();
   }
   limitOverrides(): LimitOverrides {
@@ -155,7 +164,7 @@ export class SqliteRepository implements Repository {
       return flow;
     })();
   }
-  login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number) {
+  login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number, meta: SessionMeta = {}) {
     return this.db.transaction(() => {
       let row = this.db.prepare('SELECT u.* FROM users u JOIN identities i ON i.userId=u.id WHERE i.provider=? AND i.subject=?')
         .get(identity.provider, identity.subject) as UserRow | undefined;
@@ -195,17 +204,43 @@ export class SqliteRepository implements Repository {
           this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(invite.spaceId, row.id);
         }
       }
-      this.db.prepare('INSERT INTO sessions (sessionHash,userId,expiresAt) VALUES (?,?,?)').run(sessionHash, row.id, expiresAt);
+      this.db.prepare('INSERT INTO sessions (sessionHash,userId,expiresAt,id,createdAt,lastSeenAt,userAgent,ipSummary) VALUES (?,?,?,?,?,?,?,?)')
+        .run(sessionHash, row.id, expiresAt, randomUUID(), now, now, meta.userAgent?.slice(0, 400) ?? null, meta.ipSummary ?? null);
       return toUser(row);
     }).immediate();
   }
   session(sessionHash: string, now: number): Session | undefined {
-    const row = this.db.prepare('SELECT u.*, s.expiresAt FROM sessions s JOIN users u ON u.id=s.userId WHERE s.sessionHash=? AND s.expiresAt>? AND u.disabled=0')
-      .get(sessionHash, now) as (UserRow & { expiresAt: number }) | undefined;
+    const row = this.db.prepare('SELECT u.*, s.expiresAt, s.id AS sessionId FROM sessions s JOIN users u ON u.id=s.userId WHERE s.sessionHash=? AND s.expiresAt>? AND u.disabled=0')
+      .get(sessionHash, now) as (UserRow & { expiresAt: number; sessionId: string | null }) | undefined;
     if (!row) return undefined;
-    return { user: toUser(row), expiresAt: row.expiresAt, sessionHash };
+    return { user: toUser(row), expiresAt: row.expiresAt, sessionHash, ...(row.sessionId ? { sessionId: row.sessionId } : {}) };
   }
   logout(sessionHash: string) { this.db.prepare('DELETE FROM sessions WHERE sessionHash=?').run(sessionHash); }
+  touchSession(sessionHash: string, now: number, ipSummary: string) {
+    this.db.prepare('UPDATE sessions SET lastSeenAt=?, ipSummary=? WHERE sessionHash=? AND (lastSeenAt IS NULL OR lastSeenAt<? OR ipSummary IS NOT ?)')
+      .run(now, ipSummary, sessionHash, now - 60000, ipSummary);
+  }
+  tagSession(sessionHash: string, device: ItemDevice) {
+    this.db.prepare('UPDATE sessions SET deviceId=?, deviceName=?, deviceKind=? WHERE sessionHash=? AND (deviceId IS NOT ? OR deviceName IS NOT ? OR deviceKind IS NOT ?)')
+      .run(device.id, device.name, device.kind, sessionHash, device.id, device.name, device.kind);
+  }
+  browserSessions(userId: string, now: number): BrowserSession[] {
+    const rows = this.db.prepare(`SELECT id,userId,createdAt,lastSeenAt,expiresAt,userAgent,ipSummary,deviceId,deviceName,deviceKind
+      FROM sessions WHERE userId=? AND expiresAt>? ORDER BY coalesce(lastSeenAt,createdAt,0) DESC, id`).all(userId, now) as
+      (Omit<BrowserSession, 'device'> & { deviceId: string | null; deviceName: string | null; deviceKind: string | null })[];
+    return rows.map(({ deviceId, deviceName, deviceKind, ...row }) => ({ ...row,
+      device: deviceId ? { id: deviceId, name: deviceName || '未命名设备', kind: (deviceKind ?? 'pc') as ItemDevice['kind'] } : null }));
+  }
+  revokeSession(id: string, userId?: string) {
+    const row = (userId === undefined ? this.db.prepare('SELECT sessionHash FROM sessions WHERE id=?').get(id)
+      : this.db.prepare('SELECT sessionHash FROM sessions WHERE id=? AND userId=?').get(id, userId)) as { sessionHash: string } | undefined;
+    if (!row) throw new ApiError(404, 'NOT_FOUND');
+    this.db.prepare('DELETE FROM sessions WHERE sessionHash=?').run(row.sessionHash);
+    return row.sessionHash;
+  }
+  revokeOtherSessions(userId: string, keepHash: string) {
+    return this.db.prepare('DELETE FROM sessions WHERE userId=? AND sessionHash<>?').run(userId, keepHash).changes;
+  }
   createAccessToken(record: AccessToken, tokenHash: string) {
     this.db.prepare(`INSERT INTO access_tokens (id,tokenHash,userId,name,scopes,createdAt,lastUsedAt,expiresAt,revoked)
       VALUES (@id,@tokenHash,@userId,@name,@scopes,@createdAt,@lastUsedAt,@expiresAt,@revoked)`)

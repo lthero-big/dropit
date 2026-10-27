@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router'
-import { LogOutIcon, MoonIcon, SettingsIcon, ShieldIcon, SunIcon } from 'lucide-react'
+import { CheckIcon, ChevronDownIcon, LogOutIcon, MoonIcon, SettingsIcon, ShieldIcon, SunIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button.tsx'
 import {
@@ -98,20 +98,48 @@ export function Shell({
           {/* the board portals its named presence dots here (RHEA-190 step 5) */}
           <div id={PRESENCE_SLOT} className="flex min-w-0 items-center" />
           {me && current && onSpace ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button type="button" variant="outline" className="h-10 min-h-10 min-w-10 max-w-[9rem] truncate normal-case tracking-normal" style={hitTarget}>
-                  {spaceLabel(current, me.user.id, spaces)}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent>
-                {spaces.map((space) => (
-                  <DropdownMenuItem key={space.id} onSelect={() => onSpace(space.id)}>
-                    {spaceLabel(space, me.user.id, spaces)}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+            // RHEA-190 r4: this is a *space switcher*, not a "create space" menu.
+            // dropit has no public spaces: every account owns one 私人空间 and may
+            // also belong to spaces it was invited into. With a single space there
+            // is nothing to switch to, so it renders as a plain label.
+            spaces.length > 1 ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-10 min-h-10 min-w-10 max-w-[10rem] gap-1 truncate normal-case tracking-normal"
+                    style={hitTarget}
+                    title="切换空间"
+                    data-space-switcher=""
+                  >
+                    <span className="truncate">{spaceLabel(current, me.user.id, spaces)}</span>
+                    <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" aria-hidden="true" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent className="min-w-56">
+                  <DropdownMenuLabel className="px-3 pt-2 pb-1 text-[11px] font-medium text-muted-foreground normal-case">切换空间</DropdownMenuLabel>
+                  {spaces.map((space) => (
+                    <DropdownMenuItem key={space.id} className="gap-2 normal-case tracking-normal" onSelect={() => onSpace(space.id)}>
+                      <CheckIcon className={`size-3.5 shrink-0 ${space.id === current.id ? '' : 'invisible'}`} aria-hidden="true" />
+                      <span className="min-w-0 flex-1 truncate">{spaceLabel(space, me.user.id, spaces)}</span>
+                      <span className="text-[11px] text-muted-foreground">{space.ownerId === me.user.id ? '我的' : '受邀加入'}</span>
+                    </DropdownMenuItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                  <p className="max-w-64 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">只列出你的私人空间和受邀加入的空间。dropit 没有公开空间，也不能在这里新建空间。</p>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <span
+                className="inline-flex h-10 min-h-10 max-w-[10rem] items-center truncate rounded-md border border-line-1 px-3 text-sm font-medium text-fg-2"
+                style={hitTarget}
+                title="只有你和你登录的设备能看到这个空间"
+                data-space-label=""
+              >
+                {spaceLabel(current, me.user.id, spaces)}
+              </span>
+            )
           ) : null}
           <nav className="hidden items-center gap-4 text-xs font-medium text-fg-2 md:flex">
             <Link to="/" className={location.pathname === '/' ? 'border-b border-primary' : ''}>

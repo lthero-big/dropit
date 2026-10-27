@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
 import { DeviceConfirm } from '@/components/device-confirm.tsx'
+import { DeviceSessions } from '@/components/device-sessions.tsx'
 import { PageTitle, Shell } from '@/components/shell.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText } from '@/lib/api.ts'
@@ -60,6 +61,12 @@ export function SettingsPage() {
       cancelled = true
     }
   }, [load, me])
+
+  useEffect(() => {
+    if (!me || window.location.hash !== '#devices') return
+    const id = window.setTimeout(() => document.getElementById('devices')?.scrollIntoView?.({ block: 'start' }), 50)
+    return () => window.clearTimeout(id)
+  }, [me])
 
   useEffect(() => {
     if (!creating || secret) return
@@ -177,7 +184,11 @@ export function SettingsPage() {
 
   return (
     <Shell>
-      <PageTitle title="设置" sub="确认设备码，或手动创建个人访问令牌。明文只显示一次。" />
+      <PageTitle title="设置" sub="管理登录设备，确认设备码，或手动创建个人访问令牌。明文只显示一次。" />
+      <section id="devices" className="mb-8 scroll-mt-20">
+        <h2 className="mb-3 text-xs font-medium">登录设备</h2>
+        <DeviceSessions onSelfSignedOut={() => void refresh().then(() => window.location.assign('/login'))} />
+      </section>
       <DeviceConfirm initialCode="" initialVerificationId={null} auto={false} />
       <section className="mt-8">
         <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
