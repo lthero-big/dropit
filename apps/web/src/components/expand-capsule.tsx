@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 const ACTION = 40
 const PAD = 8
 const BORDER = 4
+const BOUND_GUTTER = 8
 const OPEN_ROW = 48
 const FADE_MS = 90
 const ENTER_MS = 200
@@ -93,6 +94,25 @@ export function ExpandCapsule({
     return collapsedWidth
   }
 
+  // How wide the open pill may grow. A shrink-wrapped parent (e.g. an absolutely positioned
+  // action row) only reports its current width, which made 3 actions wrap onto 2 rows
+  // (RHEA-190 step 9). When an ancestor is marked [data-capsule-bound], the pill may grow
+  // leftwards (together with the parent's other children) up to that ancestor's left edge.
+  function availableWidth() {
+    const pill = pillRef.current
+    const parent = pill?.parentElement
+    const parentWidth = parent?.clientWidth ?? 0
+    const bound = pill?.closest<HTMLElement>('[data-capsule-bound]')
+    if (pill && parent && bound && bound !== pill) {
+      const boundRect = bound.getBoundingClientRect()
+      const pillRect = pill.getBoundingClientRect()
+      const before = Math.max(0, pillRect.left - parent.getBoundingClientRect().left)
+      const room = pillRect.right - boundRect.left - BOUND_GUTTER - before
+      if (boundRect.width > 0 && room > 0) return Math.max(room, parentWidth)
+    }
+    return parentWidth > 0 ? parentWidth : Number.POSITIVE_INFINITY
+  }
+
   function measureLayout() {
     const acts = actsRef.current
     const count = acts ? acts.querySelectorAll('button, a').length : 0
@@ -105,8 +125,7 @@ export function ExpandCapsule({
       if (acts.offsetWidth > 0) content = acts.offsetWidth
     }
     const natural = content + BORDER
-    const parentWidth = pillRef.current?.parentElement?.clientWidth ?? 0
-    const limit = parentWidth > 0 ? parentWidth : Number.POSITIVE_INFINITY
+    const limit = availableWidth()
     const openHeight = Math.max(height, OPEN_ROW)
     if (natural <= limit) return { width: natural, height: openHeight, wrap: false, vertical: false, count }
     if (limit < ACTION + PAD + BORDER) {

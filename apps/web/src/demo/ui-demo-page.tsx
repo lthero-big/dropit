@@ -452,7 +452,7 @@ export function UiDemoPage() {
         {gesture === 'pin-drag' ? <TrashBin handle={trashRef} anchor={trash?.anchor ?? null} gulp={trash?.gulp ?? false} reduced={reduced} /> : null}
         <ToastHost toast={toast} docked={docked} onClose={() => setToast(null)} />
         <p className="mx-auto hidden max-w-[1120px] px-4 pb-8 text-[11px] text-[var(--fg-4)] sm:block sm:px-6">
-          快捷键：N 模拟新内容 · D 切换风格 · M 切换明暗 · {gesture === 'swipe' ? '点卡片显示操作 · 右滑复制 / 左滑再点确认撤回' : '点卡片显示操作（悬停也会显示）· 拖到置顶栏或分组标签 · 拖到旁边的垃圾桶或长按 ↶ 撤回'}
+          快捷键：N 模拟新内容 · D 切换风格 · M 切换明暗 · {gesture === 'swipe' ? '点卡片显示操作 · 右滑复制 / 左滑再点确认撤回' : '点卡片显示操作（悬停也会显示）· 拖到置顶栏或分组标签 · 拖到旁边的垃圾桶或点 ↶ 再确认撤回'}
         </p>
       </div>
     </MotionConfig>

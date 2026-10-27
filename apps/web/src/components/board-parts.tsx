@@ -5,14 +5,13 @@
  */
 import { useRef, useState, type ReactNode } from 'react'
 import { AnimatePresence, motion, type PanInfo } from 'motion/react'
-import { CheckIcon, ChevronDownIcon, CopyIcon, PinOffIcon, TagIcon } from 'lucide-react'
+import { CheckIcon, ChevronDownIcon, CopyIcon, PinOffIcon } from 'lucide-react'
 import { DeviceDot } from '@/components/board-chrome.tsx'
 import { GroupDot, type GroupFilter } from '@/components/board-groups.tsx'
 import { DeviceGlyph } from '@/components/device-glyph.tsx'
 import type { PresenceDot } from '@/lib/board-hooks.ts'
 import { deviceColor } from '@/lib/device.ts'
 import { useIsolatePointer } from '@/components/clip-media.tsx'
-import { TagChip } from '@/components/tag-chip.tsx'
 import type { ClipVisual } from '@/components/clip-visual.tsx'
 import { groupColor, groupName } from '@/lib/groups.ts'
 import { dur, easeIn, springBounce, springSettle, springTether } from '@/lib/motion.ts'
@@ -175,23 +174,14 @@ export function PinChip(props: {
   open: boolean
   copied: boolean
   canLabel: boolean
-  activeTag: string | null
-  tagOpen: boolean
-  tagDraft: string
   onOpen: (open: boolean) => void
   onCopy: () => void
   onUnpin: () => void
-  onTag: (name: string) => void
-  onToggleTag: () => void
-  onTagDraft: (value: string) => void
-  onAddTag: () => void
-  onRemoveTag?: (name: string) => void
 }) {
   const { item, visual, reduced, open, copied, canLabel } = props
   const [pull, setPull] = useState(0)
   const dragged = useRef(false)
   const threshold = 56
-  const tags = item.tags ?? []
   const device = item.device
   const onDrag = (_: unknown, info: PanInfo) => setPull(Math.min(1, Math.hypot(info.offset.x, info.offset.y) / threshold))
   const onDragEnd = (_: unknown, info: PanInfo) => {
@@ -210,7 +200,7 @@ export function PinChip(props: {
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.8, transition: { duration: dur.fast, ease: easeIn } }}
       transition={{ ...springBounce, layout: springBounce }}
-      drag={!reduced && canLabel && !props.tagOpen}
+      drag={!reduced && canLabel}
       dragSnapToOrigin
       dragElastic={0.45}
       dragTransition={{ bounceStiffness: (springTether as { stiffness: number }).stiffness, bounceDamping: (springTether as { damping: number }).damping }}
@@ -221,7 +211,7 @@ export function PinChip(props: {
       onDrag={onDrag}
       onDragEnd={onDragEnd}
       onClick={(event) => {
-        if (dragged.current || (event.target as HTMLElement | null)?.closest('[data-action], form')) return
+        if (dragged.current || (event.target as HTMLElement | null)?.closest('[data-action]')) return
         toggle()
       }}
       onKeyDown={(event) => {
@@ -254,48 +244,15 @@ export function PinChip(props: {
             transition={springBounce}
             className="flex items-center gap-0.5 overflow-hidden"
           >
-            {tags.map((name) => (
-              <TagChip key={name} compact name={name} active={props.activeTag === name} reduced={reduced} onFilter={() => props.onTag(name)} onRemove={canLabel && props.onRemoveTag ? () => props.onRemoveTag?.(name) : undefined} />
-            ))}
             {item.kind === 'text' || item.kind === 'file' ? (
               <ChipAction label={copied ? '已复制' : '复制'} onClick={props.onCopy}>
                 {copied ? <CheckIcon className="size-3.5 text-[var(--ok)]" /> : <CopyIcon className="size-3.5" />}
               </ChipAction>
             ) : null}
             {canLabel ? (
-              <ChipAction label="标签" onClick={props.onToggleTag}>
-                <TagIcon className="size-3.5" />
-              </ChipAction>
-            ) : null}
-            {canLabel ? (
               <ChipAction label="取消置顶" onClick={props.onUnpin}>
                 <PinOffIcon className="size-3.5" />
               </ChipAction>
-            ) : null}
-            {props.tagOpen ? (
-              <form
-                className="flex items-center gap-1 pl-1"
-                onSubmit={(event) => {
-                  event.preventDefault()
-                  props.onAddTag()
-                }}
-              >
-                <label className="sr-only" htmlFor={`tag-${item.id}`}>
-                  新标签
-                </label>
-                <input
-                  id={`tag-${item.id}`}
-                  autoFocus
-                  value={props.tagDraft}
-                  onChange={(event) => props.onTagDraft(event.target.value)}
-                  onKeyDown={(event) => event.stopPropagation()}
-                  placeholder="标签，回车"
-                  className="h-7 w-24 rounded-[var(--radius-sm)] border border-[var(--line-2)] bg-[var(--surface-0)] px-1.5 text-[11.5px] outline-none focus:border-[var(--line-3)]"
-                />
-                <button type="submit" className="h-7 rounded-[var(--radius-sm)] bg-[var(--fg)] px-2 text-[11px] text-[var(--bg)]">
-                  添加
-                </button>
-              </form>
             ) : null}
           </motion.span>
         ) : (

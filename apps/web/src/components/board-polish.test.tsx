@@ -7,8 +7,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ClipboardBoard } from './clipboard-board.tsx'
 import { GroupBar, GroupTarget } from './board-groups.tsx'
-import { TagChip } from './tag-chip.tsx'
-import { DROP_PAD, chipAt, groupColor } from '@/lib/groups.ts'
+import { DROP_PAD, DROP_STICK, chipAt, chipAtSticky, groupColor, layoutBox } from '@/lib/groups.ts'
 import { resetLocalDevice } from '@/lib/device.ts'
 import type { Item } from '@/lib/types.ts'
 
@@ -166,7 +165,12 @@ describe('drag a card onto a group chip', () => {
     expect(hot.style.getPropertyValue('--hot')).toBe(groupColor('工作'))
     expect(hot.querySelector('[data-drop-glow]')).not.toBeNull()
     expect(within(hot).getByText('工作')).toBeTruthy()
-    expect(within(hot).getByText('松手放入')).toBeTruthy()
+    // RHEA-190 step 8: the hot chip may not change its layout size — no inline hint, the count only turns invisible,
+    // and no bolder label (the hint now rides on the drag ghost instead)
+    expect(hot.querySelector('[data-drop-hint]')).toBeNull()
+    expect(within(hot).getByText('3').closest('[hidden]')).toBeNull()
+    expect(within(hot).getByText('3').closest('.invisible')).not.toBeNull()
+    expect(hot.className).not.toContain('font-medium')
     const other = bar.querySelector<HTMLElement>('[data-group-chip="个人"]')!
     expect(other.getAttribute('data-drop-hot')).toBeNull()
     expect(other.className).toContain('outline-dashed')
@@ -175,34 +179,54 @@ describe('drag a card onto a group chip', () => {
   })
 })
 
-describe('one-tap tag removal', () => {
-  it('the × removes the tag without toggling the filter', () => {
-    const onFilter = vi.fn()
-    const onRemove = vi.fn()
-    render(<TagChip name="设计" active={false} onFilter={onFilter} onRemove={onRemove} />)
-    fireEvent.click(screen.getByRole('button', { name: '移除标签 #设计' }))
-    expect(onRemove).toHaveBeenCalledTimes(1)
-    expect(onFilter).not.toHaveBeenCalled()
-    fireEvent.click(screen.getByRole('button', { name: '#设计' }))
-    expect(onFilter).toHaveBeenCalledTimes(1)
+describe('stable group hit zones (RHEA-190 step 8)', () => {
+  const zones = [
+    ['工作', { left: 100, right: 160, top: 10, bottom: 38 }],
+    ['个人', { left: 166, right: 226, top: 10, bottom: 38 }],
+  ] as const
+
+  it('keeps the hot chip until the pointer is clearly past it (hysteresis)', () => {
+    // resting on the border between the chips never flips back and forth
+    let hot: string | null = chipAtSticky(zones, 150, 24, null)
+    expect(hot).toBe('工作')
+    for (const x of [162, 164, 166, 168, 164, 170, 163, 160 + DROP_PAD.x + DROP_STICK]) {
+      hot = chipAtSticky(zones, x, 24, hot)
+      expect(hot).toBe('工作')
+    }
+    // once the pointer is past the sticky margin the neighbour takes over, and keeps it on the way back over the border
+    hot = chipAtSticky(zones, 160 + DROP_PAD.x + DROP_STICK + 1, 24, hot)
+    expect(hot).toBe('个人')
+    for (const x of [166, 164, 160, 158, 166 - DROP_PAD.x - DROP_STICK]) {
+      hot = chipAtSticky(zones, x, 24, hot)
+      expect(hot).toBe('个人')
+    }
+    expect(chipAtSticky(zones, 120, 24, hot)).toBe('工作')
+    // leaving the bar clears it
+    expect(chipAtSticky(zones, 130, 38 + DROP_PAD.y + DROP_STICK + 2, '工作')).toBeNull()
   })
 
-  it('removes a tag from a card in one click', async () => {
-    const { socket } = renderBoard((url, init) => {
-      if (url === '/api/spaces/s1/items/a/labels' && init?.method === 'PATCH') {
-        const body = JSON.parse(String(init.body)) as { tags: string[] }
-        return json({ item: item({ text: 'tagged', tags: body.tags }) })
+  it('dragging back and forth across chips many times gives the same answer each pass', () => {
+    const passes: Array<Array<string | null>> = []
+    let hot: string | null = null
+    for (let rep = 0; rep < 30; rep++) {
+      const seen: Array<string | null> = []
+      for (const x of [130, 150, 163, 176, 196, 176, 163, 150, 130]) {
+        hot = chipAtSticky(zones, x, 24, hot)
+        seen.push(hot)
       }
-      return json({ error: { code: 'NOT_FOUND' } }, 404)
-    })
-    socket?.emit({ type: 'snapshot', items: [item({ text: 'tagged', tags: ['设计', '稿件'] })], groups: [], serverTime: Date.now(), expiresAt: null })
-    expect(await screen.findByText('tagged')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '移除标签 #设计' }))
-    await waitFor(() => expect(calls.some((call) => call.url === '/api/spaces/s1/items/a/labels')).toBe(true))
-    const patch = calls.find((call) => call.url === '/api/spaces/s1/items/a/labels')
-    expect(patch?.init?.body).toBe(JSON.stringify({ tags: ['稿件'] }))
-    await waitFor(() => expect(screen.queryByRole('button', { name: '移除标签 #设计' })).toBeNull())
-    expect(screen.getByRole('button', { name: '移除标签 #稿件' })).toBeTruthy()
+      passes.push(seen)
+    }
+    for (const seen of passes.slice(1)) expect(seen).toEqual(passes[1])
+    expect(passes[1]).toEqual(['工作', '工作', '工作', '工作', '个人', '个人', '个人', '个人', '工作'])
+  })
+
+  it('measures chips from their untransformed layout box', () => {
+    const el = document.createElement('button')
+    // a hot chip scaled 1.16 about its centre: the rect grows, the layout size does not
+    el.getBoundingClientRect = () => ({ left: 95.2, right: 164.8, top: 7.76, bottom: 40.24, width: 69.6, height: 32.48, x: 95.2, y: 7.76, toJSON() {} }) as DOMRect
+    Object.defineProperty(el, 'offsetWidth', { value: 60 })
+    Object.defineProperty(el, 'offsetHeight', { value: 28 })
+    expect(layoutBox(el)).toEqual({ left: 100, right: 160, top: 10, bottom: 38 })
   })
 })
 

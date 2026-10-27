@@ -241,4 +241,29 @@ describe('ExpandCapsule', () => {
     expect(pill().className).toContain('border-2')
     expect(pill().className).not.toContain('rounded')
   })
+  it('grows into a [data-capsule-bound] ancestor instead of wrapping in a shrink-wrapped row (RHEA-190 step 9)', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }))
+    const rect = (left: number, width: number) => ({ left, right: left + width, width, top: 0, bottom: 40, height: 40, x: left, y: 0, toJSON() {} }) as DOMRect
+    render(
+      <div data-capsule-bound="" data-testid="card">
+        <div data-testid="row">
+          <button type="button">复制</button>
+          <ExpandCapsule label="更多" icon={<svg aria-hidden="true" />}>
+            {actions(3)}
+          </ExpandCapsule>
+        </div>
+      </div>,
+    )
+    const row = screen.getByTestId('row')
+    Object.defineProperty(acts(), 'offsetWidth', { configurable: true, get: () => 128 })
+    // the action row is only as wide as its current content (复制 + closed 更多)
+    Object.defineProperty(row, 'clientWidth', { configurable: true, get: () => 84 })
+    vi.spyOn(screen.getByTestId('card'), 'getBoundingClientRect').mockReturnValue(rect(0, 360))
+    vi.spyOn(row, 'getBoundingClientRect').mockReturnValue(rect(270, 84))
+    vi.spyOn(pill(), 'getBoundingClientRect').mockReturnValue(rect(314, 40))
+    fireEvent.click(screen.getByRole('button', { name: '更多' }))
+    expect(pill().dataset.layout).toBe('row')
+    expect(pill().style.width).toBe('132px')
+    expect(acts().style.flexWrap).toBe('nowrap')
+  })
 })

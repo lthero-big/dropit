@@ -96,10 +96,10 @@ export function RoomPage() {
     return (
       <Shell>
         <h1 className="text-4xl font-semibold">房间不存在或已过期</h1>
-        <p className="mt-4 text-sm text-muted-foreground">临时房间不会出现在任何列表里。可以新建一个再把链接发给对方。</p>
+        <p className="mt-4 text-sm text-muted-foreground">临时房间不会出现在任何列表里。可以进入你自己的临时房间，再把链接发给对方。</p>
         <div className="mt-6 flex flex-wrap gap-2">
           <Button type="button" onClick={() => void openMine()}>
-            打开我的临时房间
+            进入我的临时房间
           </Button>
           <Button type="button" variant="outline" asChild>
             <Link to="/">返回</Link>

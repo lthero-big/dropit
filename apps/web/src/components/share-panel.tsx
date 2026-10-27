@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import { createPortal } from 'react-dom'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText } from '@/lib/api.ts'
@@ -26,17 +27,73 @@ function shareState(share: ShareLink, now: number): string {
   return '有效'
 }
 
+type Place = { left: number; top: number; width: number; up: boolean }
+
+/**
+ * Share options for one clip (opened from 更多 → 分享). RHEA-190 step 8: a
+ * popover anchored to the card and portalled to <body>, so opening it never
+ * changes the height of the card or its row.
+ */
 export function SharePanel({
   base,
   itemId,
   now,
+  anchorRef,
   onClose,
 }: {
   base: string
   itemId: string
   now: number
+  anchorRef?: RefObject<HTMLElement | null>
   onClose: () => void
 }) {
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  const closeRef = useRef(onClose)
+  const [place, setPlace] = useState<Place | null>(null)
+  useLayoutEffect(() => {
+    closeRef.current = onClose
+  })
+  useLayoutEffect(() => {
+    const anchor = anchorRef?.current ?? null
+    const measure = () => {
+      const width = Math.min(360, window.innerWidth - 16)
+      if (!anchor) {
+        setPlace({ left: 8, top: 8, width, up: false })
+        return
+      }
+      const r = anchor.getBoundingClientRect()
+      const left = Math.max(8, Math.min(r.right - width, window.innerWidth - width - 8))
+      const below = window.innerHeight - r.bottom
+      const up = below < 300 && r.top > below
+      setPlace({ left, top: up ? r.top - 8 : r.bottom + 8, width, up })
+    }
+    measure()
+    window.addEventListener('scroll', measure, true)
+    window.addEventListener('resize', measure)
+    return () => {
+      window.removeEventListener('scroll', measure, true)
+      window.removeEventListener('resize', measure)
+    }
+  }, [anchorRef])
+  useEffect(() => {
+    const anchor = anchorRef?.current ?? null
+    const onDown = (event: PointerEvent) => {
+      const target = event.target as Node | null
+      if (!target || panelRef.current?.contains(target) || anchor?.contains(target)) return
+      // the browser's own <select> popup is not in the DOM; ignore presses that land on <html>
+      if (target === document.documentElement) return
+      closeRef.current()
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeRef.current()
+    }
+    document.addEventListener('pointerdown', onDown, true)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [anchorRef])
   const [shares, setShares] = useState<ShareLink[]>([])
   const [expiresIn, setExpiresIn] = useState<(typeof expiryOptions)[number][0]>('1d')
   const [maxViews, setMaxViews] = useState('1')
@@ -86,8 +143,16 @@ export function SharePanel({
     }
   }
 
-  return (
-    <div className="mt-3 border border-line-2 p-3">
+  return createPortal(
+    <div
+      ref={panelRef}
+      role="dialog"
+      aria-label="分享链接"
+      data-share-panel=""
+      data-keep-open=""
+      className="fixed z-[70] max-h-[min(70vh,520px)] overflow-y-auto rounded-[var(--radius-md)] border border-[var(--line-2)] bg-[var(--surface-1)] p-3 text-[var(--fg)] shadow-[var(--elev-3)]"
+      style={place ? { left: place.left, top: place.top, width: place.width, transform: place.up ? 'translateY(-100%)' : undefined } : { visibility: 'hidden' }}
+    >
       <div className="flex items-center gap-2">
         <h3 className="text-xs font-medium">分享链接</h3>
         <button type="button" className="ml-auto text-xs" onClick={onClose}>
@@ -165,6 +230,7 @@ export function SharePanel({
           )
         })}
       </ul>
-    </div>
+    </div>,
+    document.body,
   )
 }

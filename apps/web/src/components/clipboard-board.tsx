@@ -18,7 +18,7 @@ import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
 import { adoptResume, browserResumeStore, browserTransport, discardSession, discardUpload, matchResumeFile, receivedRatio, uploadMaybeChunked, type ChunkTransport, type ResumeRecord, type ResumeStore } from '@/lib/chunked-upload.ts'
 import { useChannel } from '@/lib/channel.ts'
 import { PRESENCE_SLOT, deviceColor, itemHeaders, localDevice, setUploadGroup } from '@/lib/device.ts'
-import { chipAt, groupName } from '@/lib/groups.ts'
+import { chipAtSticky, groupName, layoutBox, type Box } from '@/lib/groups.ts'
 import { CLAIMS_KEY, claimUpload, heartbeatUploads, ownsUpload, releaseUploads, tabId } from '@/lib/upload-claims.ts'
 import { createUploadQueue, type UploadQueue, type UploadRow } from '@/lib/upload-queue.ts'
 import { copyText, formatBytes, formatRemain, quotaTone, useClock, utf8Size } from '@/lib/format.ts'
@@ -34,11 +34,14 @@ function filesFromList(list: FileList | File[] | null | undefined): File[] {
 
 const COPIED_MS = 1400
 
+/** Phones / tablets: a coarse primary pointer or no hover. They get swipe gestures, never pin-drag or drag-to-group. */
+const TOUCH_QUERY = '(pointer: coarse), (hover: none)'
+
 function useCoarsePointer(): boolean {
-  const [coarse, setCoarse] = useState(() => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches)
+  const [coarse, setCoarse] = useState(() => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia(TOUCH_QUERY).matches)
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return
-    const query = window.matchMedia('(pointer: coarse)')
+    const query = window.matchMedia(TOUCH_QUERY)
     const onChange = () => setCoarse(query.matches)
     query.addEventListener?.('change', onChange)
     return () => query.removeEventListener?.('change', onChange)
@@ -147,9 +150,6 @@ export function ClipboardBoard({
   const [editDraft, setEditDraft] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
   const [shareFor, setShareFor] = useState<string | null>(null)
-  const [tagFor, setTagFor] = useState<string | null>(null)
-  const [tagDraft, setTagDraft] = useState('')
-  const [activeTag, setActiveTag] = useState<string | null>(null)
   const [rows, setRows] = useState<UploadRow[]>([])
   const [dragOver, setDragOver] = useState(false)
   const [sending, setSending] = useState(false)
@@ -177,6 +177,9 @@ export function ClipboardBoard({
   const [dragging, setDragging] = useState(false)
   const [groupHover, setGroupHover] = useState<string | null>(null)
   const chipEls = useRef(new Map<string, HTMLElement>())
+  // hit zones for the drag, measured from untransformed layout when the drag starts (and again on scroll)
+  const chipZones = useRef<Array<readonly [string, Box]>>([])
+  const groupHoverRef = useRef<string | null>(null)
   const docked = useDockedComposer()
   const [composerFocus, setComposerFocus] = useState(false)
   const [collapsed, setCollapsed] = useScrollCollapse(docked, composerFocus || draft.trim().length > 0 || dragOver || sending)
@@ -210,9 +213,9 @@ export function ClipboardBoard({
   const groups = channel.groups
   const needle = query.trim().toLowerCase()
   const shown = visible.filter((item) => {
-    if (activeTag && !(item.tags ?? []).includes(activeTag)) return false
     if (!needle) return true
-    const haystack = `${item.text ?? ''}\n${item.filename ?? ''}\n${(item.tags ?? []).join('\n')}`
+    // RHEA-190 step 8: tags are no longer shown or edited, so they don't match searches either (the data stays on the server)
+    const haystack = `${item.text ?? ''}\n${item.filename ?? ''}`
     return haystack.toLowerCase().includes(needle)
   })
   const slides = base
@@ -559,7 +562,7 @@ export function ClipboardBoard({
     }
   }
 
-  async function saveLabels(item: Item, patch: { pinned?: boolean; tags?: string[]; group?: string | null }) {
+  async function saveLabels(item: Item, patch: { pinned?: boolean; group?: string | null }) {
     if (!base) return
     try {
       const result = await api<{ item: Item }>(`${base}/items/${item.id}/labels`, {
@@ -793,7 +796,9 @@ export function ClipboardBoard({
   function onDragPhase(phase: DragPhase) {
     window.clearTimeout(gulpTimer.current)
     setDragging('rect' in phase)
-    if (!('rect' in phase)) setGroupHover(null)
+    groupHoverRef.current = null
+    setGroupHover(null)
+    if ('rect' in phase) measureChips()
     if ('rect' in phase) {
       setOpenCard(null)
       setTrash({ anchor: trashAnchorFor(phase.rect), gulp: false })
@@ -811,9 +816,29 @@ export function ClipboardBoard({
    * Which group chip the dragged card's pointer is over ('' = 未分组), with a
    * generous hit area around each chip. With `drop` it also files the card there.
    */
+  function measureChips() {
+    chipZones.current = [...chipEls.current].map(([key, el]) => [key, layoutBox(el)] as const)
+  }
+
+  // Scrolling (the page or the chip bar) moves the chips under a still pointer: re-measure then.
+  useEffect(() => {
+    if (!dragging) return
+    window.addEventListener('scroll', measureChips, { capture: true, passive: true })
+    window.addEventListener('resize', measureChips)
+    return () => {
+      window.removeEventListener('scroll', measureChips, { capture: true })
+      window.removeEventListener('resize', measureChips)
+    }
+  }, [dragging])
+
   function onGroupDrag(item: Item, x: number, y: number, drop: boolean): string | null {
-    const hit = chipAt([...chipEls.current].map(([key, el]) => [key, el.getBoundingClientRect()] as const), x, y)
-    setGroupHover(drop ? null : hit)
+    if (!chipZones.current.length) measureChips()
+    const hit = chipAtSticky(chipZones.current, x, y, groupHoverRef.current)
+    const next = drop ? null : hit
+    if (next !== groupHoverRef.current) {
+      groupHoverRef.current = next
+      setGroupHover(next)
+    }
     if (drop && hit !== null) {
       if ((item.group ?? '') !== hit) {
         moveToGroup(item, hit || null)
@@ -991,22 +1016,6 @@ export function ClipboardBoard({
           setShareFor((current) => (current === item.id ? null : item.id))
           clearPending()
         }}
-        tagOpen={tagFor === item.id}
-        onToggleTag={() => {
-          setTagFor((current) => (current === item.id ? null : item.id))
-          setTagDraft('')
-        }}
-        tagDraft={tagDraft}
-        onTagDraft={setTagDraft}
-        onAddTag={() => {
-          const next = tagDraft.trim().replace(/^#+/, '')
-          if (!next) return
-          void saveLabels(item, { tags: [...(item.tags ?? []), next] })
-          setTagDraft('')
-        }}
-        onRemoveTag={(name) => void saveLabels(item, { tags: (item.tags ?? []).filter((tag) => tag !== name) })}
-        activeTag={activeTag}
-        onTag={(name) => setActiveTag((current) => (current === name ? null : name))}
         textOpen={expandedText[item.id] === true}
         onToggleText={() => setExpandedText((current) => ({ ...current, [item.id]: !current[item.id] }))}
         arrival={arrivals[item.id] ?? null}
@@ -1040,22 +1049,6 @@ export function ClipboardBoard({
         onOpen={(next) => setOpenCard(next ? item.id : null)}
         copied={copiedId === item.id}
         canLabel={canShare(item)}
-        activeTag={activeTag}
-        onTag={(name) => setActiveTag((current) => (current === name ? null : name))}
-        tagOpen={tagFor === item.id}
-        onToggleTag={() => {
-          setTagFor((current) => (current === item.id ? null : item.id))
-          setTagDraft('')
-        }}
-        tagDraft={tagDraft}
-        onTagDraft={setTagDraft}
-        onAddTag={() => {
-          const next = tagDraft.trim().replace(/^#+/, '')
-          if (!next) return
-          void saveLabels(item, { tags: [...(item.tags ?? []), next] })
-          setTagDraft('')
-        }}
-        onRemoveTag={(name) => void saveLabels(item, { tags: (item.tags ?? []).filter((tag) => tag !== name) })}
         onCopy={() => copyItem(item)}
         onUnpin={() => {
           setOpenCard(null)
@@ -1317,11 +1310,6 @@ export function ClipboardBoard({
                     </button>
                   </span>
                 ) : null}
-                {activeTag ? (
-                  <button type="button" className="dd-chip" aria-pressed="true" style={touchTarget} onClick={() => setActiveTag(null)}>
-                    #{activeTag} · 清除标签
-                  </button>
-                ) : null}
                 <label className="relative flex min-h-10 w-full items-center rounded-[var(--radius-md)] border border-[var(--line-1)] bg-[var(--surface-1)] transition-colors duration-(--dur-fast) focus-within:border-[var(--line-3)] sm:ml-auto sm:w-60">
                   <SearchIcon className="pointer-events-none absolute left-2.5 size-3.5 text-[var(--fg-4)]" aria-hidden="true" />
                   <span className="sr-only">搜索</span>
@@ -1329,7 +1317,7 @@ export function ClipboardBoard({
                     type="search"
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
-                    placeholder="搜索文本、文件名或标签"
+                    placeholder="搜索文本或文件名"
                     aria-label="搜索"
                     className="w-full bg-transparent py-2 pr-3 pl-8 text-[13px] text-fg outline-none placeholder:text-fg-4"
                   />
