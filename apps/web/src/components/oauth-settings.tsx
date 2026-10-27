@@ -201,6 +201,9 @@ function ProviderCard({ view, onChange }: { view: OAuthProviderView; onChange: (
         </ol>
         <CopyRow label="回调地址（Callback / Redirect URI）" value={view.callbackUrl} />
         <CopyRow label={isGoogle ? '网站地址（JavaScript 来源）' : '网站地址（Homepage URL）'} value={view.homepageUrl} />
+        {isGoogle && /^http:\/\/(?!localhost[:/]|127\.0\.0\.1[:/])/.test(view.callbackUrl) && (
+          <p className="text-xs text-destructive">Google 只接受 https 域名的回调地址（localhost 除外），当前地址不能用于 Google 登录。</p>
+        )}
         <form className="grid gap-3" onSubmit={(event) => void save(event)}>
           <label className="text-xs font-medium" htmlFor={`oauth-id-${view.provider}`}>
             Client ID
