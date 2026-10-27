@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button.tsx'
 import { api, errorText, loginErrorText } from '@/lib/api.ts'
 import { takeReturn } from '@/lib/machine.ts'
 import { useSession } from '@/lib/session.tsx'
+import { Logo } from '@/components/logo.tsx'
 
 export function LoginPage({ invite }: { invite?: string }) {
   const { status } = useSession()
@@ -52,7 +53,9 @@ export function LoginPage({ invite }: { invite?: string }) {
   return (
     <main className="mx-auto flex min-h-svh max-w-md flex-col justify-center px-6 py-16">
       <p className="text-xs font-medium">云剪贴板</p>
-      <h1 className="mt-3 text-6xl font-semibold tracking-tight">dropit</h1>
+      <h1 className="mt-3">
+        <Logo size="lg" />
+      </h1>
       <p className="mt-4 text-sm text-muted-foreground">跨设备传递文本和文件。没有密码，使用 GitHub 或 Google 登录。</p>
       <div className="mt-8 flex flex-col gap-3 border-t border-line-1 pt-6">
         {loginError ? (

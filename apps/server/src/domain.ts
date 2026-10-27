@@ -18,6 +18,41 @@ export interface Item {
   filename: string | null; mime: string | null; size: number; storedBytes: number;
   fileKey: string | null; thumbnailKey: string | null; createdAt: number; updatedAt: number; expiresAt: number;
   pinned: number; tags: string[];
+  /** Demo-style group; null/undefined = 未分组. */
+  group?: string | null;
+  /** The browser/CLI that created the item, when it identified itself. */
+  device?: ItemDevice | null;
+}
+export const DEVICE_KINDS = ['mac', 'phone', 'pad', 'pc', 'cli'] as const;
+export type DeviceKind = typeof DEVICE_KINDS[number];
+export interface ItemDevice { id: string; name: string; kind: DeviceKind }
+export interface ItemMeta { /** Unvalidated; the service checks it. */ group?: unknown; device?: ItemDevice | null }
+export const MAX_GROUPS = 24;
+const RESERVED_GROUPS = new Set(['全部', '未分组']);
+const hasControl = (value: string) => [...value].some(char => {
+  const code = char.charCodeAt(0);
+  return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+});
+/** Validates a group name; throws INVALID_GROUP. */
+export function cleanGroupName(value: unknown): string {
+  if (typeof value !== 'string') throw new ApiError(400, 'INVALID_GROUP');
+  const name = value.normalize('NFC').trim().replace(/\s+/g, ' ');
+  const length = [...name].length;
+  if (length < 1 || length > 24 || hasControl(name) || RESERVED_GROUPS.has(name)) throw new ApiError(400, 'INVALID_GROUP');
+  return name;
+}
+/** Lenient: a malformed device identity is ignored, never an error. */
+export function parseDevice(id: unknown, rawName: unknown, kind: unknown, encoded = true): ItemDevice | null {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{6,64}$/.test(id)) return null;
+  let name = typeof rawName === 'string' ? rawName : '';
+  if (encoded) {
+    try { name = decodeURIComponent(name); } catch { name = ''; }
+  }
+  name = name.normalize('NFC').replace(/\s+/g, ' ').trim();
+  if (hasControl(name)) name = '';
+  name = [...name].slice(0, 40).join('');
+  const safeKind = (DEVICE_KINDS as readonly string[]).includes(kind as string) ? kind as DeviceKind : 'pc';
+  return { id, name: name || '未命名设备', kind: safeKind };
 }
 export interface ShareLink {
   id: string; tokenHash: string; itemId: string; spaceId: string; createdBy: string | null;
@@ -52,8 +87,8 @@ export function cleanFilename(input: string): string {
     .replace(/^\.+/, '').trim().slice(0, 180) || 'download';
 }
 export function publicItem(item: Item) {
-  const { fileKey: _file, thumbnailKey, storedBytes: _bytes, pinned, ...rest } = item;
-  return { ...rest, pinned: Boolean(pinned), hasThumbnail: Boolean(thumbnailKey) };
+  const { fileKey: _file, thumbnailKey, storedBytes: _bytes, pinned, group, device, ...rest } = item;
+  return { ...rest, pinned: Boolean(pinned), hasThumbnail: Boolean(thumbnailKey), group: group ?? null, device: device ?? null };
 }
 export function publicShareItem(item: Item) {
   const pub = publicItem(item);

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { Config } from './config.js';
-import { ApiError, cleanFilename, hash, publicItem, publicShareItem, token, type Item, type Session, type SharePublic, type Space } from './domain.js';
+import { ApiError, MAX_GROUPS, cleanFilename, cleanGroupName, hash, publicItem, publicShareItem, token, type Item, type ItemMeta, type Session, type SharePublic, type Space } from './domain.js';
 import type { FileStorage } from './files.js';
 import type { Broadcaster } from './events.js';
 import type { Repository } from './repository.js';
@@ -111,11 +111,41 @@ export class ClipboardService {
     return { ...publicInvite, token: inviteToken, url: `${this.config.origin}/invite/${inviteToken}` };
   }
   snapshot(space: Space) {
-    return { type: 'snapshot', items: this.repo.items(space.id, this.now()).map(publicItem), serverTime: this.now(), expiresAt: space.expiresAt };
+    return { type: 'snapshot', items: this.repo.items(space.id, this.now()).map(publicItem), groups: this.repo.groups(space.id),
+      serverTime: this.now(), expiresAt: space.expiresAt };
   }
-  private baseItem(space: Space, session: Session | undefined): Item {
+  groups(space: Space) { return this.repo.groups(space.id); }
+  private publishGroups(space: Space) {
+    const groups = this.repo.groups(space.id);
+    this.events.publish(space.id, { type: 'groups', groups });
+    return groups;
+  }
+  /** Validates an optional group and makes sure it exists (creating it if needed). */
+  private resolveGroup(space: Space, value: unknown): string | null {
+    if (value === undefined || value === null || value === '') return null;
+    const name = cleanGroupName(value);
+    if (this.repo.ensureGroup(space.id, name, this.now(), MAX_GROUPS)) this.publishGroups(space);
+    return name;
+  }
+  createGroup(space: Space, name: unknown) {
+    this.repo.createGroup(space.id, cleanGroupName(name), this.now(), MAX_GROUPS);
+    return this.publishGroups(space);
+  }
+  renameGroup(space: Space, from: string, to: unknown) {
+    const updated = this.repo.renameGroup(space.id, from, cleanGroupName(to), this.now());
+    const groups = this.publishGroups(space);
+    for (const item of updated) this.events.publish(space.id, { type: 'item.updated', item: publicItem(item) });
+    return groups;
+  }
+  deleteGroup(space: Space, name: string) {
+    const updated = this.repo.deleteGroup(space.id, name, this.now());
+    const groups = this.publishGroups(space);
+    for (const item of updated) this.events.publish(space.id, { type: 'item.updated', item: publicItem(item) });
+    return groups;
+  }
+  private baseItem(space: Space, session: Session | undefined, meta: ItemMeta = {}): Item {
     const now = this.now();
-    return { id: randomUUID(), spaceId: space.id, userId: space.roomHash ? null : session!.user.id,
+    return { group: this.resolveGroup(space, meta.group), device: meta.device ?? null, id: randomUUID(), spaceId: space.id, userId: space.roomHash ? null : session!.user.id,
       kind: 'text', text: null, filename: null, mime: null, size: 0, storedBytes: 0,
       fileKey: null, thumbnailKey: null, createdAt: now, updatedAt: now, pinned: 0, tags: [],
       expiresAt: Math.min(now + this.config.retentionMs, space.expiresAt ?? Infinity) };
@@ -126,11 +156,11 @@ export class ClipboardService {
     this.events.publish(item.spaceId, { type: 'item.created', item: publicItem(item) });
     return publicItem(item);
   }
-  text(space: Space, session: Session | undefined, text: string) {
+  text(space: Space, session: Session | undefined, text: string, meta: ItemMeta = {}) {
     const size = Buffer.byteLength(text);
     if (!text.trim()) throw new ApiError(400, 'EMPTY_TEXT');
     if (size > this.config.maxTextBytes) throw new ApiError(413, 'TEXT_TOO_LARGE');
-    return this.commit({ ...this.baseItem(space, session), text, size, storedBytes: size }, Boolean(space.roomHash));
+    return this.commit({ ...this.baseItem(space, session, meta), text, size, storedBytes: size }, Boolean(space.roomHash));
   }
   editText(space: Space, session: Session | undefined, id: string, text: string) {
     const current = this.item(space, id);
@@ -160,13 +190,15 @@ export class ClipboardService {
     }
     return tags;
   }
-  label(space: Space, session: Session | undefined, id: string, patch: { pinned?: boolean; tags?: unknown }) {
+  label(space: Space, session: Session | undefined, id: string, patch: { pinned?: boolean; tags?: unknown; group?: unknown }) {
     const current = this.item(space, id);
     this.canManage(space, current.userId, session);
-    if (patch.pinned === undefined && patch.tags === undefined) throw new ApiError(400, 'INVALID_INPUT');
+    if (patch.pinned === undefined && patch.tags === undefined && patch.group === undefined) throw new ApiError(400, 'INVALID_INPUT');
+    const tags = patch.tags === undefined ? undefined : this.normalizeTags(patch.tags);
+    const group = patch.group === undefined ? undefined : this.resolveGroup(space, patch.group);
     const updated = this.repo.updateLabels(id, {
       pinned: patch.pinned === undefined ? undefined : (patch.pinned ? 1 : 0),
-      tags: patch.tags === undefined ? undefined : this.normalizeTags(patch.tags),
+      tags, group,
     }, this.now());
     const item = publicItem(updated);
     this.events.publish(space.id, { type: 'item.updated', item });
@@ -192,7 +224,7 @@ export class ClipboardService {
       return result;
     } finally { --this.activePreviews; }
   }
-  async upload(space: Space, session: Session | undefined, body: ReadableStream<Uint8Array>, filename: string, mime: string, expectedSize?: number, uploadId?: string, signal?: AbortSignal) {
+  async upload(space: Space, session: Session | undefined, body: ReadableStream<Uint8Array>, filename: string, mime: string, expectedSize?: number, uploadId?: string, signal?: AbortSignal, meta: ItemMeta = {}) {
     if (this.activeUploads >= 4) throw new ApiError(429, 'UPLOAD_BUSY');
     ++this.activeUploads;
     let fileKey: string | undefined;
@@ -214,7 +246,7 @@ export class ClipboardService {
         thumbnailKey = savedThumb.key;
         thumbnailSize = savedThumb.size;
       }
-      const item = this.commit({ ...this.baseItem(space, session), kind: 'file', fileKey,
+      const item = this.commit({ ...this.baseItem(space, session, meta), kind: 'file', fileKey,
         thumbnailKey: thumbnailKey ?? null, filename: cleanFilename(filename), mime,
         size: saved.size, storedBytes: saved.size + thumbnailSize }, Boolean(space.roomHash), uploadId);
       this.files.commit(fileKey);

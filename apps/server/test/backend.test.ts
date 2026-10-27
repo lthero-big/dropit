@@ -13,7 +13,7 @@ import sharp from 'sharp';
 import { createBackend } from '../src/backend.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { ApiError, hash, type Identity } from '../src/domain.js';
-import { migration1, migration2, migration3 } from '../src/migrations.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8 } from '../src/migrations.js';
 import type { OAuthProvider } from '../src/oauth.js';
 import { parseByteRange, sniffMedia } from '../src/media.js';
 import { SqliteRepository } from '../src/repository.js';
@@ -1230,4 +1230,163 @@ test('an aborted or short upload leaves no file and does not consume quota', { t
   assert.equal(idle >= 5, true);
   assert.deepEqual(await readdir(join(f.directory, 'files')), []);
   assert.equal(f.repo.usage(admin.user.id), 0);
+});
+
+test('RHEA-190 step 5: demo groups are created, assigned, renamed, deleted and synced', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin();
+  const base = `/api/spaces/${admin.space.id}`;
+  const received: any[] = [];
+  f.events.subscribe(admin.space.id, { send(data) { received.push(JSON.parse(data)); }, close() {} }, () => true);
+
+  assert.deepEqual(await (await f.request(`${base}/groups`, {}, admin.cookie)).json(), { groups: [] });
+  const plain = await (await f.json(`${base}/items/text`, { text: 'no group' }, admin.cookie)).json();
+  assert.equal(plain.item.group, null);
+  assert.equal(plain.item.device, null);
+
+  const created = await f.json(`${base}/groups`, { name: ' 工作 ' }, admin.cookie);
+  assert.equal(created.status, 201);
+  assert.deepEqual(await created.json(), { groups: ['工作'] });
+  assert.deepEqual(received.at(-1), { type: 'groups', groups: ['工作'] });
+  assert.equal((await f.json(`${base}/groups`, { name: '工作' }, admin.cookie)).status, 409);
+  for (const name of ['', '全部', '未分组', 'x'.repeat(25), 'a\u0007b', 42]) {
+    const bad = await f.json(`${base}/groups`, { name }, admin.cookie);
+    assert.equal(bad.status, 400, String(name));
+    assert.equal((await bad.json()).error.code, 'INVALID_GROUP');
+  }
+
+  // Posting into a group that does not exist yet creates it (in order).
+  const inGroup = await (await f.json(`${base}/items/text`, { text: 'grocery', group: '生活' }, admin.cookie)).json();
+  assert.equal(inGroup.item.group, '生活');
+  assert.deepEqual((await (await f.request(`${base}/groups`, {}, admin.cookie)).json()).groups, ['工作', '生活']);
+  const file = await (await f.request(`${base}/items/file`, { method: 'POST', headers: {
+    'content-type': 'text/plain', 'x-file-name': 'a.txt', 'x-dropit-group': encodeURIComponent('工作') }, body: 'file' }, admin.cookie)).json();
+  assert.equal(file.item.group, '工作');
+
+  const moved = await f.json(`${base}/items/${plain.item.id}/labels`, { group: '工作' }, admin.cookie, 'PATCH');
+  assert.equal(moved.status, 200);
+  const movedBody = await moved.json();
+  assert.equal(movedBody.item.group, '工作');
+  assert.equal(movedBody.item.createdAt, plain.item.createdAt);
+  assert.equal((await f.json(`${base}/items/${plain.item.id}/labels`, { group: 3 }, admin.cookie, 'PATCH')).status, 400);
+  let snapshot = await (await f.request(`${base}/items`, {}, admin.cookie)).json();
+  assert.deepEqual(snapshot.groups, ['工作', '生活']);
+  assert.equal(snapshot.items.find((item: { id: string }) => item.id === plain.item.id).group, '工作');
+
+  const renamed = await f.json(`${base}/groups/${encodeURIComponent('工作')}`, { name: '项目' }, admin.cookie, 'PATCH');
+  assert.equal(renamed.status, 200);
+  assert.deepEqual(await renamed.json(), { groups: ['项目', '生活'] });
+  const renameEvents = received.filter(event => event.type === 'item.updated' && event.item.group === '项目');
+  assert.deepEqual(renameEvents.map(event => event.item.id).sort(), [plain.item.id, file.item.id].sort());
+  assert.equal((await f.json(`${base}/groups/${encodeURIComponent('生活')}`, { name: '项目' }, admin.cookie, 'PATCH')).status, 409);
+  assert.equal((await f.json(`${base}/groups/nope`, { name: 'x' }, admin.cookie, 'PATCH')).status, 404);
+
+  const deleted = await f.request(`${base}/groups/${encodeURIComponent('项目')}`, { method: 'DELETE' }, admin.cookie);
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(await deleted.json(), { groups: ['生活'] });
+  snapshot = await (await f.request(`${base}/items`, {}, admin.cookie)).json();
+  assert.equal(snapshot.items.find((item: { id: string }) => item.id === plain.item.id).group, null);
+  assert.equal(snapshot.items.find((item: { id: string }) => item.id === inGroup.item.id).group, '生活');
+  const ungroup = await f.json(`${base}/items/${inGroup.item.id}/labels`, { group: null }, admin.cookie, 'PATCH');
+  assert.equal((await ungroup.json()).item.group, null);
+
+  // Rooms get the same API; other spaces cannot see these groups.
+  const room = await (await f.request('/api/rooms', { method: 'POST' })).json();
+  assert.equal((await f.json(`/api/rooms/${room.token}/groups`, { name: '临时' })).status, 201);
+  assert.deepEqual((await (await f.request(`/api/rooms/${room.token}/items`)).json()).groups, ['临时']);
+  assert.deepEqual((await (await f.request(`${base}/groups`, {}, admin.cookie)).json()).groups, ['生活']);
+  const other = await f.login('outsider');
+  assert.ok([401, 403].includes((await f.request(`${base}/groups`, {}, other.cookie)).status));
+});
+
+test('RHEA-190 step 5: group limit per space', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin();
+  const base = `/api/spaces/${admin.space.id}`;
+  for (let index = 0; index < 24; index++) assert.equal((await f.json(`${base}/groups`, { name: `g${index}` }, admin.cookie)).status, 201);
+  const over = await f.json(`${base}/groups`, { name: 'one more' }, admin.cookie);
+  assert.equal(over.status, 409);
+  assert.equal((await over.json()).error.code, 'GROUP_LIMIT');
+});
+
+test('RHEA-190 step 5: items remember the sending device and presence names peers', { timeout: 15000 }, async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin();
+  const base = `/api/spaces/${admin.space.id}`;
+  const deviceHeaders = { 'x-dropit-device': 'dev-mac-123', 'x-dropit-device-name': encodeURIComponent('Mac · Chrome'), 'x-dropit-device-kind': 'mac' };
+  const text = await (await f.request(`${base}/items/text`, { method: 'POST', headers: { 'content-type': 'application/json', ...deviceHeaders },
+    body: JSON.stringify({ text: 'from mac' }) }, admin.cookie)).json();
+  assert.deepEqual(text.item.device, { id: 'dev-mac-123', name: 'Mac · Chrome', kind: 'mac' });
+  const file = await (await f.request(`${base}/items/file`, { method: 'POST', headers: {
+    'content-type': 'text/plain', 'x-file-name': 'a.txt', 'x-dropit-device': 'phone-0001', 'x-dropit-device-name': 'iPhone', 'x-dropit-device-kind': 'phone' },
+    body: 'hello' }, admin.cookie)).json();
+  assert.deepEqual(file.item.device, { id: 'phone-0001', name: 'iPhone', kind: 'phone' });
+  // Malformed identity is ignored rather than rejected; unknown kinds fall back to pc.
+  const bad = await (await f.request(`${base}/items/text`, { method: 'POST', headers: { 'content-type': 'application/json',
+    'x-dropit-device': 'no spaces allowed', 'x-dropit-device-name': 'x' }, body: JSON.stringify({ text: 'anon' }) }, admin.cookie)).json();
+  assert.equal(bad.item.device, null);
+  const odd = await (await f.request(`${base}/items/text`, { method: 'POST', headers: { 'content-type': 'application/json',
+    'x-dropit-device': 'toaster-1', 'x-dropit-device-kind': 'toaster' }, body: JSON.stringify({ text: 'odd' }) }, admin.cookie)).json();
+  assert.deepEqual(odd.item.device, { id: 'toaster-1', name: '未命名设备', kind: 'pc' });
+
+  // Chunked uploads carry the identity on complete.
+  const session = await (await f.json(`${base}/uploads`, { filename: 'c.bin', size: 4, mime: 'application/octet-stream' }, admin.cookie)).json();
+  assert.equal((await f.request(`${base}/uploads/${session.uploadId}/chunks/0`, { method: 'PUT', body: 'abcd' }, admin.cookie)).status, 204);
+  const completed = await (await f.request(`${base}/uploads/${session.uploadId}/complete`, { method: 'POST', headers: { ...deviceHeaders, 'x-dropit-group': encodeURIComponent('相册') } }, admin.cookie)).json();
+  assert.equal(completed.item.device.name, 'Mac · Chrome');
+  assert.equal(completed.item.group, '相册');
+
+  const snapshot = await (await f.request(`${base}/items`, {}, admin.cookie)).json();
+  assert.equal(snapshot.items.find((item: { id: string }) => item.id === text.item.id).device.kind, 'mac');
+  // Device identity never leaks through a public share.
+  const share = await (await f.json(`${base}/items/${text.item.id}/shares`, { expiresIn: '1h' }, admin.cookie)).json();
+  const shared = await (await f.request(`/api/s/${share.token}`)).json();
+  assert.equal(JSON.stringify(shared).includes('dev-mac-123'), false);
+
+  const server = serve({ fetch: f.app.fetch, port: 0, hostname: '127.0.0.1', websocket: f.websocket }) as Server;
+  await once(server, 'listening');
+  t.after(() => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }));
+  const address = server.address(); assert(address && typeof address !== 'string');
+  const wsUrl = `ws://127.0.0.1:${address.port}${base}/ws`;
+  const mac = await connect(`${wsUrl}?${new URLSearchParams({ device: 'dev-mac-123', name: 'Mac · Chrome', kind: 'mac' })}`, admin.cookie);
+  t.after(() => mac.ws.terminate());
+  assert.equal((await mac.next()).type, 'snapshot');
+  assert.deepEqual(await mac.next(), { type: 'presence', devices: 1, peers: [{ id: 'dev-mac-123', name: 'Mac · Chrome', kind: 'mac' }] });
+  const legacy = await connect(wsUrl, admin.cookie); t.after(() => legacy.ws.terminate());
+  assert.equal((await legacy.next()).type, 'snapshot');
+  assert.deepEqual(await legacy.next(), { type: 'presence', devices: 2, peers: [{ id: 'dev-mac-123', name: 'Mac · Chrome', kind: 'mac' }] });
+  const phone = await connect(`${wsUrl}?${new URLSearchParams({ device: 'phone-0001', name: 'iPhone', kind: 'phone' })}`, admin.cookie);
+  t.after(() => phone.ws.terminate());
+  assert.equal((await phone.next()).type, 'snapshot');
+  const three = await phone.next();
+  assert.equal(three.devices, 3);
+  assert.deepEqual(three.peers.map((peer: { id: string }) => peer.id), ['dev-mac-123', 'phone-0001']);
+  mac.ws.close();
+  await once(mac.ws, 'close');
+  let event = await phone.next();
+  while (event.devices !== 2) event = await phone.next();
+  assert.deepEqual(event.peers, [{ id: 'phone-0001', name: 'iPhone', kind: 'phone' }]);
+});
+
+test('RHEA-190 step 5: migration 9 keeps existing items ungrouped with no device', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dropit-m9-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'db.sqlite');
+  const db = new Database(path);
+  for (const migration of [migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8]) db.exec(migration);
+  assert.equal(db.pragma('user_version', { simple: true }), 8);
+  db.prepare("INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES ('s1','room',NULL,NULL,'rh')").run();
+  db.prepare(`INSERT INTO items (id,spaceId,userId,kind,text,size,storedBytes,createdAt,expiresAt,updatedAt)
+    VALUES ('i1','s1',NULL,'text','legacy',6,6,1,9999999999999,1)`).run();
+  db.close();
+  const repo = new SqliteRepository(path);
+  t.after(() => repo.close());
+  const [item] = repo.items('s1', 2);
+  assert.equal(item.text, 'legacy');
+  assert.equal(item.group, null);
+  assert.equal(item.device, null);
+  assert.deepEqual(repo.groups('s1'), []);
+  repo.createGroup('s1', '旧组', 3, 24);
+  assert.equal(repo.updateLabels('i1', { group: '旧组' }, 4).group, '旧组');
+  assert.throws(() => repo.updateLabels('i1', { group: '没有' }, 4), /GROUP_NOT_FOUND/);
 });

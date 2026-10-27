@@ -1,5 +1,6 @@
 import { ApiError, KeepSession, UploadCancelled, api } from '@/lib/api.ts'
 import type { Item } from '@/lib/types.ts'
+import { itemHeaders } from '@/lib/device.ts'
 
 /** Matches the server default `UPLOAD_CHUNK_BYTES`. Learned values replace it. */
 export const DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024
@@ -320,7 +321,7 @@ export function browserTransport(): ChunkTransport {
     }),
     get: (base, uploadId, signal) => api(`${base}/uploads/${uploadId}`, { signal }),
     put: (base, uploadId, index, body, onBytes, signal) => putBytes(`${base}/uploads/${uploadId}/chunks/${index}`, body, onBytes, signal),
-    complete: (base, uploadId, signal) => api<{ item: Item }>(`${base}/uploads/${uploadId}/complete`, { method: 'POST', signal }),
+    complete: (base, uploadId, signal) => api<{ item: Item }>(`${base}/uploads/${uploadId}/complete`, { method: 'POST', signal, headers: itemHeaders() }),
     cancel: async (base, uploadId) => {
       await api(`${base}/uploads/${uploadId}`, { method: 'DELETE' })
     },

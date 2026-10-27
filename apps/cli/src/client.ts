@@ -1,6 +1,8 @@
 import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
+import { createHash } from 'node:crypto';
 import { createReadStream, statSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { lstat, realpath, rm } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 import { Readable } from 'node:stream';
@@ -127,6 +129,15 @@ function socketText(data: WebSocket.RawData): string {
   return Buffer.from(data).toString('utf8');
 }
 
+// RHEA-190 step 5: the CLI introduces itself like a browser tab does, so the
+// board can label what it sent ("⌘ build-box") and show it in presence.
+const CREATES_ITEM = /\/items\/(text|file)$|\/uploads\/[^/]+\/complete$/;
+export function cliDevice(host = hostname()): Record<string, string> {
+  const name = [...(host.trim() || 'cli')].slice(0, 40).join('');
+  const id = `cli-${createHash('sha256').update(name).digest('base64url').slice(0, 16)}`;
+  return { 'x-dropit-device': id, 'x-dropit-device-name': encodeURIComponent(name), 'x-dropit-device-kind': 'cli' };
+}
+
 export class Client {
   constructor(readonly base: string, private token?: string) {}
 
@@ -145,6 +156,7 @@ export class Client {
   private open(method: string, path: string, init: { json?: unknown; body?: Buffer | Readable; headers?: Record<string, string>; machine?: boolean; signal?: AbortSignal; timeoutMs?: number } = {}): Promise<RawResponse> {
     const url = new URL(this.base + path);
     const headers = this.headers(method, init.headers, init.machine);
+    if (method === 'POST' && CREATES_ITEM.test(path.split('?')[0])) Object.assign(headers, cliDevice());
     let body = init.body;
     if (init.json !== undefined) {
       body = Buffer.from(JSON.stringify(init.json));

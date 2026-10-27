@@ -7,6 +7,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { AnimatePresence, animate as animateValue, motion, useAnimate, useDragControls, useMotionValue, useTransform, type PanInfo } from 'motion/react'
 import { CheckIcon, CopyIcon, DownloadIcon, EllipsisIcon, PencilIcon, PinIcon, PinOffIcon, Share2Icon, TagIcon, Undo2Icon } from 'lucide-react'
+import { GroupBadge, GroupDot } from '@/components/board-groups.tsx'
+import { DeviceGlyph } from '@/components/device-glyph.tsx'
+import { deviceColor } from '@/lib/device.ts'
 import { ExpandCapsule } from '@/components/expand-capsule.tsx'
 import { HoldToConfirm, MediaViewer, type ViewerMedia } from '@/components/clip-media.tsx'
 import { CodeLines, GridBody, RowBody, shortLeft, type ClipVisual } from '@/components/clip-visual.tsx'
@@ -136,6 +139,9 @@ export type BoardCardProps = {
   onRetractNow: () => void
   onPin: (pinned: boolean) => void
   onOpenImage: () => void
+  /** RHEA-190 step 5: known groups; with onMoveGroup the footer shows a group badge */
+  groups?: string[]
+  onMoveGroup?: (group: string | null) => void
 }
 
 export function BoardCard(props: BoardCardProps) {
@@ -488,13 +494,28 @@ export function BoardCard(props: BoardCardProps) {
             </form>
           ) : null}
           <footer className={`flex items-center gap-2 border-t border-[var(--line-1)] py-2 pl-3 ${aging ? 'pr-6' : 'pr-3'} text-[11px] text-[var(--fg-3)]`}>
-            <span className="inline-flex items-center gap-1" data-source-badge="">
-              <span aria-hidden className="size-2 rounded-full" style={{ background: senderColor(sender) }} />
-              <span className="text-[var(--fg-2)]">{sender}</span>
-            </span>
+            {item.device ? (
+              <span className="inline-flex min-w-0 items-center gap-1" data-source-badge="" data-device-id={item.device.id} title={`${sender} · ${item.device.name}`} style={{ color: deviceColor(item.device.kind) }}>
+                <DeviceGlyph kind={item.device.kind} className="size-3.5 shrink-0" />
+                <span className="max-w-[10rem] truncate text-[var(--fg-2)]">{item.device.name}</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1" data-source-badge="">
+                <span aria-hidden className="size-2 rounded-full" style={{ background: senderColor(sender) }} />
+                <span className="text-[var(--fg-2)]">{sender}</span>
+              </span>
+            )}
             <span aria-hidden>·</span>
-            <span className="tabular-nums">{formatWhen(item.createdAt, now)}</span>
-            {item.updatedAt > item.createdAt ? <span>已编辑</span> : null}
+            <span className="shrink-0 tabular-nums">{formatWhen(item.createdAt, now)}</span>
+            {item.updatedAt > item.createdAt ? <span className="shrink-0">已编辑</span> : null}
+            {props.onMoveGroup && props.groups ? (
+              <GroupBadge group={item.group ?? undefined} groups={props.groups} onMove={(group) => props.onMoveGroup?.(group ?? null)} />
+            ) : item.group ? (
+              <span className="inline-flex min-w-0 items-center gap-1 text-[11px] text-[var(--fg-3)]" data-group-badge={item.group}>
+                <GroupDot group={item.group} />
+                <span className="max-w-[6rem] truncate">{item.group}</span>
+              </span>
+            ) : null}
             <span className={`dd-mono ml-auto tabular-nums ${aging ? 'text-[var(--brand)]' : ''}`} title={`剩余 ${formatRemain(remaining)}`}>
               {shortLeft(remaining)}
             </span>

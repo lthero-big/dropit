@@ -216,11 +216,11 @@ Space routes require membership; room routes require the unexpired capability.
 | Method | Path | Body / response |
 | --- | --- | --- |
 | GET | `base` | `{id,name,expiresAt,maxFileBytes,quotaBytes}` |
-| GET | `base/items` | `{type:'snapshot', items:Item[],serverTime,expiresAt}`; current nonexpired entries, newest first |
-| POST | `base/items/text` | `{text:string}` → 201 `{item:Item}`; nonblank UTF-8, max `MAX_TEXT_BYTES` |
+| GET | `base/items` | `{type:'snapshot', items:Item[], groups:string[], serverTime,expiresAt}`; current nonexpired entries, newest first |
+| POST | `base/items/text` | `{text:string, group?:string\|null}` → 201 `{item:Item}`; nonblank UTF-8, max `MAX_TEXT_BYTES`. An unknown `group` name is created on the fly (see Groups). |
 | PATCH | `base/items/:id` | `{text:string}` → 200 `{item:Item}`. Text only. Same blank and size rules as create. `createdAt` and `expiresAt` stay; `updatedAt` becomes the edit time. Quota counts `newSize - oldSize` and always allows a shrink. Spaces: the author only (`403` for anyone else, including the space owner). Rooms: any current capability holder. Files return `400 INVALID_INPUT`. Unknown id or another space returns `404`. |
-| PATCH | `base/items/:id/labels` | `{pinned?: boolean, tags?: string[]}` → 200 `{item:Item}`. At least one field. Replaces the tag list when `tags` is sent; omitted `tags` leaves them. Does not change `createdAt`, `updatedAt`, text, or quota. Spaces: item author or space owner. Rooms: any current capability holder. A tag is 1–24 characters after trimming and stripping a leading `#`, with no whitespace or commas, at most 8 unique tags. |
-| POST | `base/items/file` | **Raw binary body**, original type in `Content-Type`, filename in `X-File-Name: encodeURIComponent(name)` → 201 `{item:Item}` |
+| PATCH | `base/items/:id/labels` | `{pinned?: boolean, tags?: string[], group?: string\|null}` → 200 `{item:Item}`. At least one field. `group: null` (or `''`) moves the item out of its group. Replaces the tag list when `tags` is sent; omitted `tags` leaves them. Does not change `createdAt`, `updatedAt`, text, or quota. Spaces: item author or space owner. Rooms: any current capability holder. A tag is 1–24 characters after trimming and stripping a leading `#`, with no whitespace or commas, at most 8 unique tags. |
+| POST | `base/items/file` | **Raw binary body**, original type in `Content-Type`, filename in `X-File-Name: encodeURIComponent(name)`, optional `X-Dropit-Group: encodeURIComponent(group)` → 201 `{item:Item}` |
 | GET | `base/items/:id/download` | Raw bytes, `application/octet-stream`, `Content-Disposition: attachment`, `nosniff`. `Accept-Ranges: bytes`; single `Range` supports resume (206/416). |
 | GET | `base/items/:id/thumbnail` | Sanitized, re-encoded `image/webp` up to 320×320; 404 if no thumbnail |
 | GET | `base/items/:id/preview` | Sanitized `image/webp`, longest edge 2048px, aspect preserved, no enlargement; only previously validated raster uploads. `Content-Disposition: inline`, `nosniff`, `Cache-Control: private, max-age=N` (at most 60 seconds, capped by item expiry). Nonmembers/unknown items/nonimages return 404. |
@@ -229,6 +229,30 @@ Space routes require membership; room routes require the unexpired capability.
 | POST | `base/items/:id/shares` | `{expiresIn:'1h'\|'1d'\|'7d'\|'never', maxViews?: number\|null}` → 201 `{id,itemId,expiresAt,maxViews,views,revoked,createdAt,token,url}`. `maxViews` null or omitted is unlimited; otherwise 1–100 (`1` is one-time). Same manager as retract: item author or space owner; any current room capability. |
 | GET | `base/items/:id/shares` | `{shares:[Share]}`. No token. Same manager as create. |
 | DELETE | `base/shares/:shareId` | 204; immediate revocation. Same manager as create. |
+
+| GET | `base/groups` | `{groups:string[]}` in creation order |
+| POST | `base/groups` | `{name}` → 201 `{groups}`. `409 GROUP_EXISTS`, `409 GROUP_LIMIT` (24 max), `400 INVALID_GROUP` |
+| PATCH | `base/groups/:name` | `{name}` → 200 `{groups}`; items in the group move with it. `404 GROUP_NOT_FOUND` |
+| DELETE | `base/groups/:name` | 200 `{groups}`; its items become ungrouped (nothing is deleted) |
+
+### Groups and device identity (RHEA-190 step 5)
+
+Groups are per space / room named buckets (1–24 characters after trimming, no
+control characters, not `全部` or `未分组`; at most 24). Every change is broadcast
+as a `groups` WebSocket message. Same permission as reading and writing items.
+
+Any item-creating request (`items/text`, `items/file`, `uploads/:id/complete`) may
+carry the sending device so other devices can say where a clip came from:
+
+| Header | Value |
+| --- | --- |
+| `X-Dropit-Device` | stable client id, `[A-Za-z0-9_-]{6,64}` |
+| `X-Dropit-Device-Name` | `encodeURIComponent(name)`, up to 40 characters (e.g. `Mac · Chrome`) |
+| `X-Dropit-Device-Kind` | `mac` \| `phone` \| `pad` \| `pc` \| `cli` (others fall back to `pc`) |
+| `X-Dropit-Group` | `encodeURIComponent(group)` for binary uploads (text uses the body field) |
+
+All are optional; malformed values are ignored rather than rejected, so old
+clients behave exactly as before (`item.device` and `item.group` are `null`).
 
 `Share = {id,itemId,expiresAt:number|null,maxViews:number|null,views,revoked:0|1,createdAt}`.
 The raw token is returned only at creation (`url` is `{APP_ORIGIN}/s/{token}`). Only its SHA-256
@@ -355,6 +379,8 @@ interface Item {
   expiresAt: number;
   pinned: boolean; // pinned clips sort ahead of unpinned clips; createdAt order is unchanged inside each group
   tags: string[]; // 0–8 labels, each 1–24 characters, no whitespace
+  group: string | null; // demo-style group, null when ungrouped
+  device: {id: string; name: string; kind: 'mac' | 'phone' | 'pad' | 'pc' | 'cli'} | null; // sender device, if reported
 }
 ```
 
@@ -416,6 +442,9 @@ url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const socket = new WebSocket(url); // same-origin cookie sent by browser
 ```
 
+Optionally add `?device=<id>&name=<encoded name>&kind=<kind>` (same rules as the
+`X-Dropit-Device*` headers) so this socket shows up by name in `presence.peers`.
+
 Node CLI clients can use `new WebSocket(url, {headers: {Authorization: 'Bearer ' +
 token}})` from `ws`; Origin is optional for a valid PAT. Never send the PAT as a
 query parameter or WebSocket subprotocol. Native browser WebSocket continues to
@@ -425,16 +454,18 @@ Server → client JSON messages:
 
 ```ts
 type Message =
-  | {type: 'snapshot'; items: Item[]; serverTime: number; expiresAt: number | null}
+  | {type: 'snapshot'; items: Item[]; groups?: string[]; serverTime: number; expiresAt: number | null}
+  | {type: 'groups'; groups: string[]}
   | {type: 'item.created'; item: Item}
   | {type: 'item.updated'; item: Item}
   | {type: 'item.deleted'; id: string}
-  | {type: 'presence'; devices: number};
+  | {type: 'presence'; devices: number; peers?: Array<{id: string; name: string; kind: string}>};
 ```
 
 `presence.devices` is the number of open sockets on this space or room. It is
-sent after the snapshot and again when a socket leaves. It carries no names or
-addresses. On **every** connection, replace the local list with the first `snapshot`, then
+sent after the snapshot and again when a socket leaves. It carries no
+addresses; `peers` lists the distinct named devices currently connected (only
+present when at least one socket identified itself). On **every** connection, replace the local list with the first `snapshot`, then
 apply created and updated events by upserting `item.id` (pinned clips stay above the others, then `createdAt`)
 and deleted events by removing `id`. `presence` does not change the list.
 This reconciles entries created, edited, deleted or expired while offline. Reconnect using
@@ -463,13 +494,13 @@ and auth-start rate limits still use JSON.
 
 | HTTP | Codes / frontend action |
 | --- | --- |
-| 400 | `INVALID_INPUT`, `INVALID_LIMITS`, `INVALID_JSON`, `JSON_REQUIRED`, `EMPTY_TEXT`, `EMPTY_FILE`, `UPLOAD_TIMEOUT`, `INVALID_FILENAME`, `INVALID_CHUNK_INDEX`, `INVALID_CHECKSUM`, `CHECKSUM_MISMATCH`, `CHUNK_SIZE_MISMATCH`, `UPLOAD_INCOMPLETE`, `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR` |
+| 400 | `INVALID_INPUT`, `INVALID_LIMITS`, `INVALID_JSON`, `JSON_REQUIRED`, `EMPTY_TEXT`, `EMPTY_FILE`, `UPLOAD_TIMEOUT`, `INVALID_FILENAME`, `INVALID_CHUNK_INDEX`, `INVALID_CHECKSUM`, `CHECKSUM_MISMATCH`, `CHUNK_SIZE_MISMATCH`, `UPLOAD_INCOMPLETE`, `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR`, `INVALID_GROUP` |
 | 401 | `UNAUTHENTICATED` → login |
 | 403 | `FORBIDDEN`, `ORIGIN_REJECTED`, `USER_DISABLED`, `INVITATION_REQUIRED`, `INVITE_INVALID`, `VERIFIED_EMAIL_REQUIRED` |
 | 403 | `INSUFFICIENT_SCOPE`, `BROWSER_SESSION_REQUIRED` for PATs |
-| 404 | `NOT_FOUND`, `PROVIDER_UNAVAILABLE` |
+| 404 | `NOT_FOUND`, `PROVIDER_UNAVAILABLE`, `GROUP_NOT_FOUND` |
 | 416 | Download/media range unsatisfiable; Content-Range contains `bytes */SIZE` |
-| 409 | `LAST_ADMIN`, `EMAIL_IN_USE`, `CHUNK_CONFLICT`, `UPLOAD_IN_PROGRESS` |
+| 409 | `LAST_ADMIN`, `EMAIL_IN_USE`, `CHUNK_CONFLICT`, `UPLOAD_IN_PROGRESS`, `GROUP_EXISTS`, `GROUP_LIMIT` |
 | 413 | `BODY_TOO_LARGE`, `TEXT_TOO_LARGE`, `FILE_TOO_LARGE`, `QUOTA_EXCEEDED`, `ITEM_LIMIT` → show configured limit |
 | 415 | `INVALID_IMAGE` → unsupported/corrupt/too many pixels |
 | 429 | `RATE_LIMITED`, `UPLOAD_BUSY`, `CHUNK_BUSY`, `UPLOAD_SESSION_LIMIT`, `SOCKET_LIMIT`; HTTP responses have integer `Retry-After` seconds |

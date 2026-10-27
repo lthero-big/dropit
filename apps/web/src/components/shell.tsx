@@ -16,6 +16,8 @@ import { api, errorText } from '@/lib/api.ts'
 import { formatBytes, quotaTone, spaceLabel } from '@/lib/format.ts'
 import { useSession } from '@/lib/session.tsx'
 import type { SpaceSummary } from '@/lib/types.ts'
+import { PRESENCE_SLOT } from '@/lib/device.ts'
+import { Logo } from './logo.tsx'
 import { useTheme } from './theme-provider.tsx'
 
 const themeIconClass = 'inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-line-2 bg-background text-foreground hover:bg-surface-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary'
@@ -87,11 +89,13 @@ export function Shell({
 
   return (
     <div className="min-h-svh bg-background text-foreground">
-      <header className="sticky top-0 z-20 border-b border-line-1 bg-background">
-        <div className="mx-auto flex max-w-[1240px] items-center gap-x-3 gap-y-3 px-4 py-3 md:flex-wrap md:gap-x-5 md:px-8">
-          <Link to="/" className="shrink-0 text-[22px] font-semibold tracking-tight">
-            dropit
+      <header className="sticky top-0 z-40 border-b border-line-1 bg-[color-mix(in_oklab,var(--bg)_82%,transparent)] backdrop-blur-md">
+        <div className="mx-auto flex min-h-14 max-w-[1120px] items-center gap-x-2 px-3 py-1.5 sm:gap-x-3 sm:px-6">
+          <Link to="/" aria-label="dropit" className="flex min-h-10 shrink-0 items-center no-underline">
+            <Logo />
           </Link>
+          {/* the board portals its named presence dots here (RHEA-190 step 5) */}
+          <div id={PRESENCE_SLOT} className="flex min-w-0 items-center" />
           {me && current && onSpace ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -108,7 +112,7 @@ export function Shell({
               </DropdownMenuContent>
             </DropdownMenu>
           ) : null}
-          <nav className="hidden items-center gap-4 text-xs font-medium md:flex">
+          <nav className="hidden items-center gap-4 text-xs font-medium text-fg-2 md:flex">
             <Link to="/" className={location.pathname === '/' ? 'border-b border-primary' : ''}>
               剪贴板
             </Link>
@@ -197,8 +201,8 @@ export function Shell({
           </div>
         </div>
       </header>
-      <div className="mx-auto max-w-[1240px] px-4 pt-6 pb-24 md:px-8 md:pb-12">{children}</div>
-      <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-2 border-t border-line-1 bg-background md:hidden">
+      <div className="mx-auto max-w-[1120px] px-4 pt-5 pb-24 sm:px-6 md:pb-12">{children}</div>
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-2 border-t border-line-1 bg-[color-mix(in_oklab,var(--bg)_88%,transparent)] pb-[env(safe-area-inset-bottom)] backdrop-blur-md md:hidden" data-shell-nav="">
         <Link to="/" className="flex min-h-11 items-center justify-center text-xs font-medium">
           剪贴板
         </Link>

@@ -47,7 +47,13 @@ export interface Item {
   expiresAt: number
   pinned: boolean
   tags: string[]
+  /** RHEA-190 step 5: demo-style group (null = 未分组). Older servers omit it. */
+  group?: string | null
+  /** The device that sent it, when it identified itself. */
+  device?: ItemDevice | null
 }
+
+export type ItemDevice = { id: string; name: string; kind: 'mac' | 'phone' | 'pad' | 'pc' | 'cli' }
 
 export interface Invite {
   id: string
@@ -180,10 +186,11 @@ export interface PublicShare {
 }
 
 export type ServerMessage =
-  | { type: 'snapshot'; items: Item[]; serverTime: number; expiresAt: number | null }
+  | { type: 'snapshot'; items: Item[]; groups?: string[]; serverTime: number; expiresAt: number | null }
   | { type: 'item.created'; item: Item }
   | { type: 'item.updated'; item: Item }
   | { type: 'item.deleted'; id: string }
-  | { type: 'presence'; devices: number }
+  | { type: 'presence'; devices: number; peers?: ItemDevice[] }
+  | { type: 'groups'; groups: string[] }
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'stopped'
