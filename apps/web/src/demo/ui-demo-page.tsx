@@ -1,7 +1,3 @@
-import '@fontsource-variable/geist'
-import '@fontsource-variable/geist-mono'
-import '@fontsource-variable/noto-sans-sc'
-import '@fontsource-variable/noto-serif-sc'
 import './demo.css'
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
@@ -34,9 +30,8 @@ import { clipCopyText, dayLabel, deviceById, devices, droppedFile, nextIncoming,
 import { GroupBar, GroupDot, GroupTarget, type GroupFilter } from './groups.tsx'
 import { DeviceGlyph } from './icons.tsx'
 import { deviceColor, groupColor, groupName, labelFor } from './visuals.ts'
-import { dur, easeIn, easeOut, enter, springBounce, springSettle, springTether } from './motion-tokens.ts'
+import { dur, easeIn, easeOut, enter, springBounce, springSettle, springTether } from '../lib/motion.ts'
 
-type Direction = 'paper' | 'ink'
 type Mode = 'light' | 'dark'
 type View = 'grid' | 'group' | 'date' | 'device'
 
@@ -118,7 +113,6 @@ function useScrollCollapse(enabled: boolean, hold: boolean) {
 }
 
 export function UiDemoPage() {
-  const [direction, setDirection] = useState<Direction>(() => readParam('dir', ['paper', 'ink'] as const, 'paper'))
   const [mode, setMode] = useState<Mode>(() =>
     readParam('mode', ['light', 'dark'] as const, typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
   )
@@ -355,7 +349,6 @@ export function UiDemoPage() {
       const t = e.target as HTMLElement
       if (t.closest('textarea, input')) return
       if (e.key === 'n') simulateArrival()
-      if (e.key === 'd') setDirection((d) => (d === 'paper' ? 'ink' : 'paper'))
       if (e.key === 'm') setMode((m) => (m === 'light' ? 'dark' : 'light'))
     }
     window.addEventListener('keydown', onKey)
@@ -364,9 +357,8 @@ export function UiDemoPage() {
 
   return (
     <MotionConfig reducedMotion={simReduced ? 'always' : 'user'} transition={enter}>
-      <div className="dd min-h-dvh overflow-x-clip" data-dir={direction} data-mode={mode} data-reduced={reduced || undefined} data-gesture={gesture}>
+      <div className="dd min-h-dvh overflow-x-clip" data-mode={mode} data-reduced={reduced || undefined} data-gesture={gesture}>
         <TopBar
-          direction={direction}
           mode={mode}
           reduced={reduced}
           simReduced={simReduced}
@@ -375,7 +367,6 @@ export function UiDemoPage() {
             if (el) dotRefs.current.set(id, el)
             else dotRefs.current.delete(id)
           }}
-          onDirection={setDirection}
           onMode={setMode}
           onReduced={() => setSimReduced((v) => !v)}
         />
@@ -472,17 +463,15 @@ export function UiDemoPage() {
 /* ---------------------------------------------------------------- top bar */
 
 function TopBar(props: {
-  direction: Direction
   mode: Mode
   reduced: boolean
   simReduced: boolean
   ripples: Record<string, number>
   dotRef: (id: string, el: HTMLElement | null) => void
-  onDirection: (d: Direction) => void
   onMode: (m: Mode) => void
   onReduced: () => void
 }) {
-  const { direction, mode, reduced, simReduced, ripples, dotRef, onDirection, onMode, onReduced } = props
+  const { mode, reduced, simReduced, ripples, dotRef, onMode, onReduced } = props
   return (
     <header className="sticky top-0 z-40 border-b border-[var(--line-1)] bg-[color-mix(in_oklab,var(--bg)_82%,transparent)] backdrop-blur-md">
       <div className="mx-auto flex h-14 max-w-[1120px] items-center gap-2 px-3 sm:gap-3 sm:px-6">
@@ -511,16 +500,6 @@ function TopBar(props: {
           {reduced ? (
             <span className="dd-mono hidden rounded-[var(--radius-xs)] bg-[var(--accent-soft)] px-1.5 py-0.5 text-[10px] text-[var(--accent)] md:inline">reduced motion</span>
           ) : null}
-          <Segmented
-            id="dir"
-            label="风格方向"
-            value={direction}
-            onChange={onDirection}
-            options={[
-              { value: 'paper', label: '纸感', hint: 'Paper · Geist + 思源黑体' },
-              { value: 'ink', label: '墨刊', hint: 'Ink · 思源宋体 + Geist Mono' },
-            ]}
-          />
           <IconToggle label={mode === 'light' ? '切到暗色' : '切到亮色'} onClick={() => onMode(mode === 'light' ? 'dark' : 'light')}>
             <AnimatePresence mode="popLayout" initial={false}>
               <motion.span

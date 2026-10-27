@@ -1,6 +1,6 @@
 import type { Transition } from 'motion/react'
 
-// Mirrors the CSS tokens in demo.css so JS-driven animation uses the same rhythm.
+// Mirrors the motion tokens in index.css (--dur-*, --ease-enter/exit) so JS-driven animation uses the same rhythm.
 export const dur = { fast: 0.12, base: 0.2, slow: 0.32 } as const
 export const easeOut = [0.22, 1, 0.36, 1] as const
 export const easeIn = [0.55, 0, 1, 0.45] as const

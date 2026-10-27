@@ -8,7 +8,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { CheckIcon, EllipsisIcon, FolderIcon, FolderPlusIcon, PencilIcon, PlusIcon, Trash2Icon } from 'lucide-react'
 import { useIsolatePointer } from './media.tsx'
 import { groupColor, groupName } from './visuals.ts'
-import { dur, easeIn, easeOut, springBounce } from './motion-tokens.ts'
+import { dur, easeIn, easeOut, springBounce } from '../lib/motion.ts'
 
 /** filter value: null = 全部, '' = 未分组, otherwise a group name */
 export type GroupFilter = string | null

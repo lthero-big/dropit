@@ -12,7 +12,7 @@ import { DeviceGlyph } from './icons.tsx'
 import { deviceColor, fileType, labelFor, mediaOf } from './visuals.ts'
 import { AudioPlayer, HoldToConfirm, InlineVideo, MediaViewer, useIsolatePointer, type ViewerMedia } from './media.tsx'
 import { GroupBadge } from './groups.tsx'
-import { dur, easeIn, easeOut, enter, springBounce, springSettle } from './motion-tokens.ts'
+import { dur, easeIn, easeOut, enter, springBounce, springSettle } from '../lib/motion.ts'
 
 const AGING_WINDOW = 20 * 60_000
 /** swipe-left distance that opens the retract confirm; the card rests there */

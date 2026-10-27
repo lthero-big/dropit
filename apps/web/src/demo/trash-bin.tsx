@@ -1,6 +1,6 @@
 import { useEffect, useImperativeHandle, useState, type Ref } from 'react'
 import { AnimatePresence, animate, motion, useMotionValue, useSpring } from 'motion/react'
-import { dur, easeIn, easeOut, springBounce } from './motion-tokens.ts'
+import { dur, easeIn, easeOut, springBounce } from '../lib/motion.ts'
 import { TRASH_HIT as HIT, TRASH_MAGNET as MAGNET, TRASH_SIZE as SIZE, type TrashAnchor, type TrashHandle } from './trash-anchor.ts'
 
 /**
