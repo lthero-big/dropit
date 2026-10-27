@@ -407,6 +407,7 @@ export function BoardCard(props: BoardCardProps) {
         <motion.div
           ref={cardRef}
           data-card=""
+          data-capsule-bound=""
           data-open={open || pending || undefined}
           data-aging={aging || undefined}
           data-copied={copied || undefined}
