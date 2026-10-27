@@ -26,7 +26,7 @@ export function CommandPalette({ items, onJump }: { items: Item[]; onJump: (id: 
   const needle = query.trim().toLowerCase()
   const matches = items
     .filter((item) => {
-      const haystack = `${item.text ?? ''}\n${item.filename ?? ''}\n${(item.tags ?? []).join('\n')}`.toLowerCase()
+      const haystack = `${item.text ?? ''}\n${item.filename ?? ''}`.toLowerCase()
       return !needle || haystack.includes(needle)
     })
     .slice(0, 8)
@@ -47,7 +47,7 @@ export function CommandPalette({ items, onJump }: { items: Item[]; onJump: (id: 
           autoFocus
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="搜索文本、文件名或标签"
+          placeholder="搜索文本或文件名"
           className="w-full border border-line-2 bg-transparent px-3 py-2 text-sm outline-none"
         />
         <ul className="mt-2">

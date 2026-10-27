@@ -146,7 +146,7 @@ try {
   let lastText = '';
   while (Date.now() < buttonDeadline) {
     const outcome = await evaluate(`(() => {
-      const button = [...document.querySelectorAll('button')].find((node) => node.textContent.trim() === '创建临时房间');
+      const button = [...document.querySelectorAll('button')].find((node) => node.textContent.trim() === '进入临时房间');
       if (!button) return document.body.innerText.slice(0, 120);
       button.click();
       return 'clicked';

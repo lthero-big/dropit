@@ -165,7 +165,7 @@ describe('dropit web', () => {
     renderAt('/')
     expect(await screen.findByRole('link', { name: '使用 GitHub 继续' })).toHaveProperty('href', expect.stringContaining('/api/auth/github'))
     expect(screen.getByRole('link', { name: '使用 Google 继续' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '创建临时房间' }))
+    fireEvent.click(screen.getByRole('button', { name: '进入临时房间' }))
     expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
     expect(screen.getByText(/\/rooms\/room-token/)).toBeTruthy()
   })
@@ -432,7 +432,7 @@ describe('dropit web', () => {
     expect(screen.getByRole('button', { name: '编辑' })).toBeTruthy()
   })
 
-  it('keeps copy, share, and retract as icon buttons and nests the rest', async () => {
+  it('keeps copy and retract as icon buttons and nests the rest (share included)', async () => {
     stubFetch((url) => {
       if (url === '/api/me') return json(me)
       if (url === '/api/spaces') return json({ spaces: [space] })
@@ -453,9 +453,10 @@ describe('dropit web', () => {
     const file = screen.getByText('a.bin').closest('li')
     if (!note || !file) throw new Error('missing clip')
     const copy = within(note).getByRole('button', { name: '复制' })
-    const share = within(note).getByRole('button', { name: '分享' })
     const retract = within(note).getByRole('button', { name: '撤回' })
-    for (const button of [copy, share, retract]) {
+    // RHEA-190 step 8: 分享 lives in 更多
+    expect(within(note).queryByRole('button', { name: '分享' })).toBeNull()
+    for (const button of [copy, retract]) {
       expect(button.getAttribute('title')).toBe(button.getAttribute('aria-label'))
       expect(button.style.minWidth).toBe('40px')
       expect(button.style.minHeight).toBe('40px')
@@ -466,7 +467,8 @@ describe('dropit web', () => {
     expect(within(note).getByRole('button', { name: '更多' }).getAttribute('aria-expanded')).toBe('true')
     expect(within(note).getByRole('button', { name: '编辑' }).style.minHeight).toBe('40px')
     expect(within(note).getByRole('button', { name: '置顶' })).toBeTruthy()
-    expect(within(note).getByRole('button', { name: '标签' })).toBeTruthy()
+    expect(within(note).getByRole('button', { name: '分享' }).style.minHeight).toBe('40px')
+    expect(within(note).queryByRole('button', { name: '标签' })).toBeNull()
     fireEvent.click(retract)
     expect(within(note).getByRole('button', { name: '确认撤回' }).getAttribute('title')).toBe('确认撤回')
     expect(within(note).getByRole('button', { name: '确认撤回' }).textContent).toContain('确认')
@@ -477,22 +479,10 @@ describe('dropit web', () => {
     expect(within(file).getByRole('link', { name: '下载' }).getAttribute('href')).toBe('/api/spaces/s1/items/file/download')
   })
 
-  it('pins clips, filters by tag, and applies a remote label update', async () => {
-    stubFetch((url, init) => {
+  it('pins clips, hides tags, and applies a remote label update', async () => {
+    stubFetch((url) => {
       if (url === '/api/me') return json(me)
       if (url === '/api/spaces') return json({ spaces: [space] })
-      if (url === '/api/spaces/s1/items/old/labels' && init?.method === 'PATCH') {
-        const body = JSON.parse(String(init.body)) as { pinned?: boolean; tags?: string[] }
-        return json({
-          item: item({
-            id: 'old',
-            text: 'older note',
-            createdAt: 100,
-            pinned: body.pinned ?? true,
-            tags: body.tags ?? ['上线'],
-          }),
-        })
-      }
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
     renderAt('/')
@@ -501,7 +491,7 @@ describe('dropit web', () => {
     socket?.emit({
       type: 'snapshot',
       items: [
-        item({ id: 'new', text: 'newer note', createdAt: 200, tags: [] }),
+        item({ id: 'new', text: 'newer note', createdAt: 200, tags: ['草稿'] }),
         item({ id: 'old', text: 'older note', createdAt: 100, pinned: true, tags: ['上线'] }),
       ],
       serverTime: Date.now(),
@@ -510,27 +500,23 @@ describe('dropit web', () => {
     expect(await screen.findByText('older note')).toBeTruthy()
     const body = document.body.textContent ?? ''
     expect(body.indexOf('older note')).toBeLessThan(body.indexOf('newer note'))
-    // RHEA-190 step 5: pinned clips are demo-style chips; tapping one reveals its tags and actions.
+    // RHEA-190 step 8: tags stay in the data but the board never shows, filters or edits them.
     const chip = screen.getByText('older note').closest('[data-pin-chip]')
     if (!(chip instanceof HTMLElement)) throw new Error('missing pin chip')
     fireEvent.click(chip)
     expect(chip.getAttribute('aria-expanded')).toBe('true')
-    fireEvent.click(screen.getByRole('button', { name: '#上线' }))
+    expect(within(chip).getByRole('button', { name: '取消置顶' })).toBeTruthy()
+    expect(within(chip).queryByRole('button', { name: '标签' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '#上线' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '#草稿' })).toBeNull()
+    expect(screen.queryByText(/上线|草稿/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /清除标签/ })).toBeNull()
+    expect(screen.queryByLabelText('新标签')).toBeNull()
+    fireEvent.change(screen.getByLabelText('搜索'), { target: { value: '草稿' } })
     expect(screen.queryByText('newer note')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: /清除标签/ }))
+    fireEvent.change(screen.getByLabelText('搜索'), { target: { value: 'newer' } })
     expect(screen.getByText('newer note')).toBeTruthy()
-    fireEvent.change(screen.getByLabelText('搜索'), { target: { value: '上线' } })
-    expect(screen.queryByText('newer note')).toBeNull()
     fireEvent.change(screen.getByLabelText('搜索'), { target: { value: '' } })
-    const pinned = screen.getByText('older note').closest('[data-pin-chip]')
-    if (!(pinned instanceof HTMLElement)) throw new Error('missing clip')
-    if (pinned.getAttribute('aria-expanded') !== 'true') fireEvent.click(pinned)
-    fireEvent.click(within(pinned).getByRole('button', { name: '标签' }))
-    fireEvent.change(screen.getByLabelText('新标签'), { target: { value: '#运维' } })
-    fireEvent.click(screen.getByRole('button', { name: '添加' }))
-    await waitFor(() => expect(calls.some((call) => call.url === '/api/spaces/s1/items/old/labels')).toBe(true))
-    const patch = calls.find((call) => call.url === '/api/spaces/s1/items/old/labels')
-    expect(patch?.init?.body).toBe(JSON.stringify({ tags: ['上线', '运维'] }))
     socket?.emit({
       type: 'item.updated',
       item: item({ id: 'new', text: 'newer note', createdAt: 200, pinned: true, tags: ['上线'] }),
@@ -542,6 +528,7 @@ describe('dropit web', () => {
       expect(within(bar).getByText('older note')).toBeTruthy()
     })
     expect(screen.getAllByText('置顶')).toHaveLength(1)
+    expect(calls.some((call) => call.url.endsWith('/labels'))).toBe(false)
   })
 
   it('filters clipboard text on the current snapshot', async () => {
@@ -583,7 +570,10 @@ describe('dropit web', () => {
     expect(await screen.findByText('alpha secret')).toBeTruthy()
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
     expect(screen.getByRole('dialog', { name: '命令面板' })).toBeTruthy()
+    // RHEA-190 step 8: hidden tags no longer match; text still does
     fireEvent.change(screen.getByLabelText('搜索内容'), { target: { value: '上线' } })
+    expect(screen.queryByRole('button', { name: 'beta note' })).toBeNull()
+    fireEvent.change(screen.getByLabelText('搜索内容'), { target: { value: 'beta' } })
     fireEvent.click(screen.getByRole('button', { name: 'beta note' }))
     expect(document.activeElement?.id).toBe('clip-b')
     expect(screen.queryByRole('dialog', { name: '命令面板' })).toBeNull()
@@ -669,10 +659,19 @@ describe('dropit web', () => {
       serverTime: Date.now(),
       expiresAt: null,
     })
-    fireEvent.click(await screen.findByRole('button', { name: '分享' }))
-    expect(await screen.findByText('还没有分享链接。')).toBeTruthy()
+    const card = (await screen.findByText('alpha')).closest('li')
+    if (!card) throw new Error('missing clip')
+    const rowHeight = card.getBoundingClientRect().height
+    fireEvent.click(within(card).getByRole('button', { name: '更多' }))
+    fireEvent.click(within(card).getByRole('button', { name: '分享' }))
+    // RHEA-190 step 8: share options open in a popover outside the card, so the row never grows
+    const panel = await screen.findByRole('dialog', { name: '分享链接' })
+    expect(card.contains(panel)).toBe(false)
+    expect(panel.parentElement).toBe(document.body)
+    expect(card.getBoundingClientRect().height).toBe(rowHeight)
+    expect(await within(panel).findByText('还没有分享链接。')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '生成链接' }))
-    expect(await screen.findByLabelText('分享链接')).toHaveProperty('value', 'http://localhost/s/tok')
+    expect(await within(panel).findByLabelText('分享链接')).toHaveProperty('value', 'http://localhost/s/tok')
     const post = calls.find((call) => call.url === '/api/spaces/s1/items/a/shares' && call.init?.method === 'POST')
     expect(post?.init?.body).toBe(JSON.stringify({ expiresIn: '1d', maxViews: 1 }))
     fireEvent.click(screen.getByRole('button', { name: '撤销' }))

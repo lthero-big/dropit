@@ -1091,8 +1091,8 @@ async function dockerRoom(page, bytes) {
     await check('docker room queue and lightbox', async () => {
       await page.viewport(1280, 800);
       await page.goto(`${dockerOrigin}/`);
-      await poll(() => page.evaluate(`Boolean([...document.querySelectorAll('button')].find((node) => node.textContent.trim() === '创建临时房间'))`), 8000, 'room button');
-      await page.evaluate(`([...document.querySelectorAll('button')].find((node) => node.textContent.trim() === '创建临时房间')).click()`);
+      await poll(() => page.evaluate(`Boolean([...document.querySelectorAll('button')].find((node) => node.textContent.trim() === '进入临时房间'))`), 8000, 'room button');
+      await page.evaluate(`([...document.querySelectorAll('button')].find((node) => node.textContent.trim() === '进入临时房间')).click()`);
       const roomPath = await poll(async () => {
         const path = await page.evaluate('location.pathname');
         return path.startsWith('/rooms/') ? path : '';

@@ -185,16 +185,18 @@ export function GroupBar(props: BarProps) {
               if (target) chipRef(key, el)
             }}
             type="button"
-            layout={!reduced}
+            // RHEA-190 step 8: nothing in the bar may change layout while a card is dragged over it
+            // (hit zones are measured once at drag start); the hot chip only scales about its centre.
+            layout={!reduced && !dragging}
             aria-pressed={on}
             data-group-chip={key ?? '*'}
             data-drop-hot={hot || undefined}
             onClick={() => onFilter(key)}
-            animate={hot && !reduced ? { scale: 1.16, y: -1 } : { scale: 1, y: 0 }}
+            animate={hot && !reduced ? { scale: 1.16 } : { scale: 1 }}
             transition={springBounce}
             style={hot ? { zIndex: 50, ['--hot' as string]: groupColor(key || undefined) } : undefined}
             className={`relative flex h-7 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[12px] ${
-              on && !hot ? 'text-[var(--bg)]' : hot ? 'font-medium text-[var(--fg)]' : 'text-[var(--fg-2)] hover:text-[var(--fg)]'
+              on && !hot ? 'text-[var(--bg)]' : hot ? 'text-[var(--fg)]' : 'text-[var(--fg-2)] hover:text-[var(--fg)]'
             } ${dragging && target && !hot ? 'outline-dashed outline-1 outline-offset-1 outline-[var(--line-3)]' : ''}`}
           >
             {hot ? (
@@ -210,7 +212,7 @@ export function GroupBar(props: BarProps) {
             {hot ? null : on ? <motion.span layoutId="group-pill" transition={springBounce} className="absolute inset-0 rounded-full bg-[var(--fg)]" /> : <span className="absolute inset-0 rounded-full border border-[var(--line-1)] bg-[var(--surface-1)]" />}
             {key !== null ? <span className="relative"><GroupDot group={key || undefined} /></span> : null}
             <span className="relative whitespace-nowrap">{label}</span>
-            <span hidden={hot} className={`dd-mono relative min-w-[1ch] text-[10.5px] tabular-nums ${on ? 'opacity-70' : 'text-[var(--fg-4)]'}`}>
+            <span className={`dd-mono relative ${hot ? 'invisible' : ''} min-w-[1ch] text-[10.5px] tabular-nums ${on ? 'opacity-70' : 'text-[var(--fg-4)]'}`}>
               <AnimatePresence mode="popLayout" initial={false}>
                 <motion.span key={n} initial={{ y: -8, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 8, opacity: 0 }} transition={{ duration: dur.base, ease: easeOut }} className="inline-block">
                   {n}
@@ -231,11 +233,6 @@ export function GroupBar(props: BarProps) {
                 />
               ) : null}
             </AnimatePresence>
-            {hot ? (
-              <motion.span initial={reduced ? false : { opacity: 0, width: 0 }} animate={{ opacity: 1, width: 'auto' }} className="relative overflow-hidden whitespace-nowrap text-[10.5px] text-[var(--fg-2)]" data-drop-hint="">
-                松手放入
-              </motion.span>
-            ) : null}
           </motion.button>
         )
       })}
@@ -246,7 +243,7 @@ export function GroupBar(props: BarProps) {
           <motion.button
             key="add"
             type="button"
-            layout={!reduced}
+            layout={!reduced && !dragging}
             aria-label="新建分组"
             title="新建分组"
             onClick={() => setAdding(true)}

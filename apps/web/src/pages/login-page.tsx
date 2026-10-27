@@ -37,7 +37,7 @@ export function LoginPage({ invite }: { invite?: string }) {
     if (!invite && status === 'ready') navigate(takeReturn() ?? '/', { replace: true })
   }, [invite, navigate, status])
 
-  async function createRoom() {
+  async function enterRoom() {
     setBusy(true)
     try {
       const room = await openTempRoom()
@@ -76,8 +76,8 @@ export function LoginPage({ invite }: { invite?: string }) {
           </Button>
         ))}
         {invite ? null : (
-          <Button type="button" onClick={() => void createRoom()} disabled={busy}>
-            创建临时房间
+          <Button type="button" onClick={() => void enterRoom()} disabled={busy}>
+            进入临时房间
           </Button>
         )}
       </div>

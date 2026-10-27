@@ -5,8 +5,9 @@
  * swipe-to-copy / swipe-to-retract on touch, fly-in on arrival.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { createPortal } from 'react-dom'
 import { AnimatePresence, animate as animateValue, motion, useAnimate, useDragControls, useMotionValue, useTransform, type PanInfo } from 'motion/react'
-import { CheckIcon, CopyIcon, DownloadIcon, EllipsisIcon, PencilIcon, PinIcon, PinOffIcon, Share2Icon, TagIcon, Undo2Icon } from 'lucide-react'
+import { CheckIcon, CopyIcon, DownloadIcon, EllipsisIcon, PencilIcon, PinIcon, PinOffIcon, Share2Icon, Undo2Icon } from 'lucide-react'
 import { GroupBadge, GroupDot } from '@/components/board-groups.tsx'
 import { DeviceGlyph } from '@/components/device-glyph.tsx'
 import { deviceColor } from '@/lib/device.ts'
@@ -15,11 +16,12 @@ import { HoldToConfirm, MediaViewer, type ViewerMedia } from '@/components/clip-
 import { CodeLines, GridBody, RowBody, shortLeft, type ClipVisual } from '@/components/clip-visual.tsx'
 import { ConfirmRetract } from '@/components/confirm-retract.tsx'
 import { SharePanel } from '@/components/share-panel.tsx'
-import { TagChip } from '@/components/tag-chip.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { MarkdownText } from '@/lib/markdown.tsx'
 import { AGING_WINDOW, clipKind, codeSource, parseColor, parseLink } from '@/lib/clip-kind.ts'
 import { formatBytes, formatRemain, formatWhen } from '@/lib/format.ts'
+import { ghostLabel, ghostTransform } from '@/lib/drag-ghost.ts'
+import { groupName } from '@/lib/groups.ts'
 import { mediaKind } from '@/lib/media.ts'
 import { dur, easeIn, easeOut, springBounce, springSettle } from '@/lib/motion.ts'
 import type { TrashHandle } from '@/lib/trash-anchor.ts'
@@ -117,14 +119,6 @@ export type BoardCardProps = {
   onCancelEdit: () => void
   shareOpen: boolean
   onToggleShare: () => void
-  tagOpen: boolean
-  onToggleTag: () => void
-  tagDraft: string
-  onTagDraft: (value: string) => void
-  onAddTag: () => void
-  onRemoveTag: (name: string) => void
-  activeTag: string | null
-  onTag: (name: string) => void
   textOpen: boolean
   onToggleText: () => void
   arrival: Arrival | null
@@ -154,10 +148,6 @@ export type BoardCardProps = {
   onGroupDrag?: (x: number, y: number, drop: boolean) => string | null
 }
 
-/** While over a group chip the card shrinks into a small ghost that sits below-right of the pointer, so the chip's name stays readable. */
-export const GHOST_SCALE = 0.36
-const GHOST_OFFSET = { x: 22, y: 30 }
-
 export function BoardCard(props: BoardCardProps) {
   const { item, base, now, variant, gesture, reduced, sender, canEdit, canRetract, canShare, open, onOpen, copied, pending, editing } = props
   const [scope, animate] = useAnimate<HTMLDivElement>()
@@ -169,8 +159,12 @@ export function BoardCard(props: BoardCardProps) {
   const copyHint = useTransform(x, [0, SWIPE], [0, 1])
   const undoHint = useTransform(x, [-SWIPE, 0], [1, 0])
   const overTrash = useRef(false)
-  const overGroup = useRef(false)
-  const grabAt = useRef({ x: 0, y: 0 })
+  const overGroup = useRef<string | null>(null)
+  const [ghost, setGhost] = useState<{ group: string; x: number; y: number } | null>(null)
+  const ghostRef = useRef<HTMLDivElement | null>(null)
+  const pointer = useRef({ x: 0, y: 0 })
+  // RHEA-190 step 8: drag-to-group is for a desktop mouse only; touch / pen never file a card into a group
+  const mouseDrag = useRef(false)
   const dragged = useRef(false)
   const armedAtStart = useRef(false)
   const [hover, setHover] = useState(false)
@@ -183,7 +177,7 @@ export function BoardCard(props: BoardCardProps) {
   const life = aging ? 0.15 + ratio * 0.85 : 1
   const curl = aging ? 1 - ratio : 0
   const visual = itemVisual(item, base)
-  const busy = editing || props.tagOpen || props.shareOpen
+  const busy = editing || props.shareOpen
   const canDrag = gesture === 'pin-drag' ? !busy && (canRetract || canShare) : !busy
   // Touch: a left swipe parks the card aside while 确认撤回 waits behind it.
   const armed = gesture === 'swipe' && pending
@@ -246,24 +240,24 @@ export function BoardCard(props: BoardCardProps) {
     if (gesture !== 'pin-drag') return
     const px = info.point.x - window.scrollX
     const py = info.point.y - window.scrollY
+    pointer.current = { x: px, y: py }
+    if (ghostRef.current) ghostRef.current.style.transform = ghostTransform(px, py)
     const trash = canRetract && (props.trashRef.current?.track(px, py) ?? false)
-    const group = !trash && (props.onGroupDrag?.(px, py, false) ?? null) !== null
-    if (trash !== overTrash.current || group !== overGroup.current) {
+    const hit = !trash && mouseDrag.current ? (props.onGroupDrag?.(px, py, false) ?? null) : null
+    const group = hit !== null
+    const wasGroup = overGroup.current !== null
+    if (hit !== overGroup.current) {
+      overGroup.current = hit
+      setGhost(hit === null ? null : { group: hit, x: px, y: py })
+    }
+    if (trash !== overTrash.current || group !== wasGroup) {
       overTrash.current = trash
-      overGroup.current = group
       const el = cardRef.current
       if (el) {
-        if (group) {
-          // Shrink toward a point below-right of the pointer: scaling about origin O maps the grab point g to O + s(g - O),
-          // so O = g + offset / (1 - s) lands the grab point exactly `offset` away from the cursor.
-          const k = 1 / (1 - GHOST_SCALE)
-          el.style.transformOrigin = `${grabAt.current.x + GHOST_OFFSET.x * k}px ${grabAt.current.y + GHOST_OFFSET.y * k}px`
-        }
-        if (group) el.dataset.ghost = ''
-        else delete el.dataset.ghost
-        const pose = trash ? { scale: 0.62, rotate: 4, opacity: 0.86 } : group ? { scale: GHOST_SCALE, rotate: -4, opacity: 0.82 } : { scale: 1.04, rotate: -1.5, opacity: 1 }
+        // The card itself never changes scale origin; over a chip it just fades out behind the ghost.
+        const pose = trash ? { scale: 0.62, rotate: 4, opacity: 0.86 } : group ? { scale: 1.04, rotate: -1.5, opacity: 0 } : { scale: 1.04, rotate: -1.5, opacity: 1 }
         if (reduced) void animate(el, { scale: pose.scale, opacity: pose.opacity }, { duration: 0 })
-        else void animate(el, pose, springBounce)
+        else void animate(el, pose, group || wasGroup ? { duration: dur.fast, ease: easeOut } : springBounce)
       }
     }
     props.onPinHover(canShare && !item.pinned && !trash && !group && inside(props.pinBarRef.current, px, py))
@@ -291,8 +285,11 @@ export function BoardCard(props: BoardCardProps) {
     const py = info.point.y - window.scrollY
     const trash = canRetract && ((props.trashRef.current?.track(px, py) ?? false) || overTrash.current)
     overTrash.current = false
-    const wasGhost = overGroup.current
-    overGroup.current = false
+    const wasGhost = overGroup.current !== null
+    overGroup.current = null
+    setGhost(null)
+    const byMouse = mouseDrag.current
+    mouseDrag.current = false
     props.onPinHover(false)
     const mouth = props.trashRef.current?.mouth()
     const el = cardRef.current
@@ -311,15 +308,10 @@ export function BoardCard(props: BoardCardProps) {
     props.onDragPhase({ id: item.id, end: 'cancel' })
     window.clearTimeout(liftTimer.current)
     liftTimer.current = window.setTimeout(() => setLifted(false), 600)
-    const ghost = cardRef.current
-    if (ghost && wasGhost) {
-      delete ghost.dataset.ghost
-      // grow back while it snaps home; the origin resets once it is full size again
-      void animate(ghost, { scale: 1, rotate: 0, opacity: 1 }, reduced ? { duration: 0 } : springBounce).then(() => {
-        ghost.style.transformOrigin = ''
-      })
-    }
-    if ((props.onGroupDrag?.(px, py, true) ?? null) !== null) return
+    const card = cardRef.current
+    // reappear while it snaps home
+    if (card && wasGhost) void animate(card, { scale: 1, rotate: 0, opacity: 1 }, reduced ? { duration: 0 } : springBounce)
+    if (byMouse && (props.onGroupDrag?.(px, py, true) ?? null) !== null) return
     const overBar = inside(props.pinBarRef.current, px, py)
     if (!canShare) return
     if (overBar && !item.pinned) props.onPin(true)
@@ -382,7 +374,6 @@ export function BoardCard(props: BoardCardProps) {
     imageLabel: `查看 ${item.filename?.trim() || '图片'}`,
   }
   const Body = variant === 'grid' ? GridBody : RowBody
-  const tags = item.tags ?? []
   const more = (canEdit && !editing) || item.kind === 'file' || canShare
 
   return (
@@ -439,9 +430,10 @@ export function BoardCard(props: BoardCardProps) {
           animate={copied && !reduced ? { y: -3, boxShadow: 'var(--elev-3)' } : { y: 0, boxShadow: 'var(--elev-1)' }}
           transition={springBounce}
           onPointerDown={(event) => {
-            if (gesture !== 'pin-drag' || !canDrag || event.button !== 0 || event.pointerType === 'touch' || isInteractive(event.target)) return
-            const r = event.currentTarget.getBoundingClientRect()
-            grabAt.current = { x: event.clientX - r.left, y: event.clientY - r.top }
+            // desktop pin-drag starts from a mouse only (touch / pen on a laptop screen never lift the card)
+            if (gesture !== 'pin-drag' || !canDrag || event.button !== 0 || event.pointerType !== 'mouse' || isInteractive(event.target)) return
+            mouseDrag.current = true
+            pointer.current = { x: event.clientX, y: event.clientY }
             controls.start(event)
           }}
           onHoverStart={() => setHover(true)}
@@ -451,6 +443,7 @@ export function BoardCard(props: BoardCardProps) {
             armedAtStart.current = armed
             setHover(false)
             overTrash.current = false
+            overGroup.current = null
             if (gesture === 'pin-drag') {
               window.clearTimeout(liftTimer.current)
               setLifted(true)
@@ -496,41 +489,6 @@ export function BoardCard(props: BoardCardProps) {
               <Body clip={visual} viewing={viewer !== null || props.imageOpen === true} onView={setViewer} slots={slots} />
             )}
           </div>
-          {tags.length > 0 || props.tagOpen ? (
-            <div className="flex min-h-10 flex-wrap items-center gap-1 px-2 pb-1" data-tag-row="">
-              <AnimatePresence initial={false} mode="popLayout">
-                {tags.map((name) => (
-                  <TagChip key={name} name={name} active={props.activeTag === name} reduced={reduced} onFilter={() => props.onTag(name)} onRemove={canShare ? () => props.onRemoveTag(name) : undefined} />
-                ))}
-              </AnimatePresence>
-            </div>
-          ) : null}
-          {props.tagOpen ? (
-            <form
-              className="flex flex-wrap items-center gap-2 px-3 pb-2"
-              onSubmit={(event) => {
-                event.preventDefault()
-                props.onAddTag()
-              }}
-            >
-              <label className="sr-only" htmlFor={`tag-${item.id}`}>
-                新标签
-              </label>
-              <input
-                id={`tag-${item.id}`}
-                value={props.tagDraft}
-                onChange={(event) => props.onTagDraft(event.target.value)}
-                placeholder="输入标签后回车"
-                className="rounded-[var(--radius-sm)] border border-[var(--line-2)] bg-[var(--surface-0)] px-2 py-1 text-xs text-fg outline-none focus:border-[var(--line-3)]"
-              />
-              <Button type="submit" size="sm">
-                添加
-              </Button>
-              <Button type="button" variant="ghost" size="sm" onClick={props.onToggleTag}>
-                完成
-              </Button>
-            </form>
-          ) : null}
           <footer className={`flex items-center gap-2 border-t border-[var(--line-1)] py-2 pl-3 ${aging ? 'pr-6' : 'pr-3'} text-[11px] text-[var(--fg-3)]`}>
             {item.device ? (
               <span className="inline-flex min-w-0 items-center gap-1" data-source-badge="" data-device-id={item.device.id} title={`${sender} · ${item.device.name}`} style={{ color: deviceColor(item.device.kind) }}>
@@ -574,12 +532,23 @@ export function BoardCard(props: BoardCardProps) {
                 </AnimatePresence>
               </button>
             ) : null}
-            {canShare ? (
-              <button type="button" data-action="" title="分享" aria-label="分享" aria-expanded={props.shareOpen} className={actionClass} style={touchTarget} onClick={props.onToggleShare}>
-                <Share2Icon className="size-4" aria-hidden="true" />
+            {canRetract && gesture === 'pin-drag' ? (
+              // RHEA-190 step 8: on desktop 撤回 is tap → 确认撤回 (or drag to the bin); the press-and-hold shortcut is touch-only
+              <button
+                type="button"
+                data-action=""
+                data-retract={pending ? 'confirm' : undefined}
+                aria-label={pending ? '确认撤回' : '撤回'}
+                title={pending ? '确认撤回' : '撤回'}
+                className={pending ? confirmClass : `${actionClass} hover:text-[var(--brand)]`}
+                style={touchTarget}
+                onClick={props.onRetractClick}
+              >
+                <Undo2Icon className="size-4" aria-hidden="true" />
+                {pending ? <span>确认</span> : null}
               </button>
             ) : null}
-            {canRetract ? (
+            {canRetract && gesture !== 'pin-drag' ? (
               <HoldToConfirm
                 label="撤回"
                 name={pending ? '确认撤回' : '撤回'}
@@ -611,8 +580,8 @@ export function BoardCard(props: BoardCardProps) {
                   </button>
                 ) : null}
                 {canShare ? (
-                  <button type="button" title="标签" aria-label="标签" className={capsuleIconClass} style={touchTarget} onClick={props.onToggleTag}>
-                    <TagIcon className="size-4" aria-hidden="true" />
+                  <button type="button" title="分享" aria-label="分享" aria-haspopup="dialog" aria-expanded={props.shareOpen} className={capsuleIconClass} style={touchTarget} onClick={props.onToggleShare}>
+                    <Share2Icon className="size-4" aria-hidden="true" />
                   </button>
                 ) : null}
               </ExpandCapsule>
@@ -633,7 +602,26 @@ export function BoardCard(props: BoardCardProps) {
           ) : null}
         </AnimatePresence>
       </motion.div>
-      {props.shareOpen && base ? <SharePanel base={base} itemId={item.id} now={now} onClose={props.onToggleShare} /> : null}
+      {props.shareOpen && base ? <SharePanel base={base} itemId={item.id} now={now} anchorRef={cardRef} onClose={props.onToggleShare} /> : null}
+      {ghost !== null
+        ? createPortal(
+            <div ref={ghostRef} data-drag-ghost="" aria-hidden className="pointer-events-none fixed left-0 top-0 z-[80]" style={{ transform: ghostTransform(ghost.x, ghost.y) }}>
+              <motion.div
+                initial={reduced ? false : { opacity: 0, scale: 0.7 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={reduced ? { duration: 0 } : springBounce}
+                style={{ transformOrigin: 'top left' }}
+                className="flex max-w-60 items-center gap-1.5 rounded-[var(--radius-md)] border border-[var(--line-2)] bg-[var(--surface-1)] px-2 py-1.5 text-[11.5px] text-[var(--fg)] shadow-[var(--elev-3)]"
+              >
+                <span className="min-w-0 truncate">{ghostLabel(visual) || '内容'}</span>
+                <span className="shrink-0 whitespace-nowrap text-[10.5px] text-[var(--fg-3)]" data-drop-hint="">
+                  松手放入「{groupName(ghost.group)}」
+                </span>
+              </motion.div>
+            </div>,
+            document.body,
+          )
+        : null}
       <MediaViewer media={viewer} anchor={scope} reduced={reduced} onClose={() => setViewer(null)} />
     </motion.li>
   )

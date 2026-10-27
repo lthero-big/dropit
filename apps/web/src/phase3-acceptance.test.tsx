@@ -237,9 +237,10 @@ describe('AC-P1/P2 clip actions', () => {
     return { note, file }
   }
 
-  it('leaves copy, share, and retract outside, and puts the rest behind more', async () => {
+  it('leaves copy and retract outside, and puts the rest (share included) behind more', async () => {
     const { note, file } = await openBoard()
-    for (const name of ['复制', '分享', '撤回']) {
+    expect(within(note).queryByRole('button', { name: '分享' })).toBeNull()
+    for (const name of ['复制', '撤回']) {
       const button = within(note).getByRole('button', { name })
       expect(button.getAttribute('title')).toBe(name)
       expect(button.style.minWidth).toBe('40px')
@@ -264,7 +265,8 @@ describe('AC-P1/P2 clip actions', () => {
     expect(document.activeElement).toBe(edit)
     expect(edit.style.minHeight).toBe('40px')
     expect(within(note).getByRole('button', { name: '置顶' }).style.minWidth).toBe('40px')
-    expect(within(note).getByRole('button', { name: '标签' }).style.minHeight).toBe('40px')
+    expect(within(note).getByRole('button', { name: '分享' }).style.minHeight).toBe('40px')
+    expect(within(note).queryByRole('button', { name: '标签' })).toBeNull()
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(more.getAttribute('aria-expanded')).toBe('false')
     expect(within(note).queryByRole('button', { name: '编辑' })).toBeNull()
