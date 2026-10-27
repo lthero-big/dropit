@@ -6,7 +6,7 @@ export class ApiError extends Error {
 export const token = () => randomBytes(32).toString('base64url');
 export const hash = (value: string) => createHash('sha256').update(value).digest('base64url');
 export interface User { id: string; email: string; name: string; role: 'admin' | 'user'; disabled: number; pending: number; createdAt: number }
-export interface Space { id: string; name: string; ownerId: string | null; expiresAt: number | null; roomHash: string | null }
+export interface Space { id: string; name: string; ownerId: string | null; expiresAt: number | null; roomHash: string | null; deviceHash?: string | null }
 export interface UploadSession {
   id: string; spaceId: string; userId: string | null; principal: string;
   filename: string; mime: string; size: number; chunkSize: number; createdAt: number; expiresAt: number;

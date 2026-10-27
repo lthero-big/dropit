@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { Config } from './config.js';
 import { ApiError, MAX_GROUPS, cleanFilename, cleanGroupName, hash, publicItem, publicShareItem, token, type Item, type ItemMeta, type Session, type SharePublic, type Space } from './domain.js';
@@ -36,12 +36,26 @@ export class ClipboardService {
     if (!space) throw new ApiError(404, 'NOT_FOUND');
     return space;
   }
-  createRoom() {
-    const roomToken = token();
-    const space: Space = { id: randomUUID(), name: 'Temporary room', ownerId: null,
+  /**
+   * RHEA-190 step 7: the live temporary room already bound to this browser's
+   * secret room key. Its token is re-derived from the key (the server still
+   * stores only token hashes), so only that browser can re-enter it this way.
+   */
+  deviceRoom(deviceKey: string) {
+    const space = this.repo.deviceRoom(deviceRoomHash(deviceKey), this.now());
+    if (!space) return null;
+    const roomToken = deviceRoomToken(deviceKey, space.id);
+    if (space.roomHash !== hash(roomToken)) return null;
+    return { token: roomToken, expiresAt: space.expiresAt as number, url: `${this.config.origin}/rooms/${roomToken}`, reused: true };
+  }
+  /** A new temporary room; with a browser room key it replaces nothing live (callers check deviceRoom first) and is bound to that browser. */
+  createRoom(deviceKey?: string) {
+    const id = randomUUID();
+    const roomToken = deviceKey ? deviceRoomToken(deviceKey, id) : token();
+    const space: Space = { id, name: 'Temporary room', ownerId: null,
       expiresAt: this.now() + this.config.roomRetentionMs, roomHash: hash(roomToken) };
-    this.repo.createRoom(space);
-    return { token: roomToken, expiresAt: space.expiresAt, url: `${this.config.origin}/rooms/${roomToken}` };
+    this.repo.createRoom(space, deviceKey ? deviceRoomHash(deviceKey) : null);
+    return { token: roomToken, expiresAt: space.expiresAt as number, url: `${this.config.origin}/rooms/${roomToken}`, reused: false };
   }
   private canManage(space: Space, authorId: string | null, session: Session | undefined) {
     if (space.roomHash) return;
@@ -287,3 +301,8 @@ export class ClipboardService {
     return this.cleaning;
   }
 }
+
+/** A browser's secret room key (random, kept in its localStorage) → the binding stored on its room. */
+export const deviceRoomHash = (deviceKey: string) => hash(`room-device:${deviceKey}`);
+/** 32-byte room token derived from the browser's key and the room id, so it can be handed back without being stored. */
+export const deviceRoomToken = (deviceKey: string, spaceId: string) => createHash('sha256').update(`room-token:${deviceKey}:${spaceId}`).digest('base64url');

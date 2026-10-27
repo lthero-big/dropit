@@ -7,6 +7,7 @@ import { Shell } from '@/components/shell.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText } from '@/lib/api.ts'
 import { copyText } from '@/lib/format.ts'
+import { isOwnTempRoom, openTempRoom } from '@/lib/temp-room.ts'
 import { useSession } from '@/lib/session.tsx'
 import type { ConnectionStatus, ScopeInfo } from '@/lib/types.ts'
 
@@ -81,9 +82,10 @@ export function RoomPage() {
     }
   }, [qrOpen])
 
-  async function createAnother() {
+  // RHEA-190 step 7: one temporary room per browser — this opens (or, if it expired, renews) this browser's own room
+  async function openMine() {
     try {
-      const room = await api<{ token: string }>('/api/rooms', { method: 'POST' })
+      const room = await openTempRoom()
       navigate(`/rooms/${room.token}`)
     } catch (error) {
       toast.error(errorText(error))
@@ -95,9 +97,14 @@ export function RoomPage() {
       <Shell>
         <h1 className="text-4xl font-semibold">房间不存在或已过期</h1>
         <p className="mt-4 text-sm text-muted-foreground">临时房间不会出现在任何列表里。可以新建一个再把链接发给对方。</p>
-        <Button type="button" className="mt-6" asChild>
-          <Link to="/">返回</Link>
-        </Button>
+        <div className="mt-6 flex flex-wrap gap-2">
+          <Button type="button" onClick={() => void openMine()}>
+            打开我的临时房间
+          </Button>
+          <Button type="button" variant="outline" asChild>
+            <Link to="/">返回</Link>
+          </Button>
+        </div>
       </Shell>
     )
   }
@@ -118,9 +125,11 @@ export function RoomPage() {
             >
               复制链接
             </Button>
-            <Button type="button" variant="outline" size="sm" onClick={() => void createAnother()}>
-              新建房间
-            </Button>
+            {isOwnTempRoom(token) ? null : (
+              <Button type="button" variant="outline" size="sm" onClick={() => void openMine()}>
+                我的临时房间
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"

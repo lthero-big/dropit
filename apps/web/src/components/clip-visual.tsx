@@ -89,17 +89,6 @@ export function mediaOfVisual(clip: ClipVisual): 'audio' | 'video' | null {
   return t === 'AUDIO' ? 'audio' : t === 'VIDEO' ? 'video' : null
 }
 
-export function visualLabel(clip: ClipVisual) {
-  switch (clip.kind) {
-    case 'link': return clip.title
-    case 'code': return `${clip.lang} 代码`
-    case 'color': return clip.value
-    case 'text': return clip.text
-    case 'image': return clip.name
-    case 'file': return clip.name
-  }
-}
-
 /** Compact countdown for the card footer: 42s · 12m 05s · 3h 20m · 2d 4h. */
 export function shortLeft(ms: number) {
   if (ms <= 0) return '0s'

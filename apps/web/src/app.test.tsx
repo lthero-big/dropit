@@ -595,9 +595,11 @@ describe('dropit web', () => {
     const writeText = vi.fn(async () => undefined)
     vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(writeText)
     let rooms = 0
+    const keys: string[] = []
     stubFetch((url, init) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
       if (url === '/api/rooms' && init?.method === 'POST') {
+        keys.push((JSON.parse(String(init.body)) as { deviceKey: string }).deviceKey)
         rooms += 1
         return json({ token: `room-${rooms}`, expiresAt: Date.now() + 60_000, url: `/rooms/room-${rooms}` }, 201)
       }
@@ -621,8 +623,13 @@ describe('dropit web', () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringMatching(/\/rooms\/existing$/)))
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('dialog', { name: '房间二维码' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '新建房间' }))
+    expect(screen.queryByRole('button', { name: '新建房间' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '我的临时房间' }))
     expect(await screen.findByText(/\/rooms\/room-1/)).toBeTruthy()
+    expect(keys).toHaveLength(1)
+    expect(keys[0]).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    // inside its own room the browser no longer offers to open it
+    await waitFor(() => expect(screen.queryByRole('button', { name: '我的临时房间' })).toBeNull())
   })
 
   it('creates a share link and renders the public page as text', async () => {

@@ -77,13 +77,6 @@ export function localDevice(): DeviceInfo {
   return cached
 }
 
-export function renameLocalDevice(name: string): DeviceInfo {
-  const next = { ...localDevice(), name: cleanDeviceName(name) || localDevice().name }
-  cached = next
-  save(next)
-  return next
-}
-
 /** test hook */
 export function resetLocalDevice() {
   cached = null
