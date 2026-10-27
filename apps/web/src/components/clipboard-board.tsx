@@ -10,7 +10,9 @@ import { GroupEmpty, GroupedSections, PinChip, PresencePill, Segmented } from '@
 import { DeviceGlyph } from '@/components/device-glyph.tsx'
 import { presenceDots, useDockedComposer, useScrollCollapse } from '@/lib/board-hooks.ts'
 import { CommandPalette } from '@/components/command-palette.tsx'
-import { ImageLightbox, type LightboxSlide } from '@/components/image-lightbox.tsx'
+import { MediaViewer, type ViewerMedia } from '@/components/clip-media.tsx'
+import { UploadCard, type UploadCardActions } from '@/components/upload-card.tsx'
+import { uploadPreviewKind } from '@/lib/upload-preview.ts'
 import { TrashBin } from '@/components/trash-bin.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
 import { adoptResume, browserResumeStore, browserTransport, discardSession, discardUpload, matchResumeFile, receivedRatio, uploadMaybeChunked, type ChunkTransport, type ResumeRecord, type ResumeStore } from '@/lib/chunked-upload.ts'
@@ -19,7 +21,6 @@ import { PRESENCE_SLOT, deviceColor, itemHeaders, localDevice, setUploadGroup } 
 import { groupName } from '@/lib/groups.ts'
 import { CLAIMS_KEY, claimUpload, heartbeatUploads, ownsUpload, releaseUploads, tabId } from '@/lib/upload-claims.ts'
 import { createUploadQueue, type UploadQueue, type UploadRow } from '@/lib/upload-queue.ts'
-import { formatEta, formatSpeed } from '@/lib/upload-speed.ts'
 import { copyText, formatBytes, formatRemain, quotaTone, useClock, utf8Size } from '@/lib/format.ts'
 import { clipKind, codeSource } from '@/lib/clip-kind.ts'
 import { dayLabel } from '@/lib/day-label.ts'
@@ -47,18 +48,6 @@ function useCoarsePointer(): boolean {
 const touchTarget = { minWidth: 40, minHeight: 40 }
 const RETRACT_MS = 3000
 
-const uploadStatusLabel: Record<UploadRow['status'], string> = {
-  queued: '排队中',
-  uploading: '上传中',
-  processing: '处理中…',
-  paused: '已暂停',
-  done: '完成',
-  failed: '失败',
-  cancelled: '已取消',
-}
-
-const queueActionClass =
-  'inline-flex min-h-10 min-w-10 items-center rounded-md border border-line-2 bg-surface-1 px-2 text-xs font-medium text-fg-2 transition-colors duration-(--dur-fast) hover:border-line-3 hover:bg-surface-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring'
 const EXPIRED = '会话已过期，请重新上传'
 
 const layoutKey = 'dropit-layout'
@@ -192,6 +181,11 @@ export function ClipboardBoard({
   const selfId = localDevice().id
   const seenIds = useRef<Set<string> | null>(null)
   const localIds = useRef(new Set<string>())
+  // items that finished uploading from this tab: their translucent placeholder hands over to the real card
+  const uploadedIds = useRef(new Set<string>())
+  // object URLs for the picked files (image / video uploads preview before the server has them)
+  const previewUrls = useRef(new Map<string, string>())
+  const boardRef = useRef<HTMLDivElement | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const resumeRef = useRef<HTMLInputElement>(null)
   const resumeTarget = useRef<string | null>(null)
@@ -217,7 +211,7 @@ export function ClipboardBoard({
     const haystack = `${item.text ?? ''}\n${item.filename ?? ''}\n${(item.tags ?? []).join('\n')}`
     return haystack.toLowerCase().includes(needle)
   })
-  const slides: LightboxSlide[] = base
+  const slides = base
     ? shown.flatMap((item) =>
         item.hasThumbnail
           ? [
@@ -234,6 +228,18 @@ export function ClipboardBoard({
       )
     : []
   const openIndex = openId === null ? -1 : slides.findIndex((slide) => slide.key === openId)
+  const openSlide = openIndex >= 0 ? slides[openIndex] : null
+  const viewerMedia: ViewerMedia | null = openSlide
+    ? {
+        type: 'image',
+        src: openSlide.thumbnailSrc,
+        full: openSlide.previewSrc,
+        name: openSlide.filename,
+        meta: formatBytes(openSlide.byteSize),
+        layoutId: `img-${openSlide.key}`,
+        download: openSlide.downloadHref,
+      }
+    : null
   const roomUsed = usedBytes ?? channel.items.reduce((sum, item) => sum + item.size, 0)
 
   useEffect(() => {
@@ -357,6 +363,7 @@ export function ClipboardBoard({
       },
       onItem: (item) => {
         localIds.current.add(item.id)
+        uploadedIds.current.add(item.id)
         channelRef.current.upsert(item)
         onActivityRef.current?.()
       },
@@ -456,6 +463,23 @@ export function ClipboardBoard({
   }, [base])
 
   const uploadBusy = rows.some((row) => row.status === 'queued' || row.status === 'uploading' || row.status === 'processing' || row.status === 'paused')
+
+  // Drop the local previews of uploads that have left the queue.
+  useEffect(() => {
+    const live = new Set(rows.map((row) => row.id))
+    for (const [id, url] of previewUrls.current) {
+      if (live.has(id)) continue
+      URL.revokeObjectURL?.(url)
+      previewUrls.current.delete(id)
+    }
+  }, [rows])
+  useEffect(() => {
+    const urls = previewUrls.current
+    return () => {
+      for (const url of urls.values()) URL.revokeObjectURL?.(url)
+      urls.clear()
+    }
+  }, [])
 
   useEffect(() => {
     onBusyChange?.(uploadBusy)
@@ -726,7 +750,7 @@ export function ClipboardBoard({
     let remote = false
     for (const item of fresh) {
       const mine = localIds.current.has(item.id)
-      next[item.id] = mine ? 'landed' : 'arrived'
+      next[item.id] = mine ? (uploadedIds.current.has(item.id) ? 'uploaded' : 'landed') : 'arrived'
       remote ||= !mine
     }
     setArrivals((current) => ({ ...current, ...next }))
@@ -975,6 +999,7 @@ export function ClipboardBoard({
         onRetractNow={() => void removeItem(item)}
         onPin={(pinned) => void saveLabels(item, { pinned })}
         onOpenImage={() => setOpenId(item.id)}
+        imageOpen={openId === item.id}
         groups={groups}
         onMoveGroup={canShare(item) && (groups.length > 0 || item.group) ? (group) => moveToGroup(item, group) : undefined}
       />
@@ -1030,79 +1055,30 @@ export function ClipboardBoard({
     />
   )
 
-  const uploadQueue =
-    rows.length > 0 ? (
-      <div className="max-w-full overflow-hidden rounded-[var(--radius-md)] border border-[var(--line-2)] bg-[var(--surface-0)]" role="region" aria-label="上传队列">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line-1 px-3 py-2">
-          <p className="text-xs font-medium text-fg-2">上传</p>
-          {uploadBusy ? (
-            <button type="button" className={queueActionClass} style={touchTarget} onClick={() => queueRef.current?.cancelAll()}>
-              全部取消
-            </button>
-          ) : null}
-        </div>
-        <ul>
-          {rows.map((row) => (
-            <li key={row.id} className="border-t border-line-1 px-3 py-2 first:border-t-0" data-upload-status={row.status}>
-              <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
-                <p className="min-w-0 flex-1 truncate text-sm font-medium">{row.name}</p>
-                <div className="flex shrink-0 flex-wrap gap-2">
-                  {row.status === 'failed' ? (
-                    <button type="button" className={queueActionClass} style={touchTarget} aria-label={`重试 ${row.name}`} onClick={() => queueRef.current?.retry(row.id)}>
-                      重试
-                    </button>
-                  ) : null}
-                  {row.status === 'uploading' ? (
-                    <button type="button" className={queueActionClass} style={touchTarget} aria-label={`暂停 ${row.name}`} onClick={() => queueRef.current?.pause(row.id)}>
-                      暂停
-                    </button>
-                  ) : null}
-                  {row.status === 'paused' ? (
-                    <button type="button" className={queueActionClass} style={touchTarget} aria-label={`继续 ${row.name}`} onClick={() => continueRow(row)}>
-                      继续
-                    </button>
-                  ) : null}
-                  {row.status === 'paused' && row.confirmMtime ? (
-                    <button type="button" className={queueActionClass} style={touchTarget} aria-label={`仍要续传 ${row.name}`} onClick={() => acceptMtime(row)}>
-                      仍要续传
-                    </button>
-                  ) : null}
-                  {row.status === 'paused' && row.restored && row.error && !row.confirmMtime ? (
-                    <button type="button" className={queueActionClass} style={touchTarget} aria-label={`放弃并重新上传 ${row.name}`} onClick={() => abandonResume(row)}>
-                      放弃并重新上传
-                    </button>
-                  ) : null}
-                  {row.status === 'queued' || row.status === 'uploading' || row.status === 'processing' || row.status === 'paused' ? (
-                    <button type="button" className={queueActionClass} style={touchTarget} aria-label={`取消 ${row.name}`} onClick={() => queueRef.current?.cancel(row.id)}>
-                      取消
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-              <p className="mt-1 text-xs break-words text-muted-foreground tabular-nums">
-                {formatBytes(row.size)} ·{' '}
-                <span className={row.status === 'processing' ? 'font-medium text-fg' : undefined}>{uploadStatusLabel[row.status]}</span>
-                {row.status === 'uploading' || row.status === 'done' || row.status === 'paused' ? ` · ${Math.round(row.ratio * 100)}%` : ''}
-                {row.status === 'paused' ? ` · 剩余 ${formatBytes(Math.max(0, row.size - Math.round(row.ratio * row.size)))}` : ''}
-                {row.status === 'uploading' && row.speedBps > 0 ? ` · ${formatSpeed(row.speedBps)} · ${formatEta(row.etaMs)}` : ''}
-              </p>
-              {(row.status === 'failed' || row.status === 'paused') && row.error ? <p className="mt-1 text-xs break-words text-destructive">{row.error}</p> : null}
-              <div
-                className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface-2"
-                role="progressbar"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={Math.round(row.ratio * 100)}
-                aria-valuetext={row.status === 'processing' ? '处理中' : undefined}
-                aria-label={row.name}
-              >
-                <div className="h-full rounded-full bg-primary motion-safe:transition-[width] motion-safe:duration-(--dur-fast)" style={{ width: `${Math.round(row.ratio * 100)}%` }} />
-              </div>
-            </li>
-          ))}
-        </ul>
-      </div>
-    ) : null
+  // RHEA-190 step 6: uploads live on the board as translucent cards (finished ones hand over to the real clip).
+  const uploadsPending = rows.filter((row) => row.status !== 'done')
+  const previewFor = (row: UploadRow) => {
+    const known = previewUrls.current.get(row.id)
+    if (known) return known
+    if (!uploadPreviewKind(row) || typeof URL.createObjectURL !== 'function') return null
+    const file = queueRef.current?.fileOf(row.id)
+    if (!file) return null
+    const url = URL.createObjectURL(file)
+    previewUrls.current.set(row.id, url)
+    return url
+  }
+  const uploadActions = (row: UploadRow): UploadCardActions => ({
+    onCancel: () => queueRef.current?.cancel(row.id),
+    onPause: () => queueRef.current?.pause(row.id),
+    onContinue: () => continueRow(row),
+    onRetry: () => queueRef.current?.retry(row.id),
+    onRemove: () => queueRef.current?.dismiss(row.id),
+    onAcceptMtime: () => acceptMtime(row),
+    onAbandon: () => abandonResume(row),
+  })
+  const uploadCards = (variant: 'grid' | 'row') =>
+    uploadsPending.map((row) => <UploadCard key={`upload-${row.id}`} row={row} preview={previewFor(row)} variant={variant} reduced={reduced} actions={uploadActions(row)} />)
+  const uploadsInline = (layout === 'grid' || layout === 'list') && !(looseAll.length > 0 && looseShown.length === 0 && groupFilter !== null)
 
   const composer = (
     <motion.form
@@ -1264,10 +1240,9 @@ export function ClipboardBoard({
         </header>
         {slot ? createPortal(presence, slot) : null}
         {docked ? null : composer}
-        {uploadQueue}
         <MotionConfig reducedMotion="user">
           <LayoutGroup>
-            <div className="dd-board flex flex-col gap-4" data-gesture={gesture} data-reduced={reduced || undefined}>
+            <div ref={boardRef} className="dd-board flex flex-col gap-4" data-gesture={gesture} data-reduced={reduced || undefined}>
               {showPinBar && visible.length > 0 ? (
                 <PinBarShell barRef={pinBarRef} hover={pinHover} reduced={reduced} empty={pinnedShown.length === 0} layout="chips">
                   <AnimatePresence initial={false} mode="popLayout">
@@ -1307,6 +1282,14 @@ export function ClipboardBoard({
                   ]}
                 />
                 <span className="dd-mono text-[11px] text-[var(--fg-3)]">{looseShown.length} 条</span>
+                {uploadBusy ? (
+                  <span className="flex items-center gap-1 text-[11px] text-[var(--fg-3)]" data-upload-summary="">
+                    <span className="dd-mono">上传 {uploadsPending.filter((row) => row.status !== 'failed' && row.status !== 'cancelled').length}</span>
+                    <button type="button" className="inline-flex min-h-10 items-center rounded-[var(--radius-sm)] px-2 font-medium text-[var(--fg-2)] transition-colors duration-(--dur-fast) hover:bg-[var(--surface-2)] hover:text-[var(--fg)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" style={touchTarget} onClick={() => queueRef.current?.cancelAll()}>
+                      全部取消
+                    </button>
+                  </span>
+                ) : null}
                 {activeTag ? (
                   <button type="button" className="dd-chip" aria-pressed="true" style={touchTarget} onClick={() => setActiveTag(null)}>
                     #{activeTag} · 清除标签
@@ -1331,7 +1314,12 @@ export function ClipboardBoard({
                 </p>
               ) : null}
               {channel.status === 'connecting' && visible.length === 0 ? <BoardSkeletons view={layout === 'grid' || layout === 'group' ? 'grid' : 'rows'} /> : null}
-              {channel.status !== 'connecting' && visible.length === 0 ? (
+              {uploadsPending.length > 0 && !uploadsInline ? (
+                <ul className={layout === 'group' ? 'grid grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3' : 'flex flex-col gap-2'} data-upload-strip="">
+                  <AnimatePresence initial={false} mode="popLayout">{uploadCards(layout === 'group' ? 'grid' : 'row')}</AnimatePresence>
+                </ul>
+              ) : null}
+              {channel.status !== 'connecting' && visible.length === 0 && uploadsPending.length === 0 ? (
                 <BoardEmpty title="这里还空着" body="还没有内容。发送文本或文件，其他设备会实时收到。到期的内容会自己褪色消失。" />
               ) : null}
               {visible.length > 0 && shown.length === 0 ? <p className="py-8 text-center text-sm text-fg-3">没有匹配的内容。</p> : null}
@@ -1370,27 +1358,35 @@ export function ClipboardBoard({
                 </div>
               ) : (
                 <ul className={layout === 'grid' ? 'clip-board grid grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3' : 'clip-board flex flex-col gap-2'} data-layout={layout}>
+                  <AnimatePresence initial={false} mode="popLayout">{uploadsInline ? uploadCards(layout === 'grid' ? 'grid' : 'row') : null}</AnimatePresence>
                   {looseShown.map((item) => cardFor(item, layout === 'grid' ? 'grid' : 'row'))}
                 </ul>
               )}
             </div>
+            <MediaViewer
+              media={viewerMedia}
+              anchor={boardRef}
+              reduced={reduced}
+              onClose={() => setOpenId(null)}
+              gallery={
+                openIndex >= 0
+                  ? {
+                      index: openIndex,
+                      count: slides.length,
+                      onStep: (delta) => {
+                        const slide = slides[openIndex + delta]
+                        if (slide) setOpenId(slide.key)
+                      },
+                    }
+                  : undefined
+              }
+            />
           </LayoutGroup>
           {gesture === 'pin-drag' ? <TrashBin handle={trashRef} anchor={trash?.anchor ?? null} gulp={trash?.gulp ?? false} reduced={reduced} /> : null}
         </MotionConfig>
       </div>
       {docked ? (
         <div className="pointer-events-none fixed inset-x-0 bottom-[calc(44px+env(safe-area-inset-bottom))] z-30 flex justify-center px-3 pb-2 md:bottom-0 md:pb-[max(12px,env(safe-area-inset-bottom))]">{composer}</div>
-      ) : null}
-      {openIndex >= 0 ? (
-        <ImageLightbox
-          slides={slides}
-          index={openIndex}
-          onClose={() => setOpenId(null)}
-          onIndex={(next) => {
-            const slide = slides[next]
-            if (slide) setOpenId(slide.key)
-          }}
-        />
       ) : null}
       <CommandPalette
         items={visible}

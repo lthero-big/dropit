@@ -20,6 +20,10 @@ export type UploadRow = {
   error: string
   speedBps: number
   etaMs: number | null
+  /** MIME type of the picked file ('' when unknown or restored without the file) */
+  mime: string
+  /** id of the item the finished upload created (status 'done') */
+  itemId?: string
   /** Drawn from localStorage after a refresh. The File is gone until the user picks it again. */
   restored?: boolean
   confirmMtime?: boolean
@@ -75,6 +79,10 @@ export type UploadQueue = {
   armMtime: (id: string, file: File) => void
   confirmMtime: (id: string) => File | null
   takeHeld: (id: string) => File | null
+  /** drop a failed / finished row from the queue (failed uploads also discard their server session) */
+  dismiss: (id: string) => void
+  /** the local file behind a row, for an instant preview while it uploads */
+  fileOf: (id: string) => File | null
   dispose: () => void
 }
 
@@ -138,8 +146,9 @@ export function createUploadQueue(options: {
   }
 
   function snapshot(): UploadRow[] {
-    return jobs.map(({ id, name, size, ratio, status, error, speedBps, etaMs: remain, restored, confirmMtime }) => ({
-      id, name, size, ratio, status, error, speedBps, etaMs: remain,
+    return jobs.map(({ id, name, size, ratio, status, error, speedBps, etaMs: remain, mime, itemId, restored, confirmMtime }) => ({
+      id, name, size, ratio, status, error, speedBps, etaMs: remain, mime,
+      itemId,
       restored: restored || undefined,
       confirmMtime: confirmMtime || undefined,
     }))
@@ -239,6 +248,7 @@ export function createUploadQueue(options: {
       job.speedBps = 0
       job.etaMs = null
       job.controller = null
+      job.itemId = result.item.id
       publish()
       options.onItem(result.item)
       armRemoval(job)
@@ -279,6 +289,7 @@ export function createUploadQueue(options: {
       held: null,
       name,
       size: file.size,
+      mime: file.type,
       ratio: 0,
       status: 'queued',
       error: '',
@@ -383,6 +394,7 @@ export function createUploadQueue(options: {
         held: null,
         name: input.name || '截图',
         size: input.size,
+        mime: '',
         ratio: input.ratio,
         status: 'paused',
         error: '',
@@ -430,6 +442,7 @@ export function createUploadQueue(options: {
       job.error = ''
       job.name = file.name || job.name
       job.size = file.size
+      job.mime = file.type
       if (sessionKey) job.sessionKey = sessionKey
       if (job.status === 'paused' || job.status === 'failed') {
         job.status = 'queued'
@@ -474,6 +487,17 @@ export function createUploadQueue(options: {
       job.error = ''
       publish()
       return file
+    },
+    dismiss(id) {
+      const job = find(id)
+      if (!job) return
+      if (job.status === 'failed') forget(job)
+      else if (job.status !== 'done' && job.status !== 'cancelled') return
+      job.run += 1
+      remove(job)
+    },
+    fileOf(id) {
+      return find(id)?.file ?? null
     },
     dispose() {
       disposed = true

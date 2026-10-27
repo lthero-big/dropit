@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useReducedMotion } from 'motion/react'
 import { Link, useParams } from 'react-router'
-import { ImageLightbox } from '@/components/image-lightbox.tsx'
+import { MediaViewer, type ViewerMedia } from '@/components/clip-media.tsx'
+import { GridBody, type ClipVisual } from '@/components/clip-visual.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api } from '@/lib/api.ts'
 import { formatBytes } from '@/lib/format.ts'
@@ -12,13 +14,15 @@ export function SharePage() {
   const { token = '' } = useParams()
   const [share, setShare] = useState<PublicShare | null>(null)
   const [missing, setMissing] = useState(false)
-  const [open, setOpen] = useState(false)
+  const [viewer, setViewer] = useState<ViewerMedia | null>(null)
+  const anchor = useRef<HTMLDivElement | null>(null)
+  const reduced = useReducedMotion() ?? false
 
   useEffect(() => {
     let cancelled = false
     setShare(null)
     setMissing(false)
-    setOpen(false)
+    setViewer(null)
     api<PublicShare>(`/api/s/${encodeURIComponent(token)}`)
       .then((body) => {
         if (!cancelled) setShare(body)
@@ -32,6 +36,8 @@ export function SharePage() {
       cancelled = true
     }
   }, [token])
+
+  const visual = share ? shareVisual(token, share) : null
 
   return (
     <main className="mx-auto min-h-svh max-w-3xl px-4 py-8">
@@ -53,56 +59,19 @@ export function SharePage() {
             </div>
           ) : (
             <div className="mt-6">
-              {share.item.hasThumbnail ? (
-                <button
-                  type="button"
-                  aria-label={`查看 ${share.item.filename?.trim() || '图片'}`}
-                  className="block border-0 bg-transparent p-0 text-left"
-                  onClick={() => setOpen(true)}
-                >
-                  <img
-                    src={`/api/s/${encodeURIComponent(token)}/thumbnail?access=${encodeURIComponent(share.access)}`}
-                    alt=""
-                    className="max-h-80 border border-line-2 object-contain"
-                  />
-                </button>
-              ) : mediaKind({ ...share.item, hasThumbnail: share.item.hasThumbnail }) === 'video' ? (
-                <video
-                  controls
-                  preload="metadata"
-                  src={`/api/s/${encodeURIComponent(token)}/media?access=${encodeURIComponent(share.access)}`}
-                  className="max-h-80 w-full bg-foreground"
-                />
-              ) : mediaKind({ ...share.item, hasThumbnail: share.item.hasThumbnail }) === 'audio' ? (
-                <audio
-                  controls
-                  preload="metadata"
-                  src={`/api/s/${encodeURIComponent(token)}/media?access=${encodeURIComponent(share.access)}`}
-                  className="w-full"
-                />
+              {visual ? (
+                <div className="dd-board" ref={anchor}>
+                  <div className="dd-card max-w-md overflow-hidden" data-share-media={visual.kind === 'image' ? 'image' : visual.kind === 'file' ? visual.media : undefined}>
+                    <GridBody clip={visual} viewing={viewer !== null} onView={setViewer} slots={{ imageLabel: `查看 ${share.item.filename?.trim() || '图片'}` }} />
+                  </div>
+                  <MediaViewer media={viewer} anchor={anchor} reduced={reduced} onClose={() => setViewer(null)} />
+                </div>
               ) : null}
               <p className="mt-3 text-sm font-bold break-words">{share.item.filename}</p>
               <p className="text-xs text-muted-foreground">{formatBytes(share.item.size)}</p>
               <Button type="button" className="mt-4" asChild>
                 <a href={`/api/s/${encodeURIComponent(token)}/file?access=${encodeURIComponent(share.access)}`}>下载</a>
               </Button>
-              {open && share.item.hasThumbnail ? (
-                <ImageLightbox
-                  slides={[
-                    {
-                      key: token,
-                      filename: share.item.filename?.trim() || '未命名图片',
-                      byteSize: share.item.size,
-                      thumbnailSrc: `/api/s/${encodeURIComponent(token)}/thumbnail?access=${encodeURIComponent(share.access)}`,
-                      previewSrc: `/api/s/${encodeURIComponent(token)}/preview?access=${encodeURIComponent(share.access)}`,
-                      downloadHref: `/api/s/${encodeURIComponent(token)}/file?access=${encodeURIComponent(share.access)}`,
-                    },
-                  ]}
-                  index={0}
-                  onClose={() => setOpen(false)}
-                  onIndex={() => {}}
-                />
-              ) : null}
             </div>
           )}
           <p className="mt-6 text-xs text-muted-foreground">
@@ -115,4 +84,15 @@ export function SharePage() {
       )}
     </main>
   )
+}
+
+/** RHEA-190 step 6: the shared file plays / opens exactly like a clip on the board (RHEA-191 demo). */
+function shareVisual(token: string, share: PublicShare): ClipVisual | null {
+  if (share.item.kind !== 'file') return null
+  const url = (path: string) => `/api/s/${encodeURIComponent(token)}/${path}?access=${encodeURIComponent(share.access)}`
+  const name = share.item.filename?.trim() || (share.item.hasThumbnail ? '未命名图片' : '未命名文件')
+  if (share.item.hasThumbnail) return { id: `share-${token}`, kind: 'image', name, src: url('thumbnail'), full: url('preview'), meta: formatBytes(share.item.size) }
+  const media = mediaKind({ ...share.item, hasThumbnail: share.item.hasThumbnail })
+  if (media !== 'video' && media !== 'audio') return null
+  return { id: `share-${token}`, kind: 'file', name, size: share.item.size, media, src: url('media') }
 }

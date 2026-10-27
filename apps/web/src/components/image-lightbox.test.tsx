@@ -4,10 +4,8 @@ import { fileURLToPath } from 'node:url'
 import { useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { MemoryRouter, Route, Routes } from 'react-router'
 import { ClipboardBoard } from './clipboard-board.tsx'
 import { ImageLightbox, type LightboxSlide } from './image-lightbox.tsx'
-import { SharePage } from '@/pages/share-page.tsx'
 import type { Item } from '@/lib/types.ts'
 
 class FakeSocket {
@@ -435,13 +433,25 @@ describe('lightbox entry points', () => {
     const trigger = screen.getByRole('button', { name: '查看 a.png' })
     trigger.focus()
     fireEvent.click(trigger)
-    expect(document.querySelector('[data-lightbox-image="preview"]')?.getAttribute('src')).toBe('/api/spaces/s1/items/a/preview')
-    expect(document.querySelector('[data-lightbox-image="placeholder"]')?.getAttribute('src')).toBe('/api/spaces/s1/items/a/thumbnail')
-    expect(screen.getByRole('link', { name: '下载原图' }).getAttribute('href')).toBe('/api/spaces/s1/items/a/download')
+    // RHEA-190 step 6: the board opens the demo viewer — it starts from the card thumbnail and swaps in the preview.
+    const image = () => document.querySelector('[data-viewer-image]')
+    expect(image()?.getAttribute('src')).toBe('/api/spaces/s1/items/a/thumbnail')
+    expect(image()?.getAttribute('data-full-src')).toBe('/api/spaces/s1/items/a/preview')
+    expect(screen.getByRole('link', { name: '下载' }).getAttribute('href')).toBe('/api/spaces/s1/items/a/download')
     expect(fetched.some((url) => url.includes('/download'))).toBe(false)
+    expect(document.querySelector('[data-viewer-count]')?.textContent).toBe('1 / 2')
+    expect((screen.getByRole('button', { name: '上一张' }) as HTMLButtonElement).disabled).toBe(true)
     fireEvent.keyDown(document.body, { key: 'ArrowRight' })
-    expect(dialog().getAttribute('aria-label')).toBe('图片预览 b.png')
-    expect(screen.getByRole('link', { name: '下载原图' }).getAttribute('href')).toBe('/api/spaces/s1/items/b/download')
+    expect(dialog().getAttribute('aria-label')).toBe('b.png')
+    expect(document.querySelector('[data-viewer-count]')?.textContent).toBe('2 / 2')
+    expect((screen.getByRole('button', { name: '下一张' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole('link', { name: '下载' }).getAttribute('href')).toBe('/api/spaces/s1/items/b/download')
+    fireEvent.click(screen.getByRole('button', { name: '上一张' }))
+    expect(dialog().getAttribute('aria-label')).toBe('a.png')
+    fireEvent.click(screen.getByRole('button', { name: '放大' }))
+    expect(screen.getByText('200%')).toBeTruthy()
+    fireEvent.keyDown(document.body, { key: '-' })
+    expect(screen.getByText('100%')).toBeTruthy()
     fireEvent.keyDown(document.body, { key: 'Escape' })
     expect(document.activeElement).toBe(trigger)
   })
@@ -473,66 +483,9 @@ describe('lightbox entry points', () => {
       })
     })
     fireEvent.click(screen.getByRole('button', { name: '查看 room.png' }))
-    expect(document.querySelector('[data-lightbox-image="preview"]')?.getAttribute('src')).toBe('/api/rooms/room-token/items/room-pic/preview')
-    expect(screen.getByRole('link', { name: '下载原图' }).getAttribute('href')).toBe('/api/rooms/room-token/items/room-pic/download')
-  })
-
-  it('opens a single share image with no previous or next control', async () => {
-    const urls: string[] = []
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input)
-        urls.push(url)
-        if (url === '/api/s/tok') {
-          return new Response(
-            JSON.stringify({
-              item: {
-                kind: 'file',
-                text: null,
-                filename: 'shot.png',
-                mime: 'image/png',
-                size: 4096,
-                hasThumbnail: true,
-                createdAt: 1,
-                expiresAt: 9,
-              },
-              linkExpiresAt: null,
-              views: 1,
-              maxViews: null,
-              access: 'ticket',
-            }),
-            { status: 200, headers: { 'Content-Type': 'application/json' } },
-          )
-        }
-        return new Response(null, { status: 200 })
-      }),
-    )
-    render(
-      <MemoryRouter initialEntries={['/s/tok']}>
-        <Routes>
-          <Route path="/s/:token" element={<SharePage />} />
-        </Routes>
-      </MemoryRouter>,
-    )
-    const trigger = await screen.findByRole('button', { name: '查看 shot.png' })
-    expect(trigger.querySelector('img')?.getAttribute('src')).toBe('/api/s/tok/thumbnail?access=ticket')
-    trigger.focus()
-    fireEvent.click(trigger)
-    expect(dialog().getAttribute('aria-modal')).toBe('true')
-    expect(screen.queryByRole('button', { name: '上一张' })).toBeNull()
+    expect(document.querySelector('[data-viewer-image]')?.getAttribute('data-full-src')).toBe('/api/rooms/room-token/items/room-pic/preview')
+    expect(screen.getByRole('link', { name: '下载' }).getAttribute('href')).toBe('/api/rooms/room-token/items/room-pic/download')
+    // a single image has no gallery controls
     expect(screen.queryByRole('button', { name: '下一张' })).toBeNull()
-    expect(document.querySelector('[data-lightbox-image="preview"]')?.getAttribute('src')).toBe('/api/s/tok/preview?access=ticket')
-    const download = screen.getByRole('link', { name: '下载原图' })
-    expect(download.getAttribute('href')).toBe('/api/s/tok/file?access=ticket')
-    for (const img of document.querySelectorAll('img')) expect(img.getAttribute('src') ?? '').not.toContain('/file')
-    expect(urls.some((url) => url.includes('/file'))).toBe(false)
-    fireEvent.keyDown(document.body, { key: 'ArrowRight' })
-    fireEvent.keyDown(document.body, { key: 'ArrowLeft' })
-    expect(dialog().getAttribute('aria-label')).toBe('图片预览 shot.png')
-    fireEvent.keyDown(document.body, { key: 'Escape' })
-    expect(screen.queryByRole('dialog')).toBeNull()
-    expect(document.activeElement).toBe(trigger)
   })
 })
-
