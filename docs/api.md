@@ -459,13 +459,16 @@ type Message =
   | {type: 'item.created'; item: Item}
   | {type: 'item.updated'; item: Item}
   | {type: 'item.deleted'; id: string}
-  | {type: 'presence'; devices: number; peers?: Array<{id: string; name: string; kind: string}>};
+  | {type: 'presence'; devices: number; peers?: Array<{id: string; name: string; kind: string}>; others?: number};
 ```
 
 `presence.devices` is the number of open sockets on this space or room. It is
 sent after the snapshot and again when a socket leaves. It carries no
 addresses; `peers` lists the distinct named devices currently connected (only
-present when at least one socket identified itself). On **every** connection, replace the local list with the first `snapshot`, then
+present when at least one socket identified itself). Several tabs of one browser are
+several sockets but one peer. `others` (only when `peers` is present and it is non-zero)
+is the number of sockets that named no device, such as the CLI; the web UI shows them as
+one 其他客户端 row and counts 在线设备 as distinct peers plus that row, never `devices`. On **every** connection, replace the local list with the first `snapshot`, then
 apply created and updated events by upserting `item.id` (pinned clips stay above the others, then `createdAt`)
 and deleted events by removing `id`. `presence` does not change the list.
 This reconciles entries created, edited, deleted or expired while offline. Reconnect using

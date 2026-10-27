@@ -135,26 +135,32 @@ export function PresencePill(props: {
         <DropdownMenuLabel className="px-3 pt-3 pb-1 text-[11px] font-medium text-muted-foreground normal-case">
           {live ? `在线设备 · ${count}` : '离线 · 正在重新连接'}
         </DropdownMenuLabel>
-        <ul className="px-1 pb-1" aria-label="在线设备">
-          {[...online, ...offline].map((dot) => {
-            const on = live && dot.online
-            return (
-              <li key={dot.key} className="flex min-h-9 items-center gap-2 rounded-md px-2 text-sm" data-presence-row={dot.key}>
-                <span
-                  aria-hidden="true"
-                  className="size-2 shrink-0 rounded-full"
-                  style={{ background: on ? (dot.kind ? deviceColor(dot.kind) : 'var(--primary)') : 'transparent', boxShadow: on ? undefined : 'inset 0 0 0 1.5px var(--line-3)' }}
-                />
-                {dot.kind ? <DeviceGlyph kind={dot.kind} className="size-3.5 shrink-0 text-fg-2" /> : null}
-                <span className="min-w-0 flex-1 truncate">
-                  {dot.name}
-                  {dot.self ? <span className="text-muted-foreground">（本设备）</span> : null}
-                </span>
-                <span className={`text-[11px] ${on ? 'text-primary' : 'text-muted-foreground'}`}>{on ? '在线' : '离线'}</span>
-              </li>
-            )
-          })}
-        </ul>
+        {[
+          { key: 'online', title: null, rows: online },
+          { key: 'offline', title: online.length ? '最近使用 · 离线' : null, rows: offline },
+        ].filter((group) => group.rows.length).map((group) => (
+          <ul key={group.key} className="px-1 pb-1" aria-label={group.key === 'online' ? '在线设备' : '离线设备'} data-presence-group={group.key}>
+            {group.title ? <li className="px-2 pt-1 pb-0.5 text-[11px] text-muted-foreground" aria-hidden="true">{group.title}</li> : null}
+            {group.rows.map((dot) => {
+              const on = live && dot.online
+              return (
+                <li key={dot.key} className="flex min-h-9 items-center gap-2 rounded-md px-2 text-sm" data-presence-row={dot.key}>
+                  <span
+                    aria-hidden="true"
+                    className="size-2 shrink-0 rounded-full"
+                    style={{ background: on ? (dot.kind ? deviceColor(dot.kind) : 'var(--primary)') : 'transparent', boxShadow: on ? undefined : 'inset 0 0 0 1.5px var(--line-3)' }}
+                  />
+                  {dot.kind ? <DeviceGlyph kind={dot.kind} className="size-3.5 shrink-0 text-fg-2" /> : null}
+                  <span className="min-w-0 flex-1 truncate">
+                    {dot.name}
+                    {dot.self ? <span className="text-muted-foreground">（本设备）</span> : null}
+                  </span>
+                  <span className={`text-[11px] ${on ? 'text-primary' : 'text-muted-foreground'}`}>{on ? '在线' : '离线'}</span>
+                </li>
+              )
+            })}
+          </ul>
+          ))}
         {manageHref ? (
           <>
             <DropdownMenuSeparator className="my-0" />

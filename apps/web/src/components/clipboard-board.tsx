@@ -8,7 +8,7 @@ import { BoardEmpty, BoardSkeletons, MagnetDropZone, PinBarShell, TimelineSectio
 import { GroupBar, GroupTarget, type GroupFilter } from '@/components/board-groups.tsx'
 import { GroupEmpty, GroupedSections, PinChip, PresencePill, Segmented } from '@/components/board-parts.tsx'
 import { DeviceGlyph } from '@/components/device-glyph.tsx'
-import { presenceDots, useDockedComposer, useScrollCollapse } from '@/lib/board-hooks.ts'
+import { onlineDeviceCount, presenceDots, useDockedComposer, useScrollCollapse } from '@/lib/board-hooks.ts'
 import { CommandPalette } from '@/components/command-palette.tsx'
 import { MediaViewer, type ViewerMedia } from '@/components/clip-media.tsx'
 import { UploadCard, type UploadCardActions } from '@/components/upload-card.tsx'
@@ -962,7 +962,8 @@ export function ClipboardBoard({
   const looseShown = groupFilter === null ? looseAll : looseAll.filter((item) => (item.group ?? '') === groupFilter)
   const showPinBar = pinnedShown.length > 0 || (gesture === 'pin-drag' && visible.some((item) => canShare(item)))
   const live = channel.status === 'live'
-  const dots = presenceDots(channel.devices, channel.peers, visible, selfId)
+  const dots = presenceDots(channel.devices, channel.peers, visible, selfId, channel.others)
+  const onlineCount = onlineDeviceCount(channel.devices, channel.peers, dots)
   const groupCounts = new Map<string, number>()
   for (const item of looseAll) groupCounts.set(item.group ?? '', (groupCounts.get(item.group ?? '') ?? 0) + 1)
 
@@ -1060,7 +1061,7 @@ export function ClipboardBoard({
 
   const presence = (
     <PresencePill
-      count={channel.devices}
+      count={onlineCount}
       dots={dots}
       live={live}
       reduced={reduced}

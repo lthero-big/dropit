@@ -1354,7 +1354,15 @@ test('RHEA-190 step 5: items remember the sending device and presence names peer
   assert.deepEqual(await mac.next(), { type: 'presence', devices: 1, peers: [{ id: 'dev-mac-123', name: 'Mac · Chrome', kind: 'mac' }] });
   const legacy = await connect(wsUrl, admin.cookie); t.after(() => legacy.ws.terminate());
   assert.equal((await legacy.next()).type, 'snapshot');
-  assert.deepEqual(await legacy.next(), { type: 'presence', devices: 2, peers: [{ id: 'dev-mac-123', name: 'Mac · Chrome', kind: 'mac' }] });
+  assert.deepEqual(await legacy.next(), { type: 'presence', devices: 2, peers: [{ id: 'dev-mac-123', name: 'Mac · Chrome', kind: 'mac' }], others: 1 });
+  // A second tab of the same browser is another socket but the same device, not an `other` (RHEA-190 m12).
+  const macTab = await connect(`${wsUrl}?${new URLSearchParams({ device: 'dev-mac-123', name: 'Mac · Chrome', kind: 'mac' })}`, admin.cookie);
+  assert.equal((await macTab.next()).type, 'snapshot');
+  assert.deepEqual(await macTab.next(), { type: 'presence', devices: 3, peers: [{ id: 'dev-mac-123', name: 'Mac · Chrome', kind: 'mac' }], others: 1 });
+  macTab.ws.close();
+  await once(macTab.ws, 'close');
+  let settled = await legacy.next();
+  while (settled.devices !== 2) settled = await legacy.next();
   const phone = await connect(`${wsUrl}?${new URLSearchParams({ device: 'phone-0001', name: 'iPhone', kind: 'phone' })}`, admin.cookie);
   t.after(() => phone.ws.terminate());
   assert.equal((await phone.next()).type, 'snapshot');
