@@ -1,7 +1,7 @@
 import './demo.css'
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
-import { AnimatePresence, LayoutGroup, MotionConfig, motion, useMotionValue, useReducedMotion, useSpring, type PanInfo } from 'motion/react'
+import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion, type PanInfo } from 'motion/react'
 import {
   ArrowUpIcon,
   CalendarDaysIcon,
@@ -13,19 +13,18 @@ import {
   LayoutGridIcon,
   MoonIcon,
   PaperclipIcon,
-  PinIcon,
   PinOffIcon,
   RotateCcwIcon,
   SparklesIcon,
   SunIcon,
   TabletSmartphoneIcon,
   TurtleIcon,
-  UploadIcon,
 } from 'lucide-react'
 import { ClipCard, type GestureMode } from './clip-card.tsx'
-import { TrashBin } from './trash-bin.tsx'
-import { useIsolatePointer } from './media.tsx'
-import { trashAnchorFor, type TrashAnchor, type TrashHandle } from './trash-anchor.ts'
+import { TrashBin } from '@/components/trash-bin.tsx'
+import { BoardEmpty, BoardSkeletons, MagnetDropZone, PinBarShell, DeviceDot as SharedDeviceDot, TimelineSection } from '@/components/board-chrome.tsx'
+import { useIsolatePointer } from '@/components/clip-media.tsx'
+import { trashAnchorFor, type TrashAnchor, type TrashHandle } from '@/lib/trash-anchor.ts'
 import { clipCopyText, dayLabel, deviceById, devices, droppedFile, nextIncoming, pastedShot, seedClips, seedGroups, textClip, type Clip } from './data.ts'
 import { GroupBar, GroupDot, GroupTarget, type GroupFilter } from './groups.tsx'
 import { DeviceGlyph } from './icons.tsx'
@@ -526,44 +525,14 @@ function TopBar(props: {
 function DeviceDot({ id, ripple, dotRef, compact }: { id: string; ripple: number; dotRef: (id: string, el: HTMLElement | null) => void; compact?: boolean }) {
   const d = deviceById(id)
   return (
-    <span className="group relative grid size-6 place-items-center" title={`${d.name}${d.online ? ' · 在线' : ' · 离线'}`}>
-      <span
-        ref={compact ? undefined : (el) => dotRef(id, el)}
-        className="relative block size-2.5 rounded-full"
-        style={{ background: d.online ? deviceColor(d.kind) : 'transparent', boxShadow: d.online ? undefined : `inset 0 0 0 1.5px var(--line-3)` }}
-      >
-        <AnimatePresence>
-          {ripple > 0 ? (
-            <motion.span
-              key={ripple}
-              aria-hidden
-              className="absolute inset-0 rounded-full"
-              style={{ boxShadow: `0 0 0 1.5px ${deviceColor(d.kind)}` }}
-              initial={{ scale: 1, opacity: 0.9 }}
-              animate={{ scale: 4.2, opacity: 0 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.9, ease: easeOut }}
-            />
-          ) : null}
-        </AnimatePresence>
-        {ripple > 0 ? (
-          <motion.span
-            key={`b${ripple}`}
-            aria-hidden
-            className="absolute inset-0 rounded-full"
-            style={{ boxShadow: `0 0 0 1px ${deviceColor(d.kind)}` }}
-            initial={{ scale: 1, opacity: 0.6 }}
-            animate={{ scale: 2.6, opacity: 0 }}
-            transition={{ duration: 0.9, ease: easeOut, delay: 0.18 }}
-          />
-        ) : null}
-      </span>
-      {!compact ? (
-        <span className="pointer-events-none absolute left-1/2 top-full z-10 mt-1 hidden -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-[var(--radius-sm)] bg-[var(--fg)] px-1.5 py-0.5 text-[10px] text-[var(--bg)] group-hover:flex">
-          <DeviceGlyph kind={d.kind} className="size-3" /> {d.name}
-        </span>
-      ) : null}
-    </span>
+    <SharedDeviceDot
+      color={deviceColor(d.kind)}
+      online={d.online}
+      title={`${d.name}${d.online ? ' · 在线' : ' · 离线'}`}
+      ripple={ripple}
+      dotRef={compact ? undefined : (el) => dotRef(id, el)}
+      label={compact ? undefined : <><DeviceGlyph kind={d.kind} className="size-3" /> {d.name}</>}
+    />
   )
 }
 
@@ -633,10 +602,6 @@ function Composer(props: { reduced: boolean; docked: boolean; onAdd: (c: Clip) =
   const depth = useRef(0)
   const zoneRef = useRef<HTMLDivElement | null>(null)
   const fileRef = useRef<HTMLInputElement | null>(null)
-  const mx = useMotionValue(0)
-  const my = useMotionValue(0)
-  const sx = useSpring(mx, { stiffness: 300, damping: 22 })
-  const sy = useSpring(my, { stiffness: 300, damping: 22 })
 
   const ingest = useCallback(
     (files: File[]) => {
@@ -675,22 +640,12 @@ function Composer(props: { reduced: boolean; docked: boolean; onAdd: (c: Clip) =
     const onOver = (e: DragEvent) => {
       if (!hasFiles(e)) return
       e.preventDefault()
-      const r = zoneRef.current?.getBoundingClientRect()
-      if (r) {
-        // Magnetic pull: the target leans toward the cursor, capped.
-        const cx = r.left + r.width / 2
-        const cy = r.top + r.height / 2
-        mx.set(Math.max(-60, Math.min(60, (e.clientX - cx) * 0.18)))
-        my.set(Math.max(-24, Math.min(24, (e.clientY - cy) * 0.18)))
-      }
     }
     const onDrop = (e: DragEvent) => {
       if (!hasFiles(e)) return
       e.preventDefault()
       depth.current = 0
       setDragging(false)
-      mx.set(0)
-      my.set(0)
       ingest(Array.from(e.dataTransfer?.files ?? []))
     }
     const onPaste = (e: ClipboardEvent) => {
@@ -717,7 +672,7 @@ function Composer(props: { reduced: boolean; docked: boolean; onAdd: (c: Clip) =
       window.removeEventListener('drop', onDrop)
       window.removeEventListener('paste', onPaste)
     }
-  }, [ingest, mx, my, onAdd])
+  }, [ingest, onAdd])
 
   const send = () => {
     if (!text.trim()) return
@@ -757,17 +712,7 @@ function Composer(props: { reduced: boolean; docked: boolean; onAdd: (c: Clip) =
             exit={{ opacity: 0, height: 64, transition: { duration: dur.fast, ease: easeIn } }}
             className="dd-grid-bg grid place-items-center"
           >
-            <motion.div style={{ x: sx, y: sy }} className="flex flex-col items-center gap-2 text-[var(--accent)]">
-              <motion.span
-                className="grid size-14 place-items-center rounded-full border border-dashed border-[var(--accent)] bg-[var(--accent-soft)]"
-                animate={reduced ? undefined : { scale: [1, 1.06, 1] }}
-                transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
-              >
-                <UploadIcon className="size-5" />
-              </motion.span>
-              <span className="text-[13px] font-medium">松手，吸进来</span>
-              <span className="text-[11px] text-[var(--fg-3)]">图片会落进列表，其他文件按类型归档</span>
-            </motion.div>
+            <MagnetDropZone zoneRef={zoneRef} reduced={reduced} />
           </motion.div>
         ) : collapsed ? (
           <motion.button
@@ -864,44 +809,13 @@ type PinBarProps = {
 function PinBar(props: PinBarProps) {
   const { barRef, pinned, hover, reduced, onUnpin, onCopy, openId, onOpen, copiedId } = props
   return (
-    <motion.section
-      ref={barRef}
-      layout={!reduced}
-      aria-label="置顶栏"
-      data-hover={hover || undefined}
-      className="dd-scroll-x relative flex min-h-[52px] items-center gap-2 overflow-x-auto rounded-[var(--radius-lg)] border border-dashed px-2.5 py-2"
-      animate={
-        hover
-          ? { borderColor: 'var(--accent)', backgroundColor: 'var(--accent-soft)', scale: reduced ? 1 : 1.015 }
-          : { borderColor: 'var(--line-2)', backgroundColor: 'var(--surface-0)', scale: 1 }
-      }
-      transition={{ ...springBounce, borderColor: { duration: dur.fast }, backgroundColor: { duration: dur.fast } }}
-    >
-      <span className="flex shrink-0 items-center gap-1.5 pr-1 text-[11px] text-[var(--fg-3)]">
-        <motion.span animate={hover && !reduced ? { rotate: [0, -18, 12, 0] } : { rotate: 0 }} transition={{ duration: dur.slow }}>
-          <PinIcon className={`size-3.5 ${hover ? 'text-[var(--accent)]' : ''}`} />
-        </motion.span>
-        置顶
-      </span>
+    <PinBarShell barRef={barRef} hover={hover} reduced={reduced} empty={pinned.length === 0}>
       <AnimatePresence initial={false} mode="popLayout">
         {pinned.map((c) => (
           <PinChip key={c.id} clip={c} reduced={reduced} onUnpin={onUnpin} onCopy={onCopy} open={openId === c.id} onOpen={onOpen} copied={copiedId === c.id} />
         ))}
       </AnimatePresence>
-      {pinned.length === 0 ? <span className="text-[12px] text-[var(--fg-4)]">把卡片拖到这里置顶</span> : null}
-      <AnimatePresence>
-        {hover ? (
-          <motion.span
-            initial={{ opacity: 0, x: 6 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, transition: { duration: dur.fast } }}
-            className="ml-auto shrink-0 pr-1 text-[12px] font-medium text-[var(--accent)]"
-          >
-            松手吸附
-          </motion.span>
-        ) : null}
-      </AnimatePresence>
-    </motion.section>
+    </PinBarShell>
   )
 }
 
@@ -1124,31 +1038,16 @@ function Board(props: BoardProps) {
         {[...groups.entries()].map(([key, list]) => {
           const d = view === 'device' ? deviceById(key) : null
           return (
-            <motion.section
+            <TimelineSection
               key={`${view}-${key}`}
-              layout={!props.reduced}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0, transition: { duration: dur.fast, ease: easeIn } }}
-              className="grid grid-cols-[18px_1fr] gap-x-3"
+              reduced={props.reduced}
+              dotColor={d ? deviceColor(d.kind) : undefined}
+              title={<>{d ? <DeviceGlyph kind={d.kind} className="size-3.5 text-[var(--fg-3)]" /> : null}{d ? d.name : key}</>}
+              count={list.length}
+              extra={d && !d.online ? <span className="text-[11px] font-normal text-[var(--fg-4)]">离线</span> : null}
             >
-              <div className="relative flex justify-center">
-                <span
-                  className="relative z-10 mt-[3px] size-2.5 rounded-full ring-4 ring-[var(--bg)]"
-                  style={{ background: d ? deviceColor(d.kind) : 'var(--fg-3)' }}
-                />
-                <span className="absolute bottom-0 top-3 w-px bg-[var(--line-2)]" />
-              </div>
-              <div className="flex flex-col gap-2 pb-1">
-                <h3 className="dd-display m-0 flex items-center gap-2 text-[13px] font-semibold text-[var(--fg)]">
-                  {d ? <DeviceGlyph kind={d.kind} className="size-3.5 text-[var(--fg-3)]" /> : null}
-                  {d ? d.name : key}
-                  <span className="dd-mono text-[11px] font-normal text-[var(--fg-3)]">{list.length}</span>
-                  {d && !d.online ? <span className="text-[11px] font-normal text-[var(--fg-4)]">离线</span> : null}
-                </h3>
-                <AnimatePresence mode="popLayout">{list.map((c) => card(c, 'row'))}</AnimatePresence>
-              </div>
-            </motion.section>
+              <AnimatePresence mode="popLayout">{list.map((c) => card(c, 'row'))}</AnimatePresence>
+            </TimelineSection>
           )
         })}
       </AnimatePresence>
@@ -1237,82 +1136,15 @@ function GroupEmpty({ group, onAll }: { group: string; onAll: () => void }) {
 /* ---------------------------------------------------------------- states */
 
 function Skeletons({ view }: { view: View }) {
-  const n = view === 'grid' ? 6 : 5
-  return (
-    <div aria-busy="true" aria-label="加载中" className={view === 'grid' ? 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3' : 'flex flex-col gap-2 pl-[30px]'}>
-      {Array.from({ length: n }, (_, i) => (
-        <motion.div
-          key={i}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: dur.base, delay: i * 0.04 }}
-          className="dd-card overflow-hidden"
-        >
-          {view === 'grid' ? (
-            <div className="flex flex-col gap-3 p-3">
-              <div className="dd-skel h-2.5 w-12" />
-              <div className="flex gap-2.5">
-                <div className="dd-skel size-7 shrink-0" />
-                <div className="flex flex-1 flex-col gap-2">
-                  <div className="dd-skel h-3 w-[85%]" />
-                  <div className="dd-skel h-3 w-[55%]" />
-                </div>
-              </div>
-              <div className="dd-skel h-12 w-full" style={{ opacity: i % 2 ? 1 : 0 }} />
-            </div>
-          ) : (
-            <div className="flex items-center gap-3 px-3 py-3">
-              <div className="dd-skel size-6 shrink-0" />
-              <div className="dd-skel h-3 flex-1" style={{ maxWidth: `${60 + ((i * 13) % 30)}%` }} />
-            </div>
-          )}
-          <div className="flex gap-2 border-t border-[var(--line-1)] px-3 py-2.5">
-            <div className="dd-skel h-2.5 w-20" />
-            <div className="dd-skel ml-auto h-2.5 w-10" />
-          </div>
-        </motion.div>
-      ))}
-    </div>
-  )
+  return <BoardSkeletons view={view === 'grid' ? 'grid' : 'rows'} />
 }
 
 function EmptyState({ onReset, onArrive }: { onReset: () => void; onArrive: () => void }) {
-  const reduced = useReducedMotion()
-  const sheet = (i: number) => ({
-    initial: { opacity: 0, y: 16, rotate: 0 },
-    animate: { opacity: 1, y: reduced ? 0 : [0, -4, 0], rotate: [-8, 3, 10][i] },
-    transition: { opacity: { duration: dur.slow, delay: i * 0.06 }, rotate: { ...springBounce, delay: i * 0.06 }, y: { duration: 3.2, repeat: Infinity, ease: 'easeInOut' as const, delay: i * 0.4 } },
-  })
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: dur.slow, ease: easeOut }}
-      className="flex flex-col items-center gap-5 rounded-[var(--radius-lg)] border border-dashed border-[var(--line-2)] px-6 py-16 text-center"
-    >
-      <div className="relative h-24 w-28" aria-hidden>
-        {[0, 1, 2].map((i) => (
-          <motion.div
-            key={i}
-            {...sheet(i)}
-            className="absolute left-5 top-2 h-20 w-16 rounded-[var(--radius-md)] border border-[var(--line-2)] bg-[var(--surface-1)] shadow-[var(--shadow-2)]"
-            style={{ zIndex: i }}
-          >
-            <div className="m-2 h-1.5 w-8 rounded-full bg-[var(--surface-2)]" />
-            <div className="mx-2 h-1.5 w-10 rounded-full bg-[var(--surface-2)]" />
-            {i === 2 ? <span className="absolute bottom-2 right-2 size-2 rounded-full bg-[var(--accent)]" /> : null}
-          </motion.div>
-        ))}
-      </div>
-      <div className="flex max-w-sm flex-col gap-1.5">
-        <p className="dd-display m-0 text-[17px] font-semibold text-[var(--fg)]">这里还空着</p>
-        <p className="m-0 text-[13px] leading-relaxed text-[var(--fg-3)]">在任何一台设备上复制，内容会飞到这里；也可以把文件拖进上面的投放区。到期的内容会自己褪色消失。</p>
-      </div>
-      <div className="flex gap-2">
-        <button type="button" className="dd-chip" onClick={onArrive}><SparklesIcon className="size-3.5" /> 来一条</button>
-        <button type="button" className="dd-chip" onClick={onReset}><RotateCcwIcon className="size-3.5" /> 放回示例</button>
-      </div>
-    </motion.div>
+    <BoardEmpty title="这里还空着" body="在任何一台设备上复制，内容会飞到这里；也可以把文件拖进上面的投放区。到期的内容会自己褪色消失。">
+      <button type="button" className="dd-chip" onClick={onArrive}><SparklesIcon className="size-3.5" /> 来一条</button>
+      <button type="button" className="dd-chip" onClick={onReset}><RotateCcwIcon className="size-3.5" /> 放回示例</button>
+    </BoardEmpty>
   )
 }
 

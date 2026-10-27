@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, animate, motion, useMotionValue, useTransform, type AnimationPlaybackControls, type MotionValue } from 'motion/react'
 import { MaximizeIcon, MinusIcon, PauseIcon, PlayIcon, PlusIcon, XIcon } from 'lucide-react'
-import { dur, easeIn, easeOut, springBounce, springSettle } from '../lib/motion.ts'
+import { dur, easeIn, easeOut, springBounce, springSettle } from '@/lib/motion.ts'
 
 /**
  * Cards are draggable (swipe / pin-drag) and tap-to-copy. Controls that live
@@ -40,8 +40,23 @@ const HOLD_MS = 900
  * Destructive action that only fires after a sustained press (mouse, touch or
  * Enter/Space). Releasing early springs the ring back; nothing happens.
  */
-export function HoldToConfirm(props: { label: string; onConfirm: () => void; children: ReactNode; className?: string }) {
-  const { label, onConfirm, children, className } = props
+export function HoldToConfirm(props: {
+  label: string
+  onConfirm: () => void
+  children: ReactNode
+  className?: string
+  /**
+   * Board mode (RHEA-190 step 4): a short click calls onTap (the board's
+   * two-step 撤回 → 确认撤回), a sustained press still confirms straight away.
+   * The accessible name is then exactly `name`, and keyboard uses the click path.
+   */
+  onTap?: () => void
+  name?: string
+  style?: CSSProperties
+  confirm?: boolean
+}) {
+  const { label, onConfirm, children, className, onTap, name, style, confirm } = props
+  const fired = useRef(false)
   const ref = useIsolatePointer<HTMLButtonElement>()
   const progress = useMotionValue(0)
   const dash = useTransform(progress, [0, 1], [CIRC, 0])
@@ -59,7 +74,7 @@ export function HoldToConfirm(props: { label: string; onConfirm: () => void; chi
     const el = ref.current
     if (el) {
       const r = el.getBoundingClientRect()
-      const host = (el.closest('.dd') as HTMLElement | null) ?? document.body
+      const host = (el.closest('.dd, .dd-board') as HTMLElement | null) ?? document.body
       setAnchor({ host, x: r.left + r.width / 2, y: r.top })
     }
     setHolding(true)
@@ -71,6 +86,7 @@ export function HoldToConfirm(props: { label: string; onConfirm: () => void; chi
         setHolding(false)
         setDone(true)
         navigator.vibrate?.(12)
+        fired.current = true
         onConfirm()
       },
     })
@@ -91,13 +107,15 @@ export function HoldToConfirm(props: { label: string; onConfirm: () => void; chi
       ref={ref}
       type="button"
       data-action
-      aria-label={`${label}（按住确认）`}
-      title={`按住 ${label}`}
+      aria-label={name ?? `${label}（按住确认）`}
+      title={name ?? `按住 ${label}`}
       data-holding={holding || undefined}
+      data-retract={confirm ? 'confirm' : undefined}
       className={`dd-hold relative grid place-items-center ${className ?? ''}`}
-      style={{ touchAction: 'none', WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
+      style={{ touchAction: 'none', WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none', ...style }}
       onPointerDownCapture={(e) => {
         if (e.button !== 0) return
+        fired.current = false
         e.currentTarget.setPointerCapture?.(e.pointerId)
         start()
       }}
@@ -105,19 +123,31 @@ export function HoldToConfirm(props: { label: string; onConfirm: () => void; chi
       onPointerCancel={cancel}
       onLostPointerCapture={cancel}
       onKeyDown={(e) => {
+        if (onTap) return
         if ((e.key === 'Enter' || e.key === ' ') && !e.repeat) {
           e.preventDefault()
           start()
         }
       }}
       onKeyUp={(e) => {
+        if (onTap) return
         if (e.key === 'Enter' || e.key === ' ') cancel()
       }}
-      onClick={(e) => e.preventDefault()}
+      onClick={(e) => {
+        e.preventDefault()
+        if (!onTap) return
+        // A completed hold already confirmed; the trailing click is not a tap.
+        if (fired.current) {
+          fired.current = false
+          return
+        }
+        cancel()
+        onTap()
+      }}
       onContextMenu={(e) => e.preventDefault()}
     >
       <svg aria-hidden viewBox="0 0 28 28" className="pointer-events-none absolute inset-0 size-full -rotate-90">
-        <motion.circle cx="14" cy="14" r={R} fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeDasharray={CIRC} style={{ strokeDashoffset: dash }} />
+        <motion.circle cx="14" cy="14" r={R} fill="none" stroke="var(--brand)" strokeWidth="2" strokeLinecap="round" strokeDasharray={CIRC} style={{ strokeDashoffset: dash }} />
       </svg>
       <motion.span animate={holding ? { scale: 0.86 } : { scale: 1 }} transition={springBounce} className="relative grid place-items-center">
         {children}
@@ -154,11 +184,11 @@ function HoldBubble(props: { label: string; x: number; y: number; fill: MotionVa
       animate={{ opacity: 1, y: 0, scale: 1, transition: { duration: dur.fast, ease: easeOut } }}
       exit={{ opacity: 0, y: 4, transition: { duration: dur.fast, ease: easeIn } }}
       style={{ position: 'fixed', left, top: bottom, width: W, translateY: '-100%', zIndex: 60 }}
-      className="pointer-events-none rounded-[var(--radius-md)] bg-[var(--fg)] px-3 py-2 text-[var(--bg)] shadow-[var(--shadow-2)]"
+      className="pointer-events-none rounded-[var(--radius-md)] bg-[var(--fg)] px-3 py-2 text-[var(--bg)] shadow-[var(--elev-2)]"
     >
       <div className="text-[12px] font-medium leading-none">继续按住{label}</div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[color-mix(in_oklab,var(--bg)_25%,transparent)]">
-        <motion.div className="h-full rounded-full bg-[var(--accent)]" style={{ width: fill }} />
+        <motion.div className="h-full rounded-full bg-[var(--brand)]" style={{ width: fill }} />
       </div>
     </motion.div>
   )
@@ -361,7 +391,7 @@ export type ViewerMedia = { type: 'image' | 'video'; src: string; poster?: strin
 export function MediaViewer({ media, anchor, reduced, onClose }: { media: ViewerMedia | null; anchor: RefObject<HTMLElement | null>; reduced: boolean; onClose: () => void }) {
   const [host, setHost] = useState<HTMLElement | null>(null)
   useLayoutEffect(() => {
-    setHost((anchor.current?.closest('.dd') as HTMLElement | null) ?? document.body)
+    setHost((anchor.current?.closest('.dd, .dd-board') as HTMLElement | null) ?? document.body)
   }, [anchor])
   if (!host) return null
   return createPortal(

@@ -1,7 +1,7 @@
 import { useEffect, useImperativeHandle, useState, type Ref } from 'react'
 import { AnimatePresence, animate, motion, useMotionValue, useSpring } from 'motion/react'
-import { dur, easeIn, easeOut, springBounce } from '../lib/motion.ts'
-import { TRASH_HIT as HIT, TRASH_MAGNET as MAGNET, TRASH_SIZE as SIZE, type TrashAnchor, type TrashHandle } from './trash-anchor.ts'
+import { dur, easeIn, easeOut, springBounce } from '@/lib/motion.ts'
+import { TRASH_HIT as HIT, TRASH_MAGNET as MAGNET, TRASH_SIZE as SIZE, type TrashAnchor, type TrashHandle } from '@/lib/trash-anchor.ts'
 
 /**
  * PC-only second delete path: while a card is being dragged (the same drag
@@ -92,13 +92,13 @@ export function TrashBin({ anchor, gulp, reduced, handle }: Props) {
                   : { opacity: 0, scale: 1 }
               }
               transition={armed ? { duration: 1.1, repeat: Infinity, ease: 'easeInOut' } : { duration: dur.fast }}
-              style={{ background: 'radial-gradient(circle, color-mix(in oklab, var(--accent) 45%, transparent) 0%, transparent 70%)' }}
+              style={{ background: 'radial-gradient(circle, color-mix(in oklab, var(--brand) 45%, transparent) 0%, transparent 70%)' }}
             />
             <motion.span
-              className="relative grid size-full place-items-center rounded-full border shadow-[var(--shadow-3)]"
+              className="relative grid size-full place-items-center rounded-full border shadow-[var(--elev-3)]"
               animate={
                 armed || gulp
-                  ? { backgroundColor: 'var(--accent)', borderColor: 'var(--accent)', color: '#fff' }
+                  ? { backgroundColor: 'var(--brand)', borderColor: 'var(--brand)', color: '#fff' }
                   : { backgroundColor: 'var(--surface-1)', borderColor: 'var(--line-2)', color: 'var(--fg-2)' }
               }
               transition={{ duration: dur.fast }}
@@ -118,8 +118,8 @@ export function TrashBin({ anchor, gulp, reduced, handle }: Props) {
               </svg>
             </motion.span>
             <motion.span
-              className="dd-mono absolute left-1/2 top-full mt-2 -translate-x-1/2 whitespace-nowrap rounded-[var(--radius-sm)] border border-[var(--line-1)] bg-[var(--surface-1)] px-1.5 py-0.5 text-[11px] font-medium shadow-[var(--shadow-1)]"
-              animate={{ color: armed || gulp ? 'var(--accent)' : 'var(--fg-3)' }}
+              className="dd-mono absolute left-1/2 top-full mt-2 -translate-x-1/2 whitespace-nowrap rounded-[var(--radius-sm)] border border-[var(--line-1)] bg-[var(--surface-1)] px-1.5 py-0.5 text-[11px] font-medium shadow-[var(--elev-1)]"
+              animate={{ color: armed || gulp ? 'var(--brand)' : 'var(--fg-3)' }}
               transition={{ duration: dur.fast }}
             >
               {gulp ? '已删除' : armed ? '松手删除' : '拖到这里删除'}

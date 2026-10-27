@@ -230,11 +230,11 @@ export function MarkdownText({ text, collapsed = false }: { text: string; collap
   return (
     <div className="max-w-full">
       {markdown ? (
-        <div className="mb-2 flex gap-1" role="group" aria-label="文本视图">
+        <div className="mb-2 inline-flex gap-0.5 rounded-md border border-border/70 bg-muted/40 p-0.5" role="group" aria-label="文本视图">
           <button
             type="button"
             aria-pressed={!rendered}
-            className={`border px-2 py-0.5 text-xs font-extrabold ${rendered ? 'border-foreground' : 'border-primary bg-primary text-primary-foreground'}`}
+            className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${rendered ? 'text-muted-foreground hover:text-foreground' : 'bg-background text-foreground shadow-sm'}`}
             onClick={() => setRendered(false)}
           >
             源码
@@ -242,7 +242,7 @@ export function MarkdownText({ text, collapsed = false }: { text: string; collap
           <button
             type="button"
             aria-pressed={rendered}
-            className={`border px-2 py-0.5 text-xs font-extrabold ${rendered ? 'border-primary bg-primary text-primary-foreground' : 'border-foreground'}`}
+            className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${rendered ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
             onClick={() => setRendered(true)}
           >
             渲染
