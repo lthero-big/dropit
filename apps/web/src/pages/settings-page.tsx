@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 import { DeviceConfirm } from '@/components/device-confirm.tsx'
 import { DeviceSessions } from '@/components/device-sessions.tsx'
 import { PageTitle, Shell } from '@/components/shell.tsx'
+import { UpdateNotice } from '@/components/update-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText } from '@/lib/api.ts'
 import { copyText, formatWhen, useClock } from '@/lib/format.ts'
@@ -185,6 +186,7 @@ export function SettingsPage() {
   return (
     <Shell>
       <PageTitle title="设置" sub="管理登录设备，确认设备码，或手动创建个人访问令牌。明文只显示一次。" />
+      {me.user.role === 'admin' ? <UpdateNotice /> : null}
       <section id="devices" className="mb-8 scroll-mt-20">
         <h2 className="mb-3 text-xs font-medium">登录设备</h2>
         <DeviceSessions onSelfSignedOut={() => void refresh().then(() => window.location.assign('/login'))} />

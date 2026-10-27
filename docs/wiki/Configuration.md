@@ -14,6 +14,18 @@
 | `STATIC_DIR` | `apps/web/dist`；镜像 `/app/public` | 前端构建产物 |
 | `TRUST_PROXY` | 空 | 受信任反代 IP/CIDR，逗号分隔，可用 `loopback` |
 
+## 更新检查
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `UPDATE_CHECK` | `true` | `false` / `0` / `off` 关闭；关闭后不访问外网 |
+| `UPDATE_CHECK_HOURS` | `12` | 检查间隔，6–168 小时 |
+| `UPDATE_IMAGE` | `lthero1/dropit` | Docker 部署时检查的 Docker Hub 镜像 |
+| `UPDATE_REPO` | `lthero-big/dropit` | 源码部署比较提交、读取 Releases 的 GitHub 仓库 |
+| `UPDATE_BRANCH` | `main` | 源码部署比较的上游分支 |
+| `DROPIT_VERSION` / `DROPIT_COMMIT` / `DROPIT_BUILD_DATE` | 构建时写入 | 覆盖 `/api/version` 的版本信息，一般由 Docker build-arg 或 `pnpm build` 自动设置 |
+| `DROPIT_INSTALL` | 镜像 `docker`；compose 构建 `docker-build`；其他 `source` | 决定后台显示哪条升级命令 |
+
 ## 登录
 
 | 变量 | 默认值 | 说明 |
