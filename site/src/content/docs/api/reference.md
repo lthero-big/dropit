@@ -253,28 +253,34 @@ Rate counts remain per-process and reset on process restart.
 user's automatically created private space and spaces joined by invitation.
 
 `POST /rooms` (no account required; body optional `{deviceKey?, code?, pin?}`) → 201,
-`{token, expiresAt, url, reused, code, hasPin}`. The token is **6 random characters**
-(`A–Z a–z 0–9`, case-sensitive) and `url` is `/r/<token>`; it acts as the room's read/write
-capability. Older 43-character tokens and `/rooms/<token>` links keep working. Share the URL only with
-participants. There is no room list, search or enumeration endpoint. Unknown and expired capabilities
-both return 404. Because 6 characters are short, wrong guesses are rate limited per IP (see below).
+`{token, expiresAt, url, reused, code, hasPin}`. **A room has exactly one code, and its link is `/r/<code>`**
+(the code *is* the link; changing the code changes the link). The code is either random — **6 characters**
+from an alphabet without look-alikes (no `0 O 1 l I`), case-sensitive — or a custom `code`
+(`A–Z a–z 0–9 _ -`, 3–32 characters, case-sensitive). An optional `pin` (4–32 characters, stored as a scrypt
+hash) works with random and custom codes alike. A taken code returns `409 CODE_TAKEN`; invalid values return
+`400 INVALID_CODE` / `INVALID_PIN`. There is no room list, search or enumeration endpoint.
 Authenticated users accessing a room still use the **room** quota, not user quota.
 
-**Room codes.** Every new room also gets a short room code, case-sensitive: a random 5-character code
-(no look-alike characters such as `0 O 1 l I`), or a custom code (`A–Z a–z 0–9 _ -`, 3–32 characters) given in
-`code`. A custom code may carry a `pin` (4–32 characters, stored as a scrypt hash; needs `code`). A taken custom
-code returns `409 CODE_TAKEN`; invalid values return `400 INVALID_CODE` / `INVALID_PIN` / `PIN_NEEDS_CODE`.
+The code is **not** an API credential. `token` is an *access token* (`<id>.<proof>`): keep it, it is what the
+room routes below accept. Anyone else turns the code into their own access token through `POST /rooms/enter`,
+which checks the PIN (if set) and is rate limited — so opening `/r/<code>` and typing the code both require the
+PIN. The room owner and anyone who entered before keep their access token, and are therefore **not asked for the
+PIN again** when the owner sets or changes the PIN or the code.
 
 | Method | Path | Body / response |
 | --- | --- | --- |
-| POST | `/rooms/enter` | `{code, pin?}` → `{token, expiresAt, code, hasPin}`. `token` is an *entry token* (`<id>.<proof>`) accepted anywhere a room token is. `404 NOT_FOUND` for unknown/expired codes, `401 PIN_REQUIRED`, `403 PIN_INVALID`, `429` with `Retry-After` after too many misses |
-| PUT | `/rooms/:room/code` | Room owner only (device key), `{deviceKey, code?, pin?}` → `{code, hasPin}`. Omit `code` for a new random one; `pin: null` removes the PIN. `403` for non-owners, `409 CODE_TAKEN` |
+| POST | `/rooms/enter` | `{code, pin?}` → `{token, expiresAt, code, hasPin, url}`. `404 NOT_FOUND` for unknown/expired codes, `401 PIN_REQUIRED`, `403 PIN_INVALID`, `429 RATE_LIMITED` with `Retry-After` after too many misses |
+| GET | `/rooms/:room` | `{id, name, expiresAt, code, hasPin, url}` for an access token |
+| PUT | `/rooms/:room/code` | Room owner only (device key), `{deviceKey, code?, pin?}` (at least one) → `{code, hasPin, url}`. `code: "<custom>"` sets a custom code, `code: null` or `""` draws a new random code; `pin: "<pin>"` sets/replaces the PIN, `pin: null` or `""` removes it; an omitted field stays as it is. `403` for non-owners, `409 CODE_TAKEN` |
 
-Wrong codes and PINs are counted per client IP and per code with the `RATE_AUTH` budget; the room link itself
-does not need the PIN. Entry tokens stay valid when the code or PIN changes. Share-link tokens are also
-6 characters now (older long links stay valid).
+Wrong codes and PINs are counted per client IP and per code with the `RATE_AUTH` budget.
+**Old links:** rooms created before this version received a code when the database was migrated (schema 16:
+every live room without a code gets a random 6-character code; rooms that already had a code keep it and its
+PIN). Their 43-character `/rooms/<token>` links (and the token itself) keep working and the web app redirects
+them to `/r/<code>`. Share links `/s/<token>` are unchanged (6 characters, older long links stay valid).
 
-Set `base` to `/spaces/:spaceId` or `/rooms/:roomToken` (6-character tokens and entry tokens work too) in the following table.
+Set `base` to `/spaces/:spaceId` or `/rooms/:room` in the following table, where `:room` is an access token
+from `POST /rooms` / `POST /rooms/enter` (or an old 43-character room token). A room code is not accepted there.
 Space routes require membership; room routes require the unexpired capability.
 
 | Method | Path | Body / response |

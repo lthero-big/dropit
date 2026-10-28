@@ -4,7 +4,7 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button.tsx'
 import { EnterRoomForm } from '@/components/enter-room.tsx'
 import { api, errorText, loginErrorText } from '@/lib/api.ts'
-import { openTempRoom } from '@/lib/temp-room.ts'
+import { openTempRoom, roomPath } from '@/lib/temp-room.ts'
 import { takeReturn } from '@/lib/machine.ts'
 import { useSession } from '@/lib/session.tsx'
 import { Logo } from '@/components/logo.tsx'
@@ -72,7 +72,7 @@ export function LoginPage({ invite }: { invite?: string }) {
     setBusy(true)
     try {
       const room = await openTempRoom()
-      navigate(`/r/${room.token}`)
+      navigate(roomPath(room))
     } catch (error) {
       toast.error(errorText(error))
     } finally {

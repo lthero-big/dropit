@@ -416,7 +416,7 @@ test('room new and join isolate items from the saved space', async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-test('room new --code/--pin and room enter use the short code, PIN and 6-character link', async () => {
+test('room new --code/--pin and room enter / join use the one code, its /r/<code> link and the PIN', async () => {
   const dir = await home();
   const env = cliEnv(dir, { DROPIT_TOKEN: token });
   const code = `cli-${Date.now().toString(36)}`;
@@ -425,11 +425,19 @@ test('room new --code/--pin and room enter use the short code, PIN and 6-charact
   const room = JSON.parse(created.stdout) as { url?: string; code?: string; hasPin?: boolean };
   assert.equal(room.code, code);
   assert.equal(room.hasPin, true);
-  assert.match(new URL(room.url ?? '').pathname, /^\/r\/[A-Za-z0-9]{6}$/);
+  assert.equal(new URL(room.url ?? '').pathname, `/r/${code}`);
   assert.equal(created.stdout.includes('4821'), false);
-  const taken = await run(['room', 'new', '--code', code], env);
+  const taken = await run(['room', 'new', '--code', code, '--json'], env);
   assert.notEqual(taken.code, 0);
-  assert.equal((await run(['room', 'new', '--pin', '1234'], env)).code, 2);
+  assert.equal((JSON.parse(taken.stderr) as { error: { code: string } }).error.code, 'CODE_TAKEN');
+  // a random code with a PIN
+  const pinned = await run(['room', 'new', '--pin', '1234', '--json'], env);
+  assert.equal(pinned.code, 0, redact(pinned.stderr));
+  const pinnedRoom = JSON.parse(pinned.stdout) as { url?: string; code?: string; hasPin?: boolean };
+  assert.match(pinnedRoom.code ?? '', /^[A-Za-z0-9]{6}$/);
+  assert.equal(pinnedRoom.hasPin, true);
+  assert.notEqual((await run(['room', 'join', pinnedRoom.url ?? ''], env)).code, 0);
+  assert.equal((await run(['room', 'join', pinnedRoom.url ?? '', '--pin', '1234'], env)).code, 0);
   const noPin = await run(['room', 'enter', code], env);
   assert.notEqual(noPin.code, 0);
   const wrong = await run(['room', 'enter', code, '--pin', '0000'], env);
@@ -440,8 +448,9 @@ test('room new --code/--pin and room enter use the short code, PIN and 6-charact
   const marker = `code-room-${Date.now()}`;
   assert.equal((await run(['send', marker], env)).code, 0);
   assert.equal((await run(['ls', '--json'], env)).stdout.includes(marker), true);
-  // the 6-character link opens the same room
-  const joined = await run(['room', 'join', room.url ?? '', '--json'], env);
+  // the /r/<code> link opens the same room (with the PIN)
+  assert.notEqual((await run(['room', 'join', room.url ?? ''], env)).code, 0);
+  const joined = await run(['room', 'join', room.url ?? '', '--pin', '4821', '--json'], env);
   assert.equal(joined.code, 0, redact(joined.stderr));
   assert.equal((await run(['ls', '--json'], env)).stdout.includes(marker), true);
   await rm(dir, { recursive: true, force: true });

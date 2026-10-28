@@ -4,7 +4,7 @@ import { App } from './App.tsx'
 import { ThemeProvider } from './components/theme-provider.tsx'
 import { channelClock } from './lib/channel.ts'
 
-// RHEA-190 auth step 3: room codes + PIN, short links and personal invites in the web app.
+// RHEA-190 auth step 3/4: room codes + PIN, links and personal invites in the web app.
 class FakeSocket {
   static instances: FakeSocket[] = []
   url: string
@@ -70,45 +70,55 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-const roomInfo = (extra: Record<string, unknown> = {}) => ({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200, code: 'k7Rm2', hasPin: false, ...extra })
+const ACCESS = `11111111-1111-4111-8111-111111111111.${'p'.repeat(43)}`
+const LEGACY = 'L'.repeat(43)
+const roomInfo = (extra: Record<string, unknown> = {}) => ({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200, code: 'k7Rm2x', hasPin: false, ...extra })
 
+// RHEA-190 auth step 4: one code per room, the link is /r/<code>, optional PIN that also guards the link.
 describe('room codes', () => {
-  it('shows the room code, copies it and lets the owner set a custom code with a PIN', async () => {
+  it('opens the own room at /r/<code>, and the owner changes the code (the link follows) and sets / removes the PIN', async () => {
     const writeText = vi.fn(async () => undefined)
     vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(writeText)
     let info = roomInfo()
     stubFetch((url, init) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
-      if (url === '/api/rooms' && init?.method === 'POST') return json({ token: 'Ab3dEf', expiresAt: Date.now() + 60_000, url: '/r/Ab3dEf', code: 'k7Rm2', hasPin: false }, 201)
-      if (url === '/api/rooms/Ab3dEf/code' && init?.method === 'PUT') {
-        info = roomInfo({ code: 'team-red', hasPin: true })
-        return json({ code: 'team-red', hasPin: true })
+      if (url === '/api/rooms' && init?.method === 'POST') return json({ token: ACCESS, expiresAt: Date.now() + 60_000, url: '/r/k7Rm2x', code: 'k7Rm2x', hasPin: false }, 201)
+      if (url === `/api/rooms/${ACCESS}/code` && init?.method === 'PUT') {
+        const sent = JSON.parse(String(init.body)) as { code?: string | null; pin?: string | null }
+        info = roomInfo({ code: 'code' in sent ? sent.code ?? 'Rnd234' : info.code, hasPin: 'pin' in sent ? Boolean(sent.pin) : info.hasPin })
+        return json({ code: info.code, hasPin: info.hasPin })
       }
-      if (url.startsWith('/api/rooms/Ab3dEf')) return json(info)
+      if (url.startsWith(`/api/rooms/${ACCESS}`)) return json(info)
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
     renderAt('/login')
     fireEvent.click(await screen.findByRole('button', { name: '进入临时房间' }))
-    expect(await screen.findByText('k7Rm2')).toBeTruthy()
-    expect(window.location.pathname).toBe('/r/Ab3dEf')
+    expect(await screen.findByText('k7Rm2x')).toBeTruthy()
+    expect(window.location.pathname).toBe('/r/k7Rm2x')
+    // the link shown and copied is /r/<code>
+    expect(screen.getByText(`${window.location.origin}/r/k7Rm2x`)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '复制房间码' }))
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith('k7Rm2'))
-    fireEvent.click(screen.getByRole('button', { name: '自定义房间码' }))
-    const form = screen.getByText(/自定义房间码（3–32/).closest('form')!
-    const [codeInput, pinInput] = within(form).getAllByRole('textbox').concat(Array.from(form.querySelectorAll('input[type=password]')) as HTMLInputElement[])
-    fireEvent.change(codeInput!, { target: { value: 'team-red' } })
-    fireEvent.change(pinInput!, { target: { value: '4821' } })
-    fireEvent.click(within(form).getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('k7Rm2x'))
+    fireEvent.click(screen.getByRole('button', { name: '房间码与 PIN' }))
+    const codeForm = screen.getByRole('form', { name: '修改房间码' })
+    fireEvent.change(within(codeForm).getByRole('textbox'), { target: { value: 'team-red' } })
+    fireEvent.click(within(codeForm).getByRole('button', { name: '保存房间码' }))
+    await waitFor(() => expect(window.location.pathname).toBe('/r/team-red'))
     expect(await screen.findByText('team-red')).toBeTruthy()
-    expect(screen.getByText('已设置 PIN')).toBeTruthy()
-    const put = calls.find((call) => call.url === '/api/rooms/Ab3dEf/code')
-    const body = JSON.parse(String(put?.init?.body)) as { code: string; pin: string; deviceKey: string }
-    expect(body.code).toBe('team-red')
-    expect(body.pin).toBe('4821')
-    expect(body.deviceKey).toMatch(/^[A-Za-z0-9_-]{32,128}$/)
+    // PIN on its own (the panel stays open after saving)
+    expect(screen.getByRole('button', { name: '收起' })).toBeTruthy()
+    const pinForm = screen.getByRole('form', { name: '设置 PIN' })
+    fireEvent.change(pinForm.querySelector('input[type=password]')!, { target: { value: '4821' } })
+    fireEvent.click(within(pinForm).getByRole('button', { name: '设置 PIN' }))
+    expect(await screen.findByText('已设置 PIN')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '移除 PIN' }))
+    await waitFor(() => expect(screen.queryByText('已设置 PIN')).toBeNull())
+    const puts = calls.filter((call) => call.url === `/api/rooms/${ACCESS}/code`).map((call) => JSON.parse(String(call.init?.body)) as Record<string, unknown>)
+    expect(puts.map(({ deviceKey: _key, ...rest }) => rest)).toEqual([{ code: 'team-red' }, { pin: '4821' }, { pin: null }])
+    expect(puts[0]!.deviceKey).toMatch(/^[A-Za-z0-9_-]{32,128}$/)
   })
 
-  it('enters a room by code, asks for the PIN when needed and opens the entry token', async () => {
+  it('enters a room by code at /join, asks for the PIN when needed and lands on /r/<code>', async () => {
     stubFetch((url, init) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
       if (url === '/api/rooms/enter' && init?.method === 'POST') {
@@ -116,13 +126,13 @@ describe('room codes', () => {
         if (sent.code === 'nope') return json({ error: { code: 'NOT_FOUND' } }, 404)
         if (!sent.pin) return json({ error: { code: 'PIN_REQUIRED' } }, 401)
         if (sent.pin !== '4821') return json({ error: { code: 'PIN_INVALID' } }, 403)
-        return json({ token: 'space-id.proof', expiresAt: Date.now() + 60_000, code: sent.code, hasPin: true })
+        return json({ token: ACCESS, expiresAt: Date.now() + 60_000, code: sent.code, hasPin: true })
       }
-      if (url.startsWith('/api/rooms/space-id.proof')) return json(roomInfo({ code: 'team-red', hasPin: true }))
+      if (url.startsWith(`/api/rooms/${ACCESS}`)) return json(roomInfo({ code: 'team-red', hasPin: true }))
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
     renderAt('/join?code=nope')
-    expect((await screen.findByLabelText('房间码') as HTMLInputElement).value).toBe('nope')
+    expect(((await screen.findByLabelText('房间码')) as HTMLInputElement).value).toBe('nope')
     fireEvent.click(screen.getByRole('button', { name: '进入房间' }))
     expect(await screen.findByText(/没有这个房间码/)).toBeTruthy()
     fireEvent.change(screen.getByLabelText('房间码'), { target: { value: 'team-red' } })
@@ -134,20 +144,65 @@ describe('room codes', () => {
     fireEvent.change(screen.getByLabelText('PIN'), { target: { value: '4821' } })
     fireEvent.click(screen.getByRole('button', { name: '进入房间' }))
     expect(await screen.findByText('team-red')).toBeTruthy()
-    expect(window.location.pathname).toBe('/r/space-id.proof')
-    // someone who entered by code does not get the owner's edit button, and is not offered the room link
-    expect(screen.queryByRole('button', { name: '自定义房间码' })).toBeNull()
-    expect(screen.getByText(/\/join\?code=team-red/)).toBeTruthy()
+    expect(window.location.pathname).toBe('/r/team-red')
+    // no second PIN prompt on the room page: the browser kept the access token for that code
+    expect(calls.filter((call) => call.url === '/api/rooms/enter')).toHaveLength(4)
+    // someone who entered by code is not the owner, and shares the same /r/<code> link
+    expect(screen.queryByRole('button', { name: '房间码与 PIN' })).toBeNull()
+    expect(screen.getByText(`${window.location.origin}/r/team-red`)).toBeTruthy()
   })
 
-  it('old /rooms/:token links still open a room', async () => {
-    stubFetch((url) => {
+  it('opening /r/<code> of a room with a PIN asks for the PIN, then never again on this device', async () => {
+    stubFetch((url, init) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
-      if (url.startsWith('/api/rooms/old-long-token')) return json(roomInfo())
+      if (url === '/api/rooms/enter' && init?.method === 'POST') {
+        const sent = JSON.parse(String(init.body)) as { code: string; pin?: string }
+        if (!sent.pin) return json({ error: { code: 'PIN_REQUIRED' } }, 401)
+        if (sent.pin === '9999') return json({ error: { code: 'RATE_LIMITED' } }, 429, { 'Retry-After': '30' })
+        if (sent.pin !== '4821') return json({ error: { code: 'PIN_INVALID' } }, 403)
+        return json({ token: ACCESS, expiresAt: Date.now() + 60_000, code: sent.code, hasPin: true })
+      }
+      if (url.startsWith(`/api/rooms/${ACCESS}`)) return json(roomInfo({ code: 'team-red', hasPin: true }))
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
-    renderAt('/rooms/old-long-token')
+    renderAt('/r/team-red')
+    expect(await screen.findByRole('heading', { name: '这个房间需要 PIN' })).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('PIN'), { target: { value: '0000' } })
+    fireEvent.click(screen.getByRole('button', { name: '进入房间' }))
+    expect(await screen.findByText('PIN 不对。')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('PIN'), { target: { value: '9999' } })
+    fireEvent.click(screen.getByRole('button', { name: '进入房间' }))
+    expect(await screen.findByText(/尝试次数太多/)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('PIN'), { target: { value: '4821' } })
+    fireEvent.click(screen.getByRole('button', { name: '进入房间' }))
     expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
+    expect(window.location.pathname).toBe('/r/team-red')
+    cleanup()
+    calls.length = 0
+    renderAt('/r/team-red')
+    expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
+    expect(calls.some((call) => call.url === '/api/rooms/enter')).toBe(false)
+  })
+
+  it('old /rooms/<token> links still open the room and are replaced by /r/<code>', async () => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
+      if (url.startsWith(`/api/rooms/${LEGACY}`)) return json(roomInfo())
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt(`/rooms/${LEGACY}`)
+    expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
+    await waitFor(() => expect(window.location.pathname).toBe('/r/k7Rm2x'))
+    expect(calls.some((call) => call.url === '/api/rooms/enter')).toBe(false)
+  })
+
+  it('an unknown code shows the not-found page', async () => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/r/nope')
+    expect(await screen.findByRole('heading', { name: '房间不存在或已过期' })).toBeTruthy()
   })
 })
 

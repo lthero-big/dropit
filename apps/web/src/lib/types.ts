@@ -40,9 +40,10 @@ export interface ScopeInfo {
   id: string
   name: string
   expiresAt: number | null
-  /** Temporary rooms only (auth step 3). */
+  /** Temporary rooms only (auth step 3/4): the code is also the link /r/<code>. */
   code?: string | null
   hasPin?: boolean
+  url?: string
   maxFileBytes: number
   quotaBytes: number
 }

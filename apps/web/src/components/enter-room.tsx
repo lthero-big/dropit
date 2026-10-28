@@ -4,9 +4,12 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button.tsx'
 import { fieldClass, labelClass } from '@/components/settings-ui.tsx'
 import { ApiError, errorText } from '@/lib/api.ts'
-import { enterRoomByCode } from '@/lib/temp-room.ts'
+import { enterRoomByCode, roomPath } from '@/lib/temp-room.ts'
 
-/** RHEA-190 auth step 3: join a temporary room with its (case-sensitive) code, and the PIN when it has one. */
+/**
+ * RHEA-190 auth step 3/4: join a temporary room with its (case-sensitive) code, and the PIN when it has one.
+ * Same as opening /r/<code>: the browser remembers the room afterwards, so the room page does not ask again.
+ */
 export function EnterRoomForm({ initialCode = '' }: { initialCode?: string }) {
   const navigate = useNavigate()
   const [code, setCode] = useState(initialCode)
@@ -22,7 +25,7 @@ export function EnterRoomForm({ initialCode = '' }: { initialCode?: string }) {
     setError(null)
     try {
       const entry = await enterRoomByCode(code.trim(), needPin ? pin : undefined)
-      navigate(`/r/${entry.token}`)
+      navigate(roomPath({ code: entry.code ?? code.trim(), token: entry.token }))
     } catch (caught) {
       if (caught instanceof ApiError && caught.code === 'PIN_REQUIRED') {
         setNeedPin(true)
@@ -32,6 +35,8 @@ export function EnterRoomForm({ initialCode = '' }: { initialCode?: string }) {
         setError('没有这个房间码，或房间已过期。注意区分大小写。')
       } else if (caught instanceof ApiError && caught.code === 'PIN_INVALID') {
         setError('PIN 不对。')
+      } else if (caught instanceof ApiError && caught.status === 429) {
+        setError(`尝试次数太多，请${caught.retryAfter ? ` ${caught.retryAfter} 秒` : '稍'}后再试。`)
       } else {
         setError(errorText(caught))
         toast.error(errorText(caught))
@@ -52,7 +57,7 @@ export function EnterRoomForm({ initialCode = '' }: { initialCode?: string }) {
           autoCorrect="off"
           spellCheck={false}
           maxLength={64}
-          placeholder="例如 k7Rm2"
+          placeholder="例如 k7Rm2x"
           onChange={(event) => {
             setCode(event.target.value)
             setNeedPin(false)

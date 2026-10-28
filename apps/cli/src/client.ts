@@ -37,6 +37,10 @@ const FAILURES: Record<string, string> = {
   EMPTY_TEXT: '文本是空的',
   EMPTY_FILE: '文件是空的',
   RATE_LIMITED: '请求过于频繁',
+  PIN_REQUIRED: '这个房间需要 PIN（用 dropit room enter <房间码> --pin <PIN>）',
+  PIN_INVALID: 'PIN 不正确',
+  CODE_TAKEN: '这个房间码已被占用',
+  INVALID_CODE: '房间码无效（3–32 位字母、数字、_ 或 -）',
   UPLOAD_BUSY: '服务器正在处理其他上传',
   UPLOAD_INCOMPLETE: '上传未完成，需要重新开始',
   UPLOAD_IN_PROGRESS: '上传仍在进行',
@@ -412,13 +416,13 @@ export class Client {
     return body.body as { token: string; url: string; expiresAt: number; code?: string | null; hasPin?: boolean };
   }
 
-  async enterRoom(code: string, pin?: string): Promise<{ token: string; expiresAt: number }> {
+  async enterRoom(code: string, pin?: string): Promise<{ token: string; expiresAt: number; code?: string; url?: string; hasPin?: boolean }> {
     const body = await this.send('POST', '/api/rooms/enter', { json: { code, ...(pin ? { pin } : {}) } });
-    return body.body as { token: string; expiresAt: number };
+    return body.body as { token: string; expiresAt: number; code?: string; url?: string; hasPin?: boolean };
   }
 
-  async roomInfo(roomToken: string): Promise<{ id: string; name: string; expiresAt: number | null }> {
-    return (await this.send('GET', `/api/rooms/${encodeURIComponent(roomToken)}`)).body as { id: string; name: string; expiresAt: number | null };
+  async roomInfo(roomToken: string): Promise<{ id: string; name: string; expiresAt: number | null; code?: string | null; url?: string }> {
+    return (await this.send('GET', `/api/rooms/${encodeURIComponent(roomToken)}`)).body as { id: string; name: string; expiresAt: number | null; code?: string | null; url?: string };
   }
 
   async authorize(input: { name: string; scopes?: Array<'read' | 'write'>; expiresInDays?: number | null }): Promise<AuthorizeResponse> {

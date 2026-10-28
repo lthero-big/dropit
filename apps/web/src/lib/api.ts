@@ -86,7 +86,6 @@ const labels: Record<string, string> = {
   PASSWORD_UNCHANGED: '新密码不能和当前密码相同',
   INVALID_CODE: '房间码只能用字母、数字、- 和 _，3–32 位',
   INVALID_PIN: 'PIN 需要 4–32 位，不能含控制字符',
-  PIN_NEEDS_CODE: 'PIN 需要配合自定义房间码使用',
   PIN_REQUIRED: '这个房间需要 PIN',
   PIN_INVALID: 'PIN 不对',
   CODE_TAKEN: '这个房间码已被占用，换一个试试',

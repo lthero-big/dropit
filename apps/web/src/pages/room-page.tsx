@@ -5,46 +5,91 @@ import { toast } from 'sonner'
 import { ClipboardBoard } from '@/components/clipboard-board.tsx'
 import { EnterRoomForm } from '@/components/enter-room.tsx'
 import { RoomCodeBar } from '@/components/room-code.tsx'
+import { RoomPinForm } from '@/components/room-pin.tsx'
 import { Shell } from '@/components/shell.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText } from '@/lib/api.ts'
 import { copyText } from '@/lib/format.ts'
-import { isOwnTempRoom, openTempRoom } from '@/lib/temp-room.ts'
+import { enterRoomByCode, forgetRoom, isOwnTempRoom, isRoomAccessToken, openTempRoom, rememberRoom, roomPath, savedRoomToken } from '@/lib/temp-room.ts'
 import { useSession } from '@/lib/session.tsx'
 import type { ConnectionStatus, ScopeInfo } from '@/lib/types.ts'
 
+type Resolved = { access: string; scope: ScopeInfo }
+
+/**
+ * RHEA-190 auth step 4: /r/<code> is the room link and the code at the same time. Opening it is the same as
+ * typing the code: the browser uses the access token it already has for that code (owner, or entered before),
+ * otherwise it enters the code — and asks for the PIN when the room has one. Old links (/rooms/<token>, and
+ * the 6-character /r/ links of step 3) still open the room and are replaced by /r/<code>.
+ */
 export function RoomPage() {
-  const { token = '' } = useParams()
+  const { token: param = '' } = useParams()
   const navigate = useNavigate()
   const { me } = useSession()
-  const [scope, setScope] = useState<ScopeInfo | null>(null)
+  const [resolved, setResolved] = useState<Resolved | null>(null)
   const [missing, setMissing] = useState(false)
+  const [needPin, setNeedPin] = useState(false)
   const [, setConnection] = useState<ConnectionStatus>('idle')
   const [qr, setQr] = useState<string | null>(null)
   const [qrOpen, setQrOpen] = useState(false)
   const [qrLarge, setQrLarge] = useState(false)
   const qrRootRef = useRef<HTMLDivElement>(null)
-  // A token with a dot came from entering the room code: it is not the room link, so share the code instead.
-  const entered = token.includes('.')
-  const shareUrl = entered ? `${window.location.origin}/join${scope?.code ? `?code=${encodeURIComponent(scope.code)}` : ''}` : `${window.location.origin}/r/${token}`
+  const scope = resolved?.scope ?? null
+  const token = resolved?.access ?? ''
+  const shareCode = scope?.code ?? param
+  const shareUrl = `${window.location.origin}/r/${encodeURIComponent(shareCode)}`
+
+  const open = useCallback(
+    async (access: string, cancelled: () => boolean) => {
+      const body = await api<ScopeInfo>(`/api/rooms/${encodeURIComponent(access)}`)
+      if (cancelled()) return
+      if (body.code) rememberRoom(body.code, access)
+      if (body.code && body.code !== param) {
+        navigate(`/r/${encodeURIComponent(body.code)}`, { replace: true })
+        return
+      }
+      setResolved({ access, scope: body })
+    },
+    [navigate, param],
+  )
+
+  // the owner just changed the code: the page already shows the room, only the address moved to /r/<new code>
+  const resolvedRef = useRef<Resolved | null>(null)
+  resolvedRef.current = resolved
 
   useEffect(() => {
-    let cancelled = false
+    if (resolvedRef.current?.scope.code === param) return
+    let done = false
+    const cancelled = () => done
     setMissing(false)
-    setScope(null)
-    api<ScopeInfo>(`/api/rooms/${encodeURIComponent(token)}`)
-      .then((body) => {
-        if (!cancelled) setScope(body)
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return
-        if (error instanceof ApiError && (error.status === 404 || error.status === 403)) setMissing(true)
-        else toast.error(errorText(error))
-      })
-    return () => {
-      cancelled = true
+    setNeedPin(false)
+    setResolved(null)
+    const fail = (error: unknown) => {
+      if (cancelled()) return
+      if (error instanceof ApiError && error.code === 'PIN_REQUIRED') setNeedPin(true)
+      else if (error instanceof ApiError && (error.status === 404 || error.status === 403 || error.status === 400)) setMissing(true)
+      else toast.error(errorText(error))
     }
-  }, [token])
+    async function resolve() {
+      if (isRoomAccessToken(param)) return open(param, cancelled)
+      const saved = savedRoomToken(param)
+      if (saved) {
+        try {
+          return await open(saved, cancelled)
+        } catch (error) {
+          if (!(error instanceof ApiError && error.status === 404)) throw error
+          forgetRoom(param)
+        }
+      }
+      const entry = await enterRoomByCode(param)
+      if (cancelled()) return
+      return open(entry.token, cancelled)
+    }
+    resolve().catch(fail)
+    return () => {
+      done = true
+    }
+  }, [param, open])
 
   useEffect(() => {
     let cancelled = false
@@ -90,10 +135,33 @@ export function RoomPage() {
   async function openMine() {
     try {
       const room = await openTempRoom()
-      navigate(`/r/${room.token}`)
+      navigate(roomPath(room))
     } catch (error) {
       toast.error(errorText(error))
     }
+  }
+
+  if (needPin) {
+    return (
+      <Shell>
+        <h1 className="text-4xl font-semibold">这个房间需要 PIN</h1>
+        <p className="mt-4 max-w-md text-sm text-muted-foreground">
+          房间 <code>{param}</code> 设置了 PIN。输入一次后，这台设备之后打开链接不会再问。
+        </p>
+        <div className="mt-6 max-w-sm">
+          <RoomPinForm
+            code={param}
+            onEntered={(entry) => {
+              setNeedPin(false)
+              void open(entry.token, () => false).catch((error: unknown) => toast.error(errorText(error)))
+            }}
+          />
+        </div>
+        <Link to="/" className="mt-6 inline-block text-sm font-medium">
+          返回
+        </Link>
+      </Shell>
+    )
   }
 
   if (missing) {
@@ -188,8 +256,13 @@ export function RoomPage() {
             token={token}
             code={scope.code ?? null}
             hasPin={Boolean(scope.hasPin)}
-            owner={!entered && isOwnTempRoom(token)}
-            onChanged={(next) => setScope((current) => (current ? { ...current, ...next } : current))}
+            owner={isOwnTempRoom(token)}
+            onChanged={(next) => {
+              // a new code is a new link: move to it (the access token stays the same)
+              if (scope.code && next.code !== scope.code) forgetRoom(scope.code)
+              setResolved((current) => (current ? { ...current, scope: { ...current.scope, ...next } } : current))
+              if (next.code !== param) navigate(`/r/${encodeURIComponent(next.code)}`, { replace: true })
+            }}
           />
           <ClipboardBoard
             base={`/api/rooms/${token}`}

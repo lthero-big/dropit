@@ -13,7 +13,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu.tsx'
 import { errorText } from '@/lib/api.ts'
-import { openTempRoom } from '@/lib/temp-room.ts'
+import { openTempRoom, roomPath } from '@/lib/temp-room.ts'
 import { formatBytes, quotaTone, spaceLabel } from '@/lib/format.ts'
 import { useSession } from '@/lib/session.tsx'
 import type { SpaceSummary } from '@/lib/types.ts'
@@ -82,7 +82,7 @@ export function Shell({
   async function newRoom() {
     try {
       const room = await openTempRoom()
-      navigate(`/r/${room.token}`)
+      navigate(roomPath(room))
     } catch (error) {
       toast.error(errorText(error))
     }

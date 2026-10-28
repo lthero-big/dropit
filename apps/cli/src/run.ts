@@ -49,19 +49,44 @@ function report(io: Io, json: boolean, error: unknown, secrets: readonly string[
   return cli.exitCode;
 }
 
-// A room link token is 6 characters (/r/<token>); older rooms use 43 (/rooms/<token>); entering by code gives <id>.<proof>.
-const ROOM_TOKEN = /^(?:[A-Za-z0-9]{6}|[A-Za-z0-9_-]{20,128}|[0-9a-f-]{36}\.[A-Za-z0-9_-]{43})$/;
-export function parseRoomToken(input: string): string {
+// A room has one code and one link /r/<code>. The code (3–32 of A-Za-z0-9_-) is not a credential: it is exchanged
+// for an access token through POST /api/rooms/enter (PIN, rate limit). Tokens are <id>.<proof> or an old 43-character
+// room token (old /rooms/<token> links).
+const ROOM_ACCESS = /^(?:[A-Za-z0-9_-]{43}|[0-9a-f-]{36}\.[A-Za-z0-9_-]{43})$/;
+const ROOM_CODE = /^[A-Za-z0-9_-]{3,32}$/;
+export type RoomTarget = { kind: 'token'; token: string } | { kind: 'code'; code: string };
+export function parseRoomTarget(input: string): RoomTarget {
   const trimmed = input.trim();
-  if (ROOM_TOKEN.test(trimmed)) return trimmed;
+  const classify = (value: string): RoomTarget | null =>
+    ROOM_ACCESS.test(value) ? { kind: 'token', token: value } : ROOM_CODE.test(value) ? { kind: 'code', code: value } : null;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    const bare = classify(trimmed);
+    if (bare) return bare;
+    throw new CliError('USAGE', '无法识别房间码或链接', 2);
+  }
   let url: URL;
   try { url = new URL(trimmed); }
   catch { throw new CliError('USAGE', '无法识别房间链接', 2); }
   const parts = url.pathname.split('/').filter(Boolean);
   const index = Math.max(parts.lastIndexOf('rooms'), parts.lastIndexOf('r'));
-  const token = decodeURIComponent(index >= 0 ? parts[index + 1] ?? '' : parts.at(-1) ?? '');
-  if (!ROOM_TOKEN.test(token)) throw new CliError('USAGE', '无法识别房间链接', 2);
-  return token;
+  let segment = '';
+  try { segment = decodeURIComponent(index >= 0 ? parts[index + 1] ?? '' : ''); }
+  catch { segment = ''; }
+  const found = classify(segment);
+  if (!found) throw new CliError('USAGE', '无法识别房间链接', 2);
+  return found;
+}
+
+async function roomAccess(client: Client, input: string, pin: string | undefined, secrets: string[]): Promise<{ token: string; expiresAt: number | null; code: string | null; url: string | null }> {
+  const target = parseRoomTarget(input);
+  if (target.kind === 'token') {
+    secrets.push(target.token);
+    const info = await client.roomInfo(target.token);
+    return { token: target.token, expiresAt: info.expiresAt, code: info.code ?? null, url: info.url ?? null };
+  }
+  const entry = await client.enterRoom(target.code, pin);
+  secrets.push(entry.token);
+  return { token: entry.token, expiresAt: entry.expiresAt, code: entry.code ?? target.code, url: entry.url ?? null };
 }
 
 function preview(item: Item): string {
@@ -201,25 +226,16 @@ async function dispatch(parsed: Parsed, env: NodeJS.ProcessEnv, io: Io, secrets:
     return;
   }
 
-  if (command.kind === 'room-enter') {
+  if (command.kind === 'room-enter' || command.kind === 'room-join') {
     if (command.pin) secrets.push(command.pin);
-    const entry = await client.enterRoom(command.code, command.pin);
-    secrets.push(entry.token);
-    file.roomToken = entry.token;
+    const input = command.kind === 'room-enter' ? command.code : command.target;
+    if (command.kind === 'room-enter' && !ROOM_CODE.test(input.trim())) throw new CliError('USAGE', '房间码是 3–32 位字母、数字、_ 或 -', 2);
+    const room = await roomAccess(client, input, command.pin, secrets);
+    file.roomToken = room.token;
     if (base) file.url = base;
     await persist();
-    emit(io, json, { ok: true, expiresAt: entry.expiresAt }, '已用房间码进入临时房间。后续命令默认发往该房间，用 --space 可以改回空间。');
-    return;
-  }
-
-  if (command.kind === 'room-join') {
-    const token = parseRoomToken(command.target);
-    secrets.push(token);
-    const info = await client.roomInfo(token);
-    file.roomToken = token;
-    if (base) file.url = base;
-    await persist();
-    emit(io, json, { ok: true, expiresAt: info.expiresAt }, '已切换到临时房间。后续命令默认发往该房间，用 --space 可以改回空间。');
+    emit(io, json, { ok: true, expiresAt: room.expiresAt, code: room.code, url: room.url },
+      `已进入临时房间${room.code ? ` ${room.code}` : ''}。后续命令默认发往该房间，用 --space 可以改回空间。${room.url ? `\n${room.url}` : ''}`);
     return;
   }
 
@@ -346,9 +362,7 @@ async function dispatch(parsed: Parsed, env: NodeJS.ProcessEnv, io: Io, secrets:
 async function resolveTarget(client: Client, file: FileConfig, settings: Settings, globals: Globals, persist: () => Promise<void>, secrets: string[]): Promise<Target> {
   if (globals.space && globals.room) throw new CliError('USAGE', '--space 和 --room 不能同时使用', 2);
   if (globals.room) {
-    const token = parseRoomToken(globals.room);
-    secrets.push(token);
-    await client.roomInfo(token);
+    const { token } = await roomAccess(client, globals.room, undefined, secrets);
     file.roomToken = token;
     await persist();
     return { kind: 'room', token };

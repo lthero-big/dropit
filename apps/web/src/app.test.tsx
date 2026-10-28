@@ -158,8 +158,8 @@ describe('dropit web', () => {
     stubFetch((url, init) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
       if (url === '/api/auth/providers') return json({ providers: ['github', 'google'] })
-      if (url === '/api/rooms' && init?.method === 'POST') return json({ token: 'room-token', expiresAt: Date.now() + 1000, url: '/rooms/room-token' }, 201)
-      if (url.startsWith('/api/rooms/room-token')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
+      if (url === '/api/rooms' && init?.method === 'POST') return json({ token: 'room-token-00000000000000000000000000000000', expiresAt: Date.now() + 1000, url: '/rooms/room-token-00000000000000000000000000000000' }, 201)
+      if (url.startsWith('/api/rooms/room-token-00000000000000000000000000000000')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
     renderAt('/')
@@ -171,7 +171,7 @@ describe('dropit web', () => {
     expect(screen.getByRole('link', { name: '使用 Google 继续' }).getAttribute('title')).toBe('用 Google 账号登录')
     fireEvent.click(screen.getByRole('button', { name: '进入临时房间' }))
     expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
-    expect(screen.getByText(/\/r\/room-token/)).toBeTruthy()
+    expect(screen.getByText(/\/r\/room-token-00000000000000000000000000000000/)).toBeTruthy()
   })
 
   it('keeps invitation text out of HTML and joins through the invite token', async () => {
@@ -421,10 +421,10 @@ describe('dropit web', () => {
   it('lets a room capability holder edit text', async () => {
     stubFetch((url) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
-      if (url.startsWith('/api/rooms/room-token')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
+      if (url.startsWith('/api/rooms/room-token-00000000000000000000000000000000')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
-    renderAt('/rooms/room-token')
+    renderAt('/rooms/room-token-00000000000000000000000000000000')
     await screen.findByRole('heading', { name: '临时房间' })
     FakeSocket.instances.at(-1)?.emit({
       type: 'snapshot',
@@ -597,10 +597,12 @@ describe('dropit web', () => {
         rooms += 1
         return json({ token: `room-${rooms}`, expiresAt: Date.now() + 60_000, url: `/rooms/room-${rooms}` }, 201)
       }
+      // step 4: /r/<code> enters the code first, then uses the access token it got
+      if (url === '/api/rooms/enter') return json({ token: 'existing-access-00000000000000000000000000', expiresAt: Date.now() + 60_000, code: 'existing', hasPin: false })
       if (url.startsWith('/api/rooms/')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
-    renderAt('/rooms/existing')
+    renderAt('/r/existing')
     expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
     expect(screen.queryByRole('img', { name: '房间二维码' })).toBeNull()
     const qrButton = screen.getByRole('button', { name: '二维码' })
@@ -744,7 +746,7 @@ describe('dropit web', () => {
           access: 'ticket',
         })
       }
-      if (url.startsWith('/api/rooms/room-token')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
+      if (url.startsWith('/api/rooms/room-token-00000000000000000000000000000000')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
     renderAt('/')
@@ -766,7 +768,7 @@ describe('dropit web', () => {
     expect((screen.getByLabelText('编辑文本') as HTMLTextAreaElement).value).toBe(source)
 
     cleanup()
-    renderAt('/rooms/room-token')
+    renderAt('/rooms/room-token-00000000000000000000000000000000')
     await screen.findByRole('heading', { name: '临时房间' })
     FakeSocket.instances.at(-1)?.emit({
       type: 'snapshot',

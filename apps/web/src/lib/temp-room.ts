@@ -34,7 +34,56 @@ export function roomDeviceKey(): string {
 }
 
 export type TempRoom = { token: string; expiresAt: number; url: string; reused?: boolean; code?: string | null; hasPin?: boolean }
-export type RoomEntry = { token: string; expiresAt: number; code: string | null; hasPin: boolean }
+export type RoomEntry = { token: string; expiresAt: number; url?: string; code: string | null; hasPin: boolean }
+
+// RHEA-190 auth step 4: a room has ONE code and its link is /r/<code>. The code is only typed / shared; the
+// room API needs an access token, which the browser gets once (creating the room, or entering the code and
+// the PIN when the room has one) and keeps here, per code, so it is not asked for the PIN again.
+const ACCESS = 'dropit-room-access'
+const ACCESS_LIMIT = 50
+let memoryAccess: Record<string, string> = {}
+
+function readAccess(): Record<string, string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ACCESS) ?? '{}') as unknown
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, string>) : {}
+  } catch {
+    return memoryAccess
+  }
+}
+function writeAccess(next: Record<string, string>) {
+  const entries = Object.entries(next).slice(-ACCESS_LIMIT)
+  memoryAccess = Object.fromEntries(entries)
+  try {
+    localStorage.setItem(ACCESS, JSON.stringify(memoryAccess))
+  } catch {
+    // private mode: this tab only
+  }
+}
+/** Remember the access token for a room code (the newest entry wins). */
+export function rememberRoom(code: string, token: string) {
+  const access = readAccess()
+  delete access[code]
+  writeAccess({ ...access, [code]: token })
+}
+export function savedRoomToken(code: string): string | null {
+  const token = readAccess()[code]
+  return typeof token === 'string' ? token : null
+}
+export function forgetRoom(code: string) {
+  const access = readAccess()
+  if (!(code in access)) return
+  delete access[code]
+  writeAccess(access)
+}
+/** Old room links (/rooms/<43 characters>) and entry tokens are access tokens; anything else in /r/… is a code. */
+export function isRoomAccessToken(value: string): boolean {
+  return /^[A-Za-z0-9_-]{43}$/.test(value) || /^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/.test(value)
+}
+/** The page of a room: /r/<code>. */
+export function roomPath(room: { code?: string | null; token: string }): string {
+  return `/r/${encodeURIComponent(room.code ?? room.token)}`
+}
 
 /** Open this browser's temporary room: the live one if it has one, otherwise a new one. */
 export async function openTempRoom(options: { code?: string; pin?: string } = {}): Promise<TempRoom> {
@@ -48,6 +97,7 @@ export async function openTempRoom(options: { code?: string; pin?: string } = {}
   } catch {
     // ignore
   }
+  rememberRoom(room.code ?? room.token, room.token)
   return room
 }
 
@@ -60,20 +110,27 @@ export function isOwnTempRoom(token: string): boolean {
   }
 }
 
-/** Enter a room by its code (and PIN). The returned token works wherever a room link token does. */
-export function enterRoomByCode(code: string, pin?: string): Promise<RoomEntry> {
-  return api<RoomEntry>('/api/rooms/enter', {
+/** Enter a room by its code (and PIN). Opening /r/<code> does the same. The access token is remembered. */
+export async function enterRoomByCode(code: string, pin?: string): Promise<RoomEntry> {
+  const entry = await api<RoomEntry>('/api/rooms/enter', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code, ...(pin ? { pin } : {}) }),
   })
+  rememberRoom(entry.code ?? code, entry.token)
+  return entry
 }
 
-/** Owner only: change the room's code (blank = a fresh random one) and PIN. */
-export function setRoomCode(token: string, code?: string, pin?: string): Promise<{ code: string; hasPin: boolean }> {
-  return api(`/api/rooms/${encodeURIComponent(token)}/code`, {
+/**
+ * Owner only: change the room's code and/or PIN. code: a custom code, null = a fresh random code, absent = keep.
+ * pin: a new PIN, null = remove it, absent = keep. A new code is a new link; the old one stops working.
+ */
+export async function setRoomCode(token: string, change: { code?: string | null; pin?: string | null }): Promise<{ code: string; hasPin: boolean; url?: string }> {
+  const next = await api<{ code: string; hasPin: boolean; url?: string }>(`/api/rooms/${encodeURIComponent(token)}/code`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ deviceKey: roomDeviceKey(), ...(code ? { code } : {}), ...(pin ? { pin } : {}) }),
+    body: JSON.stringify({ deviceKey: roomDeviceKey(), ...change }),
   })
+  rememberRoom(next.code, token)
+  return next
 }

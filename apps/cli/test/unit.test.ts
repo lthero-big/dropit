@@ -12,7 +12,7 @@ import { runItemCommand } from '../src/exec.js';
 import { latestItem, pickSpace, type Item } from '../src/items.js';
 import { deviceLogin, interpretPoll } from '../src/login.js';
 import { destination, downloadPlan, saveStream } from '../src/paths.js';
-import { main, parseRoomToken } from '../src/run.js';
+import { main, parseRoomTarget } from '../src/run.js';
 import { applyWatch, createWatchState, nextDelay } from '../src/watch.js';
 
 function item(id: string, createdAt: number, extra: Partial<Item> = {}): Item {
@@ -207,23 +207,30 @@ test('RHEA-190 step 5: the CLI identifies itself as a stable, URL-safe cli devic
   assert.equal([...decodeURIComponent(cliDevice('x'.repeat(80))['x-dropit-device-name'])].length, 40);
 });
 
-test('room links: 6-character /r/ links, old /rooms/ links and bare tokens are all accepted', () => {
-  assert.equal(parseRoomToken('Ab3dEf'), 'Ab3dEf');
-  assert.equal(parseRoomToken('https://drop.example/r/Ab3dEf'), 'Ab3dEf');
-  const long = 'a'.repeat(43);
-  assert.equal(parseRoomToken(long), long);
-  assert.equal(parseRoomToken(`https://drop.example/rooms/${long}`), long);
-  assert.equal(parseRoomToken(`https://drop.example/r/${long}`), long);
-  const entry = `11111111-2222-3333-4444-555555555555.${'B'.repeat(43)}`;
-  assert.equal(parseRoomToken(entry), entry);
-  assert.throws(() => parseRoomToken('abc'), CliError);
-  assert.throws(() => parseRoomToken('https://drop.example/r/abc'), CliError);
+test('room targets: /r/<code> links and bare codes are codes; tokens and old /rooms/ links are tokens', () => {
+  const code = (value: string) => ({ kind: 'code', code: value });
+  const tok = (value: string) => ({ kind: 'token', token: value });
+  assert.deepEqual(parseRoomTarget('Ab3dEf'), code('Ab3dEf'));
+  assert.deepEqual(parseRoomTarget('team-red'), code('team-red'));
+  assert.deepEqual(parseRoomTarget('https://drop.example/r/Ab3dEf'), code('Ab3dEf'));
+  assert.deepEqual(parseRoomTarget('https://drop.example/r/team_red'), code('team_red'));
+  const long = 'A'.repeat(43);
+  assert.deepEqual(parseRoomTarget(long), tok(long));
+  assert.deepEqual(parseRoomTarget(`https://drop.example/rooms/${long}`), tok(long));
+  assert.deepEqual(parseRoomTarget(`https://drop.example/r/${long}`), tok(long));
+  const entry = `${'0'.repeat(8)}-0000-4000-8000-${'0'.repeat(12)}.${'B'.repeat(43)}`;
+  assert.deepEqual(parseRoomTarget(entry), tok(entry));
+  assert.throws(() => parseRoomTarget('ab'), CliError);
+  assert.throws(() => parseRoomTarget('has space'), CliError);
+  assert.throws(() => parseRoomTarget('https://drop.example/r/ab'), CliError);
+  assert.throws(() => parseRoomTarget('https://drop.example/s/Ab3dEf'), CliError);
 });
 
 test('room new / enter flags are validated', () => {
   assert.deepEqual(parseArgs(['room', 'new', '--code', 'team-red', '--pin', '4821']).command, { kind: 'room-new', code: 'team-red', pin: '4821' });
   assert.deepEqual(parseArgs(['room', 'enter', 'team-red', '--pin', '4821']).command, { kind: 'room-enter', code: 'team-red', pin: '4821' });
-  assert.throws(() => parseArgs(['room', 'new', '--pin', '4821']), CliError);
+  assert.deepEqual(parseArgs(['room', 'new', '--pin', '4821']).command, { kind: 'room-new', code: undefined, pin: '4821' });
+  assert.deepEqual(parseArgs(['room', 'join', 'https://drop.example/r/Ab3dEf', '--pin', '1']).command, { kind: 'room-join', target: 'https://drop.example/r/Ab3dEf', pin: '1' });
   assert.throws(() => parseArgs(['room', 'enter']), CliError);
-  assert.throws(() => parseArgs(['room', 'join', 'Ab3dEf', '--pin', '1']), CliError);
+  assert.throws(() => parseArgs(['room', 'join', 'Ab3dEf', '--code', 'x']), CliError);
 });

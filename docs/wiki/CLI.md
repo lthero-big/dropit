@@ -34,8 +34,8 @@ dropit logout
 | `dropit rm <id\|latest>` | 撤回条目 |
 | `dropit share <id\|latest> --expires 1d --max-views 1` | 生成分享链接 |
 | `dropit watch [--exec -- 程序 参数...]` | 实时监听新条目，可触发程序 |
-| `dropit room new [--code 码 [--pin PIN]]` / `dropit room join <链接或令牌>` | 创建 / 加入临时房间；`--code` 自定义房间码，可加 `--pin` |
-| `dropit room enter <房间码> [--pin PIN]` | 用房间码进入房间 |
+| `dropit room new [--code 码] [--pin PIN]` | 创建临时房间；默认 6 位随机房间码，`--code` 自定义房间码，`--pin` 可单独使用 |
+| `dropit room join <链接\|房间码> [--pin PIN]` / `dropit room enter <房间码> [--pin PIN]` | 加入临时房间：接受 `/r/<房间码>` 链接、房间码，以及旧的 `/rooms/<令牌>` 链接；有 PIN 的房间要加 `--pin` |
 | `dropit --space <id或名称> ls` | 指定并记住空间 |
 
 `watch --exec` 的程序从 stdin 接收条目正文，并获得 `DROPIT_ITEM_ID`、`DROPIT_ITEM_KIND`、`DROPIT_ITEM_FILENAME`、`DROPIT_ITEM_MIME`、`DROPIT_ITEM_SIZE`、`DROPIT_ITEM_SPACE`、`DROPIT_ITEM_TEXT` 环境变量；不经过 shell。

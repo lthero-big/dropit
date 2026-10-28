@@ -22,7 +22,7 @@ export type Command =
   | { kind: 'watch'; exec?: string[] }
   | { kind: 'room-new'; code?: string; pin?: string }
   | { kind: 'room-enter'; code: string; pin?: string }
-  | { kind: 'room-join'; target: string };
+  | { kind: 'room-join'; target: string; pin?: string };
 
 export interface Parsed {
   globals: Globals;
@@ -166,10 +166,9 @@ export function parseArgs(argv: string[]): Parsed {
       return { globals, command: { kind: 'watch', exec } };
     case 'room': {
       const action = positionals[1];
-      extra(action === 'new' ? ['code', 'pin'] : action === 'enter' ? ['pin'] : []);
+      extra(action === 'new' ? ['code', 'pin'] : action === 'enter' || action === 'join' ? ['pin'] : []);
       if (action === 'new') {
         if (positionals.length > 2) throw new CliError('USAGE', 'room new 不接受其他参数', 2);
-        if (flags.has('pin') && !flags.has('code')) throw new CliError('USAGE', '--pin 需要和 --code 一起使用', 2);
         return { globals, command: { kind: 'room-new', code: flags.get('code'), pin: flags.get('pin') } };
       }
       if (action === 'enter') {
@@ -182,7 +181,7 @@ export function parseArgs(argv: string[]): Parsed {
         const target = positionals[2];
         if (!target) throw new CliError('USAGE', '缺少房间链接', 2);
         if (positionals.length > 3) throw new CliError('USAGE', 'room join 只接受一个链接', 2);
-        return { globals, command: { kind: 'room-join', target } };
+        return { globals, command: { kind: 'room-join', target, pin: flags.get('pin') } };
       }
       throw new CliError('USAGE', 'room 的子命令是 new、join 或 enter', 2);
     }
@@ -204,14 +203,14 @@ export const usageText = `dropit — 云剪贴板命令行
   dropit rm <id|latest>
   dropit share <id|latest> --expires <1h|1d|7d|never> [--max-views <次数>]
   dropit watch [--exec [--] <命令> [参数...]]
-  dropit room new [--code <房间码> [--pin <PIN>]]
-  dropit room join <链接或令牌>
+  dropit room new [--code <房间码>] [--pin <PIN>]
+  dropit room join <链接|房间码|令牌> [--pin <PIN>]
   dropit room enter <房间码> [--pin <PIN>]
 
 全局选项
   --url <url>            服务地址，优先于 DROPIT_URL 与配置文件
   --space <id|名称>      这次使用该空间，并记住为默认目标
-  --room <链接或令牌>    这次使用该临时房间，并记住为默认目标
+  --room <链接|房间码>   这次使用该临时房间，并记住为默认目标（有 PIN 的房间先用 room enter）
   --json                 成功时向 stdout 输出 JSON；错误 JSON 写到 stderr
   -h, --help
 
