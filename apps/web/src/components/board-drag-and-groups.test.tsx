@@ -1,5 +1,5 @@
-// RHEA-190 step 7: paper-style polish — no text selection on the board chrome,
-// drag-a-card-onto-a-group targets, one-tap tag removal and the group dropdown.
+// Paper-style board polish: no text selection on the board chrome, drag-a-card-onto-a-group
+// targets, one-tap tag removal and the group dropdown.
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -179,7 +179,7 @@ describe('drag a card onto a group chip', () => {
   })
 })
 
-describe('stable group hit zones (RHEA-190 step 8)', () => {
+describe('stable group hit zones', () => {
   const zones = [
     ['工作', { left: 100, right: 160, top: 10, bottom: 38 }],
     ['个人', { left: 166, right: 226, top: 10, bottom: 38 }],

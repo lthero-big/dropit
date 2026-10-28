@@ -1,4 +1,4 @@
-// Phase-3 UI acceptance: admin limit editing and the clip action capsule.
+// UI acceptance: admin limit editing, the clip action capsule and its motion.
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App.tsx'

@@ -1,4 +1,4 @@
-// Path-boundary checks for AC-M5. The server suite covers token and device-code abuse.
+// Path-boundary checks for AC-M5 (download destination, resume, symlinks). The server suite covers token and device-code abuse.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { constants } from 'node:fs';
