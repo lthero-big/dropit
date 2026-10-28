@@ -175,7 +175,7 @@ All paths here require an enabled admin, otherwise 401/403.
 | GET | `/site` | Public. `{origin: string \| null, source: 'admin' \| 'env' \| 'request', requestOrigin}`: the pinned site address (APP_ORIGIN) if any and this request's own origin; the login page uses it to explain mismatches. |
 | GET | `/admin/site` | Admin browser session. Site address view: `origin`, `source`, `adminOrigin`, `envOrigin`, `requestOrigin`, `effectiveOrigin`, `production`, `secureCookies`, `trustProxy`, `updatedAt`, `updatedBy`, `callbacks: [{provider, label, url}]`. |
 | PUT | `/admin/site` | `{origin: string \| null, confirm?: boolean}`; `null`/`""` clears the admin value (falls back to env `APP_ORIGIN`, then the request origin). Admin browser session + Origin required. Not a bare origin → `400 INVALID_ORIGIN`; differs from the caller's Origin without `confirm: true` → `409 ORIGIN_CONFIRM_REQUIRED {origin, current}`. Applies immediately. `ORIGIN_REJECTED` errors carry `{expected, received, source}` next to `code`. |
-| GET | `/admin/invites` | `{invites: [Invite]}` (no secret token); every invitation, including personal ones, with `status` (`active`/`used`/`expired`/`revoked`), `createdByEmail`, `joinSpace` |
+| GET | `/admin/invites` | `{invites: [Invite]}` (no secret token); every invitation, including personal ones, with `status` (`open`/`used`/`expired`/`revoked`), `createdByEmail`, `joinSpace` |
 | POST | `/admin/invites` | `{spaceId, maxUses?: 1, expiresInHours?: 24}` → 201, `Invite & {token,url}`. Uses: 1–100; expiry: 1–720 hours. Admin must belong to target space. |
 | DELETE | `/admin/invites/:id` | 204; immediate revocation |
 
