@@ -1,6 +1,21 @@
 services:
   dropit:
-    build: .
+    # Prebuilt image from Docker Hub. Upgrade with: docker compose pull && docker compose up -d
+    image: ${DROPIT_IMAGE:-lthero1/dropit:latest}
+    # Building from source still works and tags the result with the same name:
+    #   DROPIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
+    # (or ./scripts/update.sh --docker, which does git pull + rebuild + restart).
+    build:
+      context: .
+      args:
+        DROPIT_VERSION: ${DROPIT_VERSION:-}
+        DROPIT_COMMIT: ${DROPIT_COMMIT:-}
+        DROPIT_BUILD_DATE: ${DROPIT_BUILD_DATE:-}
+        DROPIT_INSTALL: docker-build
+    restart: unless-stopped
+    labels:
+      # Only containers with this label are touched by the optional watchtower service below.
+      com.centurylinklabs.watchtower.enable: "true"
     ports:
       # Loopback only. On a private LAN host, bind that address instead
       # (for example "192.168.1.152:8787:8787"). Do not publish 0.0.0.0.
@@ -35,8 +50,24 @@ services:
       RATE_UPLOAD: ${RATE_UPLOAD:-30}
       RATE_ROOM: ${RATE_ROOM:-10}
       TRUST_PROXY: ${TRUST_PROXY:-}
+      # Update check (admin → 更新). Set UPDATE_CHECK=false on offline hosts.
+      UPDATE_CHECK: ${UPDATE_CHECK:-true}
+      UPDATE_CHECK_HOURS: ${UPDATE_CHECK_HOURS:-12}
     volumes:
       - dropit-data:/data
+
+  # Optional automatic updates, off by default. Start with:
+  #   docker compose --profile autoupdate up -d
+  # Watches only containers labelled com.centurylinklabs.watchtower.enable=true (dropit above)
+  # and pulls lthero1/dropit:latest every 12 hours. nickfedor/watchtower is the maintained
+  # fork; the original containrrr/watchtower is archived and fails on Docker 29+.
+  watchtower:
+    image: nickfedor/watchtower:latest
+    profiles: ["autoupdate"]
+    restart: unless-stopped
+    command: --label-enable --cleanup --interval 43200
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   dropit-data:

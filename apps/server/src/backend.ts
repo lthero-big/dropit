@@ -10,13 +10,15 @@ import { loadConfig, type Config } from './config.js';
 import { ApiError, hash, parseDevice, token, type AccessToken, type BrowserSession, type Item, type ItemDevice, type ItemMeta, type Session, type TokenScope } from './domain.js';
 import { parseByteRange, sniffMedia } from './media.js';
 import { SqliteRepository, type Repository } from './repository.js';
-import { DiskFileStorage, type FileStorage } from './files.js';
+import { DiskFileStorage, jsonFileStore, readJsonFile, type FileStorage } from './files.js';
 import { MemoryBroadcaster, type Broadcaster } from './events.js';
 import { checkOAuthCredentials, createOAuthProvider, envOAuthApps, isSupportedProvider, providerInfo, supportedProviders, type OAuthProvider } from './oauth.js';
 import { ClipboardService } from './service.js';
 import { clientIpResolver, RateLimiter } from './rate-limit.js';
 import { limitRanges, RuntimeLimits } from './limits.js';
 import { describeAgent } from './agent.js';
+import { loadUpdateSettings, UpdateChecker } from './update-check.js';
+import { buildInfoPath, loadBuildInfo } from './version.js';
 
 type Env = { Variables: { session: Session | undefined; ip: string } };
 type Ctx = Context<Env>;
@@ -27,6 +29,7 @@ export interface BackendOptions {
   oauthEnv?: NodeJS.ProcessEnv;
   /** fetch used by OAuth adapters and the credential check (tests inject a mock). */
   oauthFetch?: typeof fetch;
+  update?: UpdateChecker;
 }
 
 async function json(c: Ctx, limit: number): Promise<Record<string, unknown>> {
@@ -139,6 +142,8 @@ export function createBackend(options: BackendOptions = {}) {
   };
   const callbackUrl = (provider: string) => `${config.origin}/api/auth/${provider}/callback`;
   const service = new ClipboardService(config, repo, files, events, now);
+  const update = options.update ?? new UpdateChecker(loadBuildInfo(process.env, readJsonFile(buildInfoPath)), loadUpdateSettings(),
+    { cache: jsonFileStore(join(config.dataDir, 'update-check.json')) });
   const app = new Hono<Env>();
   const limiter = new RateLimiter(config.rateWindowMs);
   const resolveIp = clientIpResolver(config);
@@ -209,6 +214,16 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND' } }, 404));
   app.get('/healthz', c => c.json({ status: 'ok' }));
+  app.get('/api/version', c => c.json(update.build));
+  app.get('/api/admin/update', c => {
+    service.admin(c.get('session'));
+    return c.json(update.report());
+  });
+  app.post('/api/admin/update/check', async c => {
+    service.admin(c.get('session'));
+    await update.checkNow();
+    return c.json(update.report());
+  });
   app.get('/api/auth/providers', c => c.json({ providers: Object.keys(activeProviders()) }));
   const browserSession = (c: Ctx) => {
     const auth = service.requireSession(c.get('session'));
@@ -853,7 +868,13 @@ export function createBackend(options: BackendOptions = {}) {
     const seen = new Map<string, ItemDevice>();
     for (const peer of peersBySpace.get(spaceId)?.values() ?? []) if (!seen.has(peer.id)) seen.set(peer.id, peer);
     const devices = events.count(spaceId);
-    return seen.size ? { type: 'presence', devices, peers: [...seen.values()] } : { type: 'presence', devices };
+    if (!seen.size) return { type: 'presence', devices };
+    // `devices` counts sockets (two tabs of one browser = 2). Sockets that never named a
+    // device (CLI, API, old clients) are reported as `others`, so the UI can count unique
+    // devices instead of connections (RHEA-190 m12).
+    const others = Math.max(0, devices - (peersBySpace.get(spaceId)?.size ?? 0));
+    const peers = [...seen.values()];
+    return others ? { type: 'presence', devices, peers, others } : { type: 'presence', devices, peers };
   };
   for (const base of ['/api/spaces/:space', '/api/rooms/:room']) {
     app.get(`${base}/ws`, c => {
@@ -926,7 +947,7 @@ export function createBackend(options: BackendOptions = {}) {
   const alive = new WeakSet<object>();
   wss.on('connection', ws => { alive.add(ws); ws.on('pong', () => alive.add(ws)); });
   return {
-    app, repo, files, events, service, config, websocket: { server: wss },
+    app, repo, files, events, service, config, update, websocket: { server: wss },
     async startMaintenance() {
       await service.cleanup();
       timer = setInterval(() => { void service.cleanup().catch(() => console.error('Cleanup failed; will retry')); }, config.cleanupMs).unref();
@@ -937,9 +958,11 @@ export function createBackend(options: BackendOptions = {}) {
           else { alive.delete(ws); ws.ping(); }
         }
       }, 30000).unref();
+      update.start();
     },
     async close() {
       clearInterval(timer); clearInterval(validation); clearInterval(heartbeat);
+      update.stop();
       events.close();
       for (const ws of wss.clients) ws.terminate();
       wss.close();

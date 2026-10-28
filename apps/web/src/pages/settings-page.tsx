@@ -6,6 +6,7 @@ import { DeviceSessions } from '@/components/device-sessions.tsx'
 import { LoginMethods } from '@/components/login-methods.tsx'
 import { OAuthSettings } from '@/components/oauth-settings.tsx'
 import { PageTitle, Shell } from '@/components/shell.tsx'
+import { UpdateNotice } from '@/components/update-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText } from '@/lib/api.ts'
 import { copyText, formatWhen, useClock } from '@/lib/format.ts'
@@ -188,6 +189,7 @@ export function SettingsPage() {
   return (
     <Shell>
       <PageTitle title="设置" sub="管理登录方式和登录设备，确认设备码，或手动创建个人访问令牌。明文只显示一次。" />
+      {me.user.role === 'admin' ? <UpdateNotice /> : null}
       <LoginMethods />
       {me.user.role === 'admin' ? <OAuthSettings /> : null}
       <section id="devices" className="mb-8 scroll-mt-20">
