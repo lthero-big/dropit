@@ -206,3 +206,10 @@ ALTER TABLE invites ADD COLUMN joinSpace INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE invites ADD COLUMN createdAt INTEGER;
 PRAGMA user_version=15;
 `;
+
+// RHEA-190 auth step 4: the room code IS the room link (/r/<code>). Every room that has no code yet
+// (rooms created before step 3) is given a unique random one by migrateRoomCodes in the repository;
+// step-3 rooms keep the code they already had (random 5 characters or custom) and their PIN.
+export const migration16 = `
+PRAGMA user_version=16;
+`;

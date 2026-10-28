@@ -43,30 +43,30 @@ async function setup(overrides: Partial<Config> = {}) {
     async close() { await backend.close(); await rm(dir, { recursive: true, force: true }); } };
 }
 
-test('random room codes are 5 characters without look-alikes and room / share links are 6 characters', async t => {
+test('random room codes are 6 characters without look-alikes, the link is /r/<code> and share links are 6 characters', async t => {
   const f = await setup({ rateRoom: 100 });
   t.after(() => f.close());
   for (let i = 0; i < 200; i++) {
     const code = randomRoomCode();
-    assert.equal(code.length, 5);
+    assert.equal(code.length, 6);
     for (const char of code) assert.ok(ROOM_CODE_ALPHABET.includes(char));
   }
-  for (const bad of ['0', 'O', 'l', 'I', '1']) assert.ok(!ROOM_CODE_ALPHABET.includes(bad), bad);
+  for (const bad of ['0', 'O', 'o', 'l', 'I', '1']) assert.ok(!ROOM_CODE_ALPHABET.includes(bad), bad);
   const room = await (await f.request('/api/rooms', { method: 'POST' })).json();
-  assert.match(room.token, /^[A-Za-z0-9]{6}$/);
-  assert.match(room.code, /^[^0O1Il]{5}$/);
+  // step 4: the client gets an access token for the room API, and ONE code that is also the link
+  assert.match(room.token, /^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
+  assert.match(room.code, /^[^0O1Il]{6}$/);
   assert.equal(room.hasPin, false);
-  assert.ok(room.url.endsWith(`/r/${room.token}`));
-  // the room link is case-sensitive
-  const swapped = room.token.replace(/[a-z]/i, (c: string) => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase());
-  assert.equal((await f.request(`/api/rooms/${room.token}`)).status, 200);
-  if (swapped !== room.token) assert.equal((await f.request(`/api/rooms/${swapped}`)).status, 404);
+  assert.equal(room.url, `${SITE}/r/${room.code}`);
   assert.equal((await f.request(`/api/rooms/${room.token}`)).status, 200);
   const info = await (await f.request(`/api/rooms/${room.token}`)).json();
   assert.equal(info.code, room.code);
   assert.equal(info.hasPin, false);
+  assert.equal(info.url, room.url);
+  // the code itself is not an API credential: it only works through /api/rooms/enter (PIN + rate limit)
+  assert.equal((await f.request(`/api/rooms/${room.code}`)).status, 404);
+  assert.equal((await f.request(`/api/rooms/${room.code}/items`)).status, 404);
 });
-
 test('entering a room by its random code works, is case-sensitive and does not show the PIN state wrongly', async t => {
   const f = await setup({ rateRoom: 100 });
   t.after(() => f.close());
@@ -89,19 +89,20 @@ test('entering a room by its random code works, is case-sensitive and does not s
   assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: '' } })).status, 400);
 });
 
-test('custom codes: validation, taken codes are refused, PIN needs a custom code and is checked on entry', async t => {
+test('custom codes: validation, taken codes are refused, a PIN works with random and custom codes', async t => {
   const f = await setup({ rateRoom: 100 });
   t.after(() => f.close());
   const post = (body: unknown) => f.request('/api/rooms', { method: 'POST', body });
   assert.equal(await f.errorCode(await post({ code: 'a b' })), 'INVALID_CODE');
   assert.equal(await f.errorCode(await post({ code: 'ab' })), 'INVALID_CODE');
-  assert.equal(await f.errorCode(await post({ pin: '1234' })), 'PIN_NEEDS_CODE');
+  assert.equal(await f.errorCode(await post({ code: 'x'.repeat(33) })), 'INVALID_CODE');
   assert.equal(await f.errorCode(await post({ code: 'team-red', pin: '12' })), 'INVALID_PIN');
   const created = await post({ code: 'team-red', pin: '4821' });
   assert.equal(created.status, 201);
   const room = await created.json();
   assert.equal(room.code, 'team-red');
   assert.equal(room.hasPin, true);
+  assert.equal(room.url, `${SITE}/r/team-red`);
   assert.ok(!JSON.stringify(room).includes('4821'));
   // taken, even with other letter case being a different code
   const taken = await post({ code: 'team-red' });
@@ -119,11 +120,19 @@ test('custom codes: validation, taken codes are refused, PIN needs a custom code
   const right = await enter({ code: 'team-red', pin: '4821' });
   assert.equal(right.status, 200);
   const entry = await right.json();
+  assert.equal(entry.token, room.token);
   assert.equal((await f.request(`/api/rooms/${entry.token}/items`)).status, 200);
-  // the room link itself still opens the room without the PIN
-  assert.equal((await f.request(`/api/rooms/${room.token}/items`)).status, 200);
+  // the link is the code, so there is no way around the PIN
+  assert.equal((await f.request('/api/rooms/team-red/items')).status, 404);
+  // a PIN on a random code (step 3 needed a custom code for that)
+  const randomWithPin = await post({ pin: '2468' });
+  assert.equal(randomWithPin.status, 201);
+  const second = await randomWithPin.json();
+  assert.match(second.code, /^[^0O1Il]{6}$/);
+  assert.equal(second.hasPin, true);
+  assert.equal(await f.errorCode(await enter({ code: second.code })), 'PIN_REQUIRED');
+  assert.equal((await enter({ code: second.code, pin: '2468' })).status, 200);
 });
-
 test('wrong codes and PINs are rate limited per IP, other IPs are unaffected', async t => {
   const f = await setup({ rateRoom: 100, rateAuth: 5 });
   t.after(() => f.close());
@@ -148,15 +157,20 @@ test('wrong codes and PINs are rate limited per IP, other IPs are unaffected', a
   assert.equal((await g.request('/api/rooms/enter', { method: 'POST', body: { code: room.code } })).status, 429);
 });
 
-test('a browser changes the code and PIN of its own room; others cannot', async t => {
+test('a browser changes the code and PIN of its own room separately; others cannot', async t => {
   const f = await setup({ rateRoom: 100 });
   t.after(() => f.close());
   const key = 'k'.repeat(43);
   const room = await (await f.request('/api/rooms', { method: 'POST', body: { deviceKey: key } })).json();
-  const set = await f.request(`/api/rooms/${room.token}/code`, { method: 'PUT', body: { deviceKey: key, code: 'my-room', pin: '7777' } });
+  const put = (body: Record<string, unknown>, token = room.token) => f.request(`/api/rooms/${token}/code`, { method: 'PUT', body: { deviceKey: key, ...body } });
+  const set = await put({ code: 'my-room', pin: '7777' });
   assert.equal(set.status, 200);
-  assert.deepEqual(await set.json(), { code: 'my-room', hasPin: true });
-  // reopening from the same browser returns the room with its new code
+  assert.deepEqual(await set.json(), { code: 'my-room', hasPin: true, url: `${SITE}/r/my-room` });
+  // the old code is gone, the new one asks for the PIN
+  assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: room.code } })).status, 404);
+  assert.equal(await f.errorCode(await f.request('/api/rooms/enter', { method: 'POST', body: { code: 'my-room' } })), 'PIN_REQUIRED');
+  // the owner keeps its access token (not asked for the PIN), and so does whoever entered before
+  assert.equal((await f.request(`/api/rooms/${room.token}/items`)).status, 200);
   const again = await (await f.request('/api/rooms', { method: 'POST', body: { deviceKey: key } })).json();
   assert.equal(again.token, room.token);
   assert.equal(again.code, 'my-room');
@@ -165,18 +179,27 @@ test('a browser changes the code and PIN of its own room; others cannot', async 
   // a second browser cannot take the code
   const other = await (await f.request('/api/rooms', { method: 'POST', body: { deviceKey: 'o'.repeat(43) } })).json();
   const clash = await f.request(`/api/rooms/${other.token}/code`, { method: 'PUT', body: { deviceKey: 'o'.repeat(43), code: 'my-room' } });
+  assert.equal(clash.status, 409);
   assert.equal(await f.errorCode(clash), 'CODE_TAKEN');
-  // dropping the code gives a fresh random one and removes the PIN
-  const reset = await (await f.request(`/api/rooms/${room.token}/code`, { method: 'PUT', body: { deviceKey: key } })).json();
-  assert.match(reset.code, /^[^0O1Il]{5}$/);
-  assert.equal(reset.hasPin, false);
+  // PIN only: clear it, the code stays
+  assert.deepEqual(await (await put({ pin: null })).json(), { code: 'my-room', hasPin: false, url: `${SITE}/r/my-room` });
+  assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: 'my-room' } })).status, 200);
+  assert.equal((await put({ pin: '5555' })).status, 200);
+  // code null: a fresh random code, the PIN stays
+  const reset = await (await put({ code: null })).json();
+  assert.match(reset.code, /^[^0O1Il]{6}$/);
+  assert.equal(reset.hasPin, true);
   assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: 'my-room' } })).status, 404);
+  assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: reset.code, pin: '5555' } })).status, 200);
+  // nothing to change
+  assert.equal((await put({})).status, 400);
   // creating the room together with a code from a browser that already has one changes that room's code
   const viaPost = await f.request('/api/rooms', { method: 'POST', body: { deviceKey: key, code: 'third' } });
   assert.equal(viaPost.status, 200);
-  assert.equal((await viaPost.json()).code, 'third');
+  const third = await viaPost.json();
+  assert.equal(third.code, 'third');
+  assert.equal(third.hasPin, true);
 });
-
 test('a custom code is free again once its room expires', async t => {
   const f = await setup({ rateRoom: 100 });
   t.after(() => f.close());

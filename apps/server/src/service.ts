@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { Config } from './config.js';
-import { ApiError, MAX_GROUPS, cleanFilename, cleanGroupName, hash, isShortToken, publicItem, publicShareItem, randomRoomCode, shortToken, shortTokenFrom, token, type Invite, type Item, type ItemMeta, type Session, type SharePublic, type Space } from './domain.js';
+import { ApiError, LEGACY_ROOM_TOKEN, MAX_GROUPS, cleanFilename, cleanGroupName, hash, isShortToken, publicItem, publicShareItem, randomRoomCode, shortToken, shortTokenFrom, token, type Invite, type Item, type ItemMeta, type Session, type SharePublic, type Space } from './domain.js';
 import type { FileStorage } from './files.js';
 import type { Broadcaster } from './events.js';
 import type { Repository } from './repository.js';
@@ -31,71 +31,89 @@ export class ClipboardService {
     if (!space || space.roomHash || !this.repo.isMember(id, auth.user.id)) throw new ApiError(404, 'NOT_FOUND');
     return space;
   }
+  /**
+   * RHEA-190 auth step 4: the room API takes a room access token, never the code itself (the code is typed
+   * and guessable, so it only works through POST /api/rooms/enter, which checks the PIN and is rate limited).
+   * Access tokens are the entry token `<space id>.<proof>` handed out by create / enter, or a 43-character room
+   * link from before step 3.
+   */
   room(roomToken: string) {
     const entry = entryParts(roomToken);
+    if (!entry && !LEGACY_ROOM_TOKEN.test(roomToken)) throw new ApiError(404, 'NOT_FOUND');
     const space = entry ? this.repo.roomById(entry.spaceId, this.now()) : this.repo.room(hash(roomToken), this.now());
     if (!space || (entry && !space.roomHash)) throw new ApiError(404, 'NOT_FOUND');
     if (entry && entryToken(space) !== roomToken) throw new ApiError(404, 'NOT_FOUND');
     return space;
   }
   /**
-   * Entering by code (and PIN, checked by the caller) hands out an entry token for the room. The server only
-   * stores the hash of the room link, so the entry token is derived from it instead: `<space id>.<proof>`.
-   * It is accepted wherever the room link is, and keeps working when the code or PIN is changed later.
+   * What a client gets for a room it may use: the access token for the room API, and the room code, which is
+   * also the link (/r/<code>). The server only stores the hash of the room's secret, so the access token is
+   * derived from it: `<space id>.<proof>`. It keeps working when the code or the PIN is changed later, so
+   * whoever is already in the room (the owner, anyone who entered before) is not asked again.
    */
-  enterRoomByCode(space: Space) {
-    return { token: entryToken(space), expiresAt: space.expiresAt as number, ...roomCodeInfo(space) };
+  roomView(space: Space, origin = this.config.origin) {
+    return { token: entryToken(space), expiresAt: space.expiresAt as number, url: roomUrl(origin, space), ...roomCodeInfo(space) };
   }
+  /** Entering by code (and PIN, checked by the caller). */
+  enterRoomByCode(space: Space, origin = this.config.origin) { return this.roomView(space, origin); }
   /**
    * RHEA-190 step 7: the live temporary room already bound to this browser's
-   * secret room key. Its token is re-derived from the key (the server still
-   * stores only token hashes), so only that browser can re-enter it this way.
+   * secret room key. Its secret is re-derived from the key (the server still
+   * stores only hashes), so only that browser can re-enter it this way.
    */
   deviceRoom(deviceKey: string, origin = this.config.origin) {
     const space = this.repo.deviceRoom(deviceRoomHash(deviceKey), this.now());
     if (!space) return null;
-    const roomToken = deviceRoomTokens(deviceKey, space.id).find(candidate => space.roomHash === hash(candidate));
-    if (!roomToken) return null;
-    return { token: roomToken, expiresAt: space.expiresAt as number, url: `${origin}/r/${roomToken}`, reused: true, ...roomCodeInfo(space) };
+    if (!deviceRoomTokens(deviceKey, space.id).some(candidate => space.roomHash === hash(candidate))) return null;
+    return { ...this.roomView(space, origin), reused: true };
   }
   /**
    * A new temporary room; with a browser room key it replaces nothing live (callers check deviceRoom first)
-   * and is bound to that browser. The room link is 6 characters; the room code is the random 5-character
-   * one, or the custom code the caller chose (refused with CODE_TAKEN when a live room already has it).
+   * and is bound to that browser. Its code is a random 6-character one, or the custom code the caller chose
+   * (refused with CODE_TAKEN when a live room already has it); the PIN is optional either way.
    */
   createRoom(deviceKey?: string, origin = this.config.origin, options: { code?: string; pinHash?: string | null } = {}) {
     const id = randomUUID();
     for (let attempt = 0; attempt < 12; attempt++) {
-      const roomToken = deviceKey ? deviceRoomToken(deviceKey, id, attempt) : shortToken();
+      // the room's secret: never shown (clients get the derived access token), only its hash is stored
+      const secret = deviceKey ? legacyDeviceRoomToken(deviceKey, id, attempt) : token();
       const space: Space = { id, name: 'Temporary room', ownerId: null,
-        expiresAt: this.now() + this.config.roomRetentionMs, roomHash: hash(roomToken),
-        roomCode: options.code ?? randomRoomCode(), pinHash: options.code ? options.pinHash ?? null : null };
+        expiresAt: this.now() + this.config.roomRetentionMs, roomHash: hash(secret),
+        roomCode: options.code ?? randomRoomCode(), pinHash: options.pinHash ?? null };
       try {
         this.repo.createRoom(space, deviceKey ? deviceRoomHash(deviceKey) : null, this.now());
       } catch (error) {
         if (error instanceof ApiError && (error.code === 'TOKEN_COLLISION' || (error.code === 'CODE_TAKEN' && !options.code))) continue;
         throw error;
       }
-      return { token: roomToken, expiresAt: space.expiresAt as number, url: `${origin}/r/${roomToken}`, reused: false, ...roomCodeInfo(space) };
+      return { ...this.roomView(space, origin), reused: false };
     }
     throw new ApiError(503, 'UNAVAILABLE');
   }
-  /** Changes the code (a custom one, or a fresh random one when omitted) and pin of a live room. */
-  setRoomCode(space: Space, options: { code?: string; pinHash?: string | null }) {
+  /**
+   * Changes the code and/or PIN of a live room. code: a custom code, null for a fresh random one, undefined to
+   * keep it. pinHash: the new PIN's hash, null to remove the PIN, undefined to keep it. A new code means a new
+   * link; the old code stops working.
+   */
+  setRoomCode(space: Space, options: { code?: string | null; pinHash?: string | null }, origin = this.config.origin) {
+    const random = options.code === null || (options.code === undefined && !space.roomCode);
+    const pinHash = options.pinHash === undefined ? space.pinHash ?? null : options.pinHash;
     for (let attempt = 0; attempt < 12; attempt++) {
-      const code = options.code ?? randomRoomCode();
-      const pinHash = options.code ? options.pinHash ?? null : null;
+      const code = random ? randomRoomCode() : (options.code ?? space.roomCode)!;
       try {
         this.repo.setRoomCode(space.id, code, pinHash, this.now());
       } catch (error) {
-        if (error instanceof ApiError && error.code === 'CODE_TAKEN' && !options.code) continue;
+        if (error instanceof ApiError && error.code === 'CODE_TAKEN' && random) continue;
         throw error;
       }
-      return { code, hasPin: pinHash !== null };
+      return { code, hasPin: pinHash !== null, url: roomUrl(origin, { roomCode: code }) };
     }
     throw new ApiError(503, 'UNAVAILABLE');
   }
-  roomByCode(code: string) { return this.repo.roomByCode(code, this.now()); }
+  /** The room behind a code, or behind a 6-character room link from step 3 (those links now redirect to the code). */
+  roomByCode(code: string) {
+    return this.repo.roomByCode(code, this.now()) ?? (isShortToken(code) ? this.repo.room(hash(code), this.now()) : undefined);
+  }
   private canManage(space: Space, authorId: string | null, session: Session | undefined) {
     if (space.roomHash) return;
     if (!session) throw new ApiError(401, 'UNAUTHENTICATED');
@@ -383,12 +401,14 @@ export class ClipboardService {
 /** A browser's secret room key (random, kept in its localStorage) → the binding stored on its room. */
 export const deviceRoomHash = (deviceKey: string) => hash(`room-device:${deviceKey}`);
 /** Rooms created before step 3 used the full 43-character digest as their link. */
-const legacyDeviceRoomToken = (deviceKey: string, spaceId: string) => createHash('sha256').update(`room-token:${deviceKey}:${spaceId}`).digest('base64url');
-/** 6-character room link derived from the browser's key; attempt > 0 only when an earlier derivation collided with another room. */
-export const deviceRoomToken = (deviceKey: string, spaceId: string, attempt = 0) =>
+const legacyDeviceRoomToken = (deviceKey: string, spaceId: string, attempt = 0) =>
+  createHash('sha256').update(`room-token:${deviceKey}:${spaceId}${attempt ? `:${attempt}` : ''}`).digest('base64url');
+/** Step 3 derived a 6-character room link from the browser's key; attempt > 0 only when an earlier derivation collided. */
+const stepThreeDeviceRoomToken = (deviceKey: string, spaceId: string, attempt = 0) =>
   shortTokenFrom(createHash('sha256').update(`room-token:${deviceKey}:${spaceId}${attempt ? `:${attempt}` : ''}`).digest());
 const deviceRoomTokens = (deviceKey: string, spaceId: string) =>
-  [legacyDeviceRoomToken(deviceKey, spaceId), ...Array.from({ length: 12 }, (_, attempt) => deviceRoomToken(deviceKey, spaceId, attempt))];
+  [...Array.from({ length: 12 }, (_, attempt) => legacyDeviceRoomToken(deviceKey, spaceId, attempt)),
+    ...Array.from({ length: 12 }, (_, attempt) => stepThreeDeviceRoomToken(deviceKey, spaceId, attempt))];
 const entryProof = (space: Space) => createHash('sha256').update(`room-entry:${space.id}:${space.roomHash}`).digest('base64url');
 const entryToken = (space: Space) => `${space.id}.${entryProof(space)}`;
 const entryParts = (raw: string) => {
@@ -396,6 +416,8 @@ const entryParts = (raw: string) => {
   return match ? { spaceId: match[1] } : null;
 };
 export const roomCodeInfo = (space: Space) => ({ code: space.roomCode ?? null, hasPin: Boolean(space.pinHash) });
+/** The room link is the code: /r/<code>. */
+export const roomUrl = (origin: string, space: Pick<Space, 'roomCode'>) => `${origin}/r/${encodeURIComponent(space.roomCode ?? '')}`;
 
 export interface UserInviteSettings { enabled: boolean; defaultLimit: number }
 export const inviteStatus = (invite: { uses: number; maxUses: number; revoked: number; expiresAt: number }, now: number) =>

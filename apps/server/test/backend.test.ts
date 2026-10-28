@@ -345,7 +345,7 @@ test('D3/E: temporary room capability, uniform unknown responses, strict limits 
   const response = await f.request('/api/rooms', { method: 'POST' });
   assert.equal(response.status, 201);
   const room = await response.json();
-  assert.match(room.token, /^[A-Za-z0-9]{6}$/);
+  assert.match(room.token, /^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
   const base = `/api/rooms/${room.token}`;
   assert.equal((await f.request('/api/rooms')).status, 404);
   assert.equal((await f.request('/api/rooms/guess/items')).status, 404);
@@ -1407,7 +1407,7 @@ test('RHEA-190 step 7: one live temporary room per browser key', async t => {
   assert.equal(first.status, 201);
   const room = await first.json();
   assert.equal(room.reused, false);
-  assert.match(room.token, /^[A-Za-z0-9]{6}$/);
+  assert.match(room.token, /^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
   // clicking 临时房间 again from the same browser re-enters the same live room,
   // and doing so does not spend the room-create rate limit
   for (let i = 0; i < 5; i++) {
@@ -1460,5 +1460,5 @@ test('RHEA-190 step 7: migration 10 adds the per-browser room binding to old dat
   assert.equal(repo.deviceRoom('dh', 9999999999999), undefined);
   const check = new Database(path, { readonly: true });
   t.after(() => check.close());
-  assert.equal(check.pragma('user_version', { simple: true }), 15);
+  assert.equal(check.pragma('user_version', { simple: true }), 16);
 });

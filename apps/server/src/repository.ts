@@ -2,8 +2,8 @@ import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ApiError, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14, migration15 } from './migrations.js';
+import { ApiError, randomRoomCode, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14, migration15, migration16 } from './migrations.js';
 import type { RegistrationPolicy } from './password.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
@@ -168,8 +168,8 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 15) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 15) this.db.transaction(() => {
+    if (version > 16) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 16) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
@@ -184,7 +184,9 @@ export class SqliteRepository implements Repository {
       if (version < 12) this.db.exec(migration12);
       if (version < 13) this.db.exec(migration13);
       if (version < 14) this.db.exec(migration14);
-      this.db.exec(migration15);
+      if (version < 15) this.db.exec(migration15);
+      migrateRoomCodes(this.db);
+      this.db.exec(migration16);
     })();
   }
   setting(key: string) {
@@ -907,4 +909,24 @@ export class SqliteRepository implements Repository {
     return new Set((this.db.prepare('SELECT fileKey AS key FROM items WHERE fileKey IS NOT NULL UNION SELECT thumbnailKey AS key FROM items WHERE thumbnailKey IS NOT NULL UNION SELECT key FROM upload_chunks').all() as { key: string }[]).map(r => r.key));
   }
   close() { this.db.close(); }
+}
+
+/**
+ * RHEA-190 auth step 4 (migration 16): every room without a code gets a unique random one, so that old
+ * rooms open at /r/<code> too. Their old links keep working and are redirected to the code by the clients.
+ */
+export function migrateRoomCodes(db: Database.Database, random: () => string = randomRoomCode) {
+  const rooms = db.prepare('SELECT id FROM spaces WHERE roomHash IS NOT NULL AND roomCode IS NULL').all() as { id: string }[];
+  const taken = db.prepare('SELECT 1 FROM spaces WHERE roomCode=?');
+  const assign = db.prepare('UPDATE spaces SET roomCode=? WHERE id=?');
+  for (const room of rooms) {
+    for (let attempt = 0; ; attempt++) {
+      if (attempt >= 100) throw new Error('could not assign a unique room code');
+      const code = random();
+      if (taken.get(code)) continue;
+      assign.run(code, room.id);
+      break;
+    }
+  }
+  return rooms.length;
 }

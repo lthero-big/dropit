@@ -6,7 +6,7 @@ export class ApiError extends Error {
 }
 export const token = () => randomBytes(32).toString('base64url');
 const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
-/** RHEA-190 auth step 3: share links and room links are 6 case-sensitive base62 characters (older 43-character links keep working). */
+/** RHEA-190 auth step 3: share links are 6 case-sensitive base62 characters (older 43-character links keep working). Step 3 room links used them too. */
 export const SHORT_TOKEN_LENGTH = 6;
 export const shortToken = () => Array.from({ length: SHORT_TOKEN_LENGTH }, () => BASE62[randomInt(BASE62.length)]).join('');
 export const isShortToken = (value: string) => /^[A-Za-z0-9]{6}$/.test(value);
@@ -17,12 +17,17 @@ export const shortTokenFrom = (digest: Buffer) => {
   for (let i = 0; i < SHORT_TOKEN_LENGTH; i++) { out += BASE62[Number(n % 62n)]; n /= 62n; }
   return out;
 };
-/** Random room codes: 5 case-sensitive characters without the look-alikes 0 O o 1 I l. */
+/**
+ * RHEA-190 auth step 4: a room has ONE code and its link is /r/<code>. Random codes are 6 case-sensitive
+ * characters without the look-alikes 0 O o 1 I l; owners may pick a custom code instead (CUSTOM_CODE_PATTERN).
+ */
 export const ROOM_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz';
-export const RANDOM_ROOM_CODE_LENGTH = 5;
+export const RANDOM_ROOM_CODE_LENGTH = 6;
 export const randomRoomCode = () => Array.from({ length: RANDOM_ROOM_CODE_LENGTH }, () => ROOM_CODE_ALPHABET[randomInt(ROOM_CODE_ALPHABET.length)]).join('');
 /** A code somebody typed: case-sensitive letters, digits, '-' and '_'. */
 export const CUSTOM_CODE_PATTERN = /^[A-Za-z0-9_-]{3,32}$/;
+/** Room links handed out before step 3 (and the internal room secret since step 4): 43 base64url characters. */
+export const LEGACY_ROOM_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 export const PIN_MIN = 4;
 export const PIN_MAX = 32;
 export const hash = (value: string) => createHash('sha256').update(value).digest('base64url');

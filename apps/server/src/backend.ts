@@ -13,7 +13,7 @@ import { SqliteRepository, type Repository } from './repository.js';
 import { DiskFileStorage, jsonFileStore, readJsonFile, type FileStorage } from './files.js';
 import { MemoryBroadcaster, type Broadcaster } from './events.js';
 import { checkOAuthCredentials, createOAuthProvider, envOAuthApps, isSupportedProvider, providerInfo, supportedProviders, type OAuthProvider } from './oauth.js';
-import { ClipboardService, deviceRoomHash, inviteStatus, roomCodeInfo } from './service.js';
+import { ClipboardService, deviceRoomHash, inviteStatus, roomCodeInfo, roomUrl } from './service.js';
 import { clientIpResolver, RateLimiter } from './rate-limit.js';
 import { limitRanges, RuntimeLimits } from './limits.js';
 import { describeAgent } from './agent.js';
@@ -895,15 +895,21 @@ export function createBackend(options: BackendOptions = {}) {
     if (length < PIN_MIN || length > PIN_MAX || [...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) throw new ApiError(400, 'INVALID_PIN');
     return value;
   };
-  // code / pin as typed by a client: an absent code means "random", a pin needs a custom code.
-  const roomCodeOptions = async (body: Record<string, unknown>) => {
-    const has = (value: unknown) => value !== undefined && value !== null && value !== '';
-    if (!has(body.code)) {
-      if (has(body.pin)) throw new ApiError(400, 'PIN_NEEDS_CODE');
-      return {};
-    }
-    const code = roomCodeInput(body.code);
-    return { code, pinHash: has(body.pin) ? await hashPassword(pinInput(body.pin)) : null };
+  // RHEA-190 auth step 4: code and PIN are independent and both optional. On create: no code = random 6
+  // characters, a code = that custom code; a PIN (random or custom code) is hashed with scrypt.
+  // On change (PUT): code absent = keep, null/'' = a fresh random code, string = custom; pin absent = keep,
+  // null/'' = remove the PIN, string = set it.
+  const has = (value: unknown) => value !== undefined && value !== null && value !== '';
+  const roomCodeOptions = async (body: Record<string, unknown>) => ({
+    ...(has(body.code) ? { code: roomCodeInput(body.code) } : {}),
+    ...(has(body.pin) ? { pinHash: await hashPassword(pinInput(body.pin)) } : {}),
+  });
+  const roomCodeChange = async (body: Record<string, unknown>) => {
+    if (!('code' in body) && !('pin' in body)) throw new ApiError(400, 'INVALID_INPUT');
+    const options: { code?: string | null; pinHash?: string | null } = {};
+    if ('code' in body) options.code = has(body.code) ? roomCodeInput(body.code) : null;
+    if ('pin' in body) options.pinHash = has(body.pin) ? await hashPassword(pinInput(body.pin)) : null;
+    return options;
   };
   const deviceKeyInput = (value: unknown) => {
     if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(value)) throw new ApiError(400, 'INVALID_INPUT');
@@ -923,9 +929,9 @@ export function createBackend(options: BackendOptions = {}) {
     if (options.code) guessBlocked(c);
     const existing = deviceKey ? service.deviceRoom(deviceKey, originFor(c)) : null;
     if (existing) {
-      if (!options.code) return c.json(existing, 200);
+      if (!options.code && !options.pinHash) return c.json(existing, 200);
       const space = service.room(existing.token);
-      try { service.setRoomCode(space, options); }
+      try { service.setRoomCode(space, options, originFor(c)); }
       catch (error) { if (error instanceof ApiError && error.code === 'CODE_TAKEN') guessFailed(c); throw error; }
       return c.json(service.deviceRoom(deviceKey!, originFor(c)), 200);
     }
@@ -933,7 +939,9 @@ export function createBackend(options: BackendOptions = {}) {
     try { return c.json(service.createRoom(deviceKey, originFor(c), options), 201); }
     catch (error) { if (error instanceof ApiError && error.code === 'CODE_TAKEN') guessFailed(c); throw error; }
   });
-  // Enter a room by its code (and PIN when it has one) without signing in.
+  // Enter a room by its code (and PIN when it has one) without signing in. Opening the link /r/<code> does
+  // exactly this, so a PIN protects the link too. A 6-character room link from step 3 is accepted as well
+  // (the answer carries the room's current code, which clients then show / redirect to).
   app.post('/api/rooms/enter', async c => {
     const body = await json(c, 2048);
     const code = typeof body.code === 'string' && body.code.length <= 64 ? body.code.trim() : '';
@@ -947,7 +955,7 @@ export function createBackend(options: BackendOptions = {}) {
       if (!pin) throw new ApiError(401, 'PIN_REQUIRED');
       if (!await verifyPassword(pin, space.pinHash)) { guessFailed(c, codeKey); throw new ApiError(403, 'PIN_INVALID'); }
     }
-    return c.json(service.enterRoomByCode(space));
+    return c.json(service.enterRoomByCode(space, originFor(c)));
   });
   // The browser that owns a temporary room (it proves it with its secret room key) can change the room's code and PIN.
   app.put('/api/rooms/:room/code', async c => {
@@ -957,8 +965,8 @@ export function createBackend(options: BackendOptions = {}) {
     const space = service.room(c.req.param('room'));
     if (!space.deviceHash || space.deviceHash !== deviceRoomHash(deviceKey)) throw new ApiError(403, 'FORBIDDEN');
     guessBlocked(c);
-    const options = await roomCodeOptions(body);
-    try { return c.json(service.setRoomCode(space, options)); }
+    const options = await roomCodeChange(body);
+    try { return c.json(service.setRoomCode(space, options, originFor(c))); }
     catch (error) { if (error instanceof ApiError && error.code === 'CODE_TAKEN') guessFailed(c); throw error; }
   });
   const shareLimit = (c: Ctx, raw: string) => {
@@ -1108,7 +1116,8 @@ export function createBackend(options: BackendOptions = {}) {
     app.get(base, c => {
       const space = scope(c);
       const session = c.get('session');
-      return c.json({ id: space.id, name: space.name, expiresAt: space.expiresAt, ...(space.roomHash ? roomCodeInfo(space) : {}),
+      return c.json({ id: space.id, name: space.name, expiresAt: space.expiresAt,
+        ...(space.roomHash ? { ...roomCodeInfo(space), url: roomUrl(originFor(c), space) } : {}),
         maxFileBytes: space.roomHash ? config.roomMaxFileBytes : config.maxFileBytes,
         quotaBytes: space.roomHash ? config.roomQuotaBytes : effectiveQuota(session!.user.id) });
     });

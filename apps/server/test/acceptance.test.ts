@@ -424,7 +424,7 @@ test('AC-D3/E1/E2: room entropy, no enumeration, uniform miss, stricter limits, 
   const created = await f.request('/api/rooms', { method: 'POST' });
   assert.equal(created.status, 201);
   const room = await created.json() as { token: string; expiresAt: number };
-  assert.match(room.token, /^[A-Za-z0-9]{6}$/);
+  assert.match(room.token, /^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/);
   assert.ok(room.expiresAt - Date.now() <= f.config.roomRetentionMs + 1000);
   assert.equal((await f.request('/api/rooms')).status, 404);
   const base = `/api/rooms/${room.token}`;
