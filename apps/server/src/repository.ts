@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ApiError, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12 } from './migrations.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13 } from './migrations.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
 type UserRow = User & { quotaBytes: number | null };
@@ -34,8 +34,13 @@ function mapItem(row: Item): Item {
   return { ...rest, pinned: stored.pinned ? 1 : 0, tags, group: groupName ?? rest.group ?? null, device };
 }
 
+export interface AppSetting { key: string; value: string; updatedAt: number; updatedBy: string | null }
+
 export interface Repository {
   limitOverrides(): LimitOverrides;
+  setting(key: string): AppSetting | undefined;
+  /** value null deletes the setting (falls back to the environment). */
+  saveSetting(key: string, value: string | null, now: number, actor: string): void;
   saveLimitChanges(changes: LimitChange[], actor: { id: string; email: string }, now: number): void;
   limitAudit(limit: number, cursor?: number): LimitAudit[];
   saveFlow(flow: Flow): void;
@@ -127,8 +132,8 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 12) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 12) this.db.transaction(() => {
+    if (version > 13) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 13) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
@@ -140,8 +145,17 @@ export class SqliteRepository implements Repository {
       if (version < 9) this.db.exec(migration9);
       if (version < 10) this.db.exec(migration10);
       if (version < 11) this.db.exec(migration11);
-      this.db.exec(migration12);
+      if (version < 12) this.db.exec(migration12);
+      this.db.exec(migration13);
     })();
+  }
+  setting(key: string) {
+    return this.db.prepare('SELECT key,value,updatedAt,updatedBy FROM app_settings WHERE key=?').get(key) as AppSetting | undefined;
+  }
+  saveSetting(key: string, value: string | null, now: number, actor: string) {
+    if (value === null) this.db.prepare('DELETE FROM app_settings WHERE key=?').run(key);
+    else this.db.prepare(`INSERT INTO app_settings (key,value,updatedAt,updatedBy) VALUES (?,?,?,?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updatedAt=excluded.updatedAt, updatedBy=excluded.updatedBy`).run(key, value, now, actor);
   }
   limitOverrides(): LimitOverrides {
     const rows = this.db.prepare('SELECT key,value FROM runtime_limits').all() as { key: LimitKey; value: number }[];

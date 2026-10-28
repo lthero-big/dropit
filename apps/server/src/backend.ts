@@ -19,8 +19,9 @@ import { limitRanges, RuntimeLimits } from './limits.js';
 import { describeAgent } from './agent.js';
 import { loadUpdateSettings, UpdateChecker } from './update-check.js';
 import { buildInfoPath, loadBuildInfo } from './version.js';
+import { ORIGIN_SETTING, parseOrigin, requestOriginResolver, sameOrigin } from './origin.js';
 
-type Env = { Variables: { session: Session | undefined; ip: string } };
+type Env = { Variables: { session: Session | undefined; ip: string; remote: string } };
 type Ctx = Context<Env>;
 export interface BackendOptions {
   config?: Config; repo?: Repository; files?: FileStorage; events?: Broadcaster;
@@ -140,16 +141,65 @@ export function createBackend(options: BackendOptions = {}) {
       result[app.provider] = createOAuthProvider(app.provider, app.credentials.clientId, app.credentials.clientSecret, oauthFetch);
     return result;
   };
-  const callbackUrl = (provider: string) => `${config.origin}/api/auth/${provider}/callback`;
   const service = new ClipboardService(config, repo, files, events, now);
   const update = options.update ?? new UpdateChecker(loadBuildInfo(process.env, readJsonFile(buildInfoPath)), loadUpdateSettings(),
     { cache: jsonFileStore(join(config.dataDir, 'update-check.json')) });
   const app = new Hono<Env>();
   const limiter = new RateLimiter(config.rateWindowMs);
   const resolveIp = clientIpResolver(config);
-  const sessionCookie = config.production ? '__Host-dropit_session' : 'dropit_session';
-  const flowCookie = config.production ? '__Secure-dropit_oauth' : 'dropit_oauth';
-  const cookie = { httpOnly: true, secure: config.production, sameSite: 'Lax' as const, path: '/' };
+  // RHEA-190 auth step 1 — site address (APP_ORIGIN): 管理 → 站点地址 > APP_ORIGIN env >
+  // each request's own origin. Without a configured address the Origin check compares the
+  // browser's Origin with the request's own scheme + Host, so a fresh docker deploy works on
+  // any address while cross-site requests are still rejected.
+  const resolveRequestOrigin = requestOriginResolver(config.trustProxy);
+  if (config.resetOrigin && repo.setting(ORIGIN_SETTING)) {
+    repo.saveSetting(ORIGIN_SETTING, null, now(), 'RESET_APP_ORIGIN');
+    console.warn('RESET_APP_ORIGIN: cleared the site address saved in 管理 → 站点地址. Remove RESET_APP_ORIGIN from the environment.');
+  }
+  const storedOrigin = repo.setting(ORIGIN_SETTING);
+  let adminOrigin = storedOrigin ? parseOrigin(storedOrigin.value) ?? '' : '';
+  if (storedOrigin && !adminOrigin) console.warn('Ignoring an invalid site address saved in 管理 → 站点地址');
+  const siteOrigin = () => adminOrigin || config.origin;
+  const originSource = () => adminOrigin ? 'admin' as const : config.origin ? 'env' as const : 'request' as const;
+  const requestOrigin = (c: Ctx) => resolveRequestOrigin({
+    url: c.req.url, remote: c.get('remote') ?? 'unknown', host: c.req.header('host'),
+    forwardedProto: c.req.header('x-forwarded-proto'), forwardedHost: c.req.header('x-forwarded-host'),
+  });
+  /** Base of absolute URLs: OAuth callback, invite / share / room links, /device. */
+  const originFor = (c: Ctx) => siteOrigin() || requestOrigin(c) || 'http://localhost';
+  const originAllowed = (c: Ctx, header: string | undefined) => {
+    if (!header) return false;
+    const pinned = siteOrigin();
+    if (pinned) return header === pinned;
+    const own = requestOrigin(c);
+    return Boolean(own && sameOrigin(header, own));
+  };
+  // The 403 carries the expected address so the page can say "change it to X" instead of a bare error.
+  const originRejected = (c: Ctx) => new ApiError(403, 'ORIGIN_REJECTED',
+    { expected: siteOrigin() || requestOrigin(c) || '', received: c.req.header('origin') ?? '', source: originSource() });
+  const callbackUrl = (c: Ctx, provider: string) => `${originFor(c)}/api/auth/${provider}/callback`;
+  const describeOrigin = () => {
+    const origin = siteOrigin();
+    if (!origin) return "not set; each request's own address is used (same-origin check). Pin it in 管理 → 站点地址 or APP_ORIGIN.";
+    return `${origin} (from ${adminOrigin ? 'the admin setting 管理 → 站点地址' : 'the APP_ORIGIN environment variable'})`;
+  };
+  const originWarnings = () => {
+    const origin = siteOrigin();
+    const warnings: string[] = [];
+    if (adminOrigin && config.origin && adminOrigin !== config.origin)
+      warnings.push(`APP_ORIGIN=${config.origin} is overridden by the admin setting ${adminOrigin}. Set RESET_APP_ORIGIN=1 once to clear the admin setting.`);
+    if (config.production && origin.startsWith('http:'))
+      warnings.push(`Site address ${origin} is plain http in production mode: session cookies are not marked Secure. Use https (a reverse proxy) when the site is reachable from the internet.`);
+    if (config.production && !origin)
+      warnings.push('Production mode without a site address: cookies are Secure only for requests that arrive over https. Behind an https reverse proxy set APP_ORIGIN (or 管理 → 站点地址) or TRUST_PROXY so OAuth callbacks use https.');
+    return warnings;
+  };
+  // Production keeps __Host- / Secure cookies whenever the site is served over https. A plain
+  // http deploy still gets a working (non-Secure) cookie instead of a login that silently fails.
+  const secureFor = (c: Ctx) => config.production && originFor(c).startsWith('https:');
+  const sessionCookieName = (c: Ctx) => secureFor(c) ? '__Host-dropit_session' : 'dropit_session';
+  const flowCookieName = (c: Ctx) => secureFor(c) ? '__Secure-dropit_oauth' : 'dropit_oauth';
+  const cookieFor = (c: Ctx) => ({ httpOnly: true, secure: secureFor(c), sameSite: 'Lax' as const, path: '/' });
   const consume = (c: Ctx, key: string, count: number) => {
     const retry = limiter.consume(key, count, now());
     if (retry) { c.header('Retry-After', String(retry)); throw new ApiError(429, 'RATE_LIMITED'); }
@@ -160,26 +210,28 @@ export function createBackend(options: BackendOptions = {}) {
     for (const key of keys) consume(c, key, count);
   };
   app.use('*', async (c, next) => {
+    let remote: string;
+    try { remote = options.remoteAddress?.(c) ?? getConnInfo(c).remote.address ?? 'unknown'; }
+    catch { remote = 'unknown'; }
+    c.set('remote', remote);
     c.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
     c.header('X-Content-Type-Options', 'nosniff');
     c.header('X-Frame-Options', 'DENY');
     c.header('Referrer-Policy', 'no-referrer');
     c.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-    if (config.production) c.header('Strict-Transport-Security', 'max-age=31536000');
+    if (secureFor(c)) c.header('Strict-Transport-Security', 'max-age=31536000');
     await next();
   });
   app.use('/api/*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
-    let remote: string;
-    try { remote = options.remoteAddress?.(c) ?? getConnInfo(c).remote.address ?? 'unknown'; }
-    catch { remote = 'unknown'; }
+    const remote = c.get('remote');
     let ip: string;
     try { ip = resolveIp(remote, c.req.header('x-forwarded-for')); }
     catch { ip = remote; }
     c.set('ip', ip);
     const chunkRequest = c.req.method === 'PUT' && /^\/api\/(?:spaces|rooms)\/[^/]+\/uploads\/[^/]+\/chunks\/[^/]+$/.test(c.req.path);
     limit(c, chunkRequest ? 'chunk' : 'general', chunkRequest ? config.rateChunk : config.rateGeneral, false);
-    const rawSession = getCookie(c, sessionCookie);
+    const rawSession = getCookie(c, sessionCookieName(c));
     const authorization = c.req.header('authorization');
     if (authorization !== undefined) {
       // Any Authorization header selects machine authentication. Never fall back to cookies.
@@ -199,14 +251,14 @@ export function createBackend(options: BackendOptions = {}) {
     const bearer = c.get('session')?.bearer;
     if (bearer && !bearer.scopes.includes(safe ? 'read' : 'write')) throw new ApiError(403, 'INSUFFICIENT_SCOPE');
     const publicDevice = c.req.method === 'POST' && ['/api/auth/device/authorize', '/api/auth/device/token'].includes(c.req.path) &&
-      !rawSession && (!c.req.header('origin') || c.req.header('origin') === config.origin);
-    if (!safe && !bearer && !publicDevice && c.req.header('origin') !== config.origin) throw new ApiError(403, 'ORIGIN_REJECTED');
+      !rawSession && (!c.req.header('origin') || originAllowed(c, c.req.header('origin')));
+    if (!safe && !bearer && !publicDevice && !originAllowed(c, c.req.header('origin'))) throw originRejected(c);
     await next();
   });
   app.onError((error, c) => {
     if (error instanceof ApiError) {
       if (error.status === 429 && !c.res.headers.has('Retry-After')) c.header('Retry-After', '1');
-      return c.json({ error: { code: error.code } }, error.status);
+      return c.json({ error: { ...error.details, code: error.code } }, error.status);
     }
     // Do not log request URLs, cookies, OAuth codes, tokens, filenames or text.
     console.error('Backend operation failed', error instanceof Error ? error.name : 'UnknownError');
@@ -225,6 +277,9 @@ export function createBackend(options: BackendOptions = {}) {
     return c.json(update.report());
   });
   app.get('/api/auth/providers', c => c.json({ providers: Object.keys(activeProviders()) }));
+  // Public: the login page compares this with the address bar to explain a mismatch
+  // ("change APP_ORIGIN to X") before the user hits a 403. The address is in every link anyway.
+  app.get('/api/site', c => c.json({ origin: siteOrigin() || null, source: originSource(), requestOrigin: requestOrigin(c) }));
   const browserSession = (c: Ctx) => {
     const auth = service.requireSession(c.get('session'));
     if (auth.bearer) throw new ApiError(403, 'BROWSER_SESSION_REQUIRED');
@@ -272,7 +327,7 @@ export function createBackend(options: BackendOptions = {}) {
     repo.createDevice({ id, deviceCodeHash: hash(deviceCode), userCodeHash: userCodeHash(userCode),
       name: input.name, ipSummary: ipSummary(c.get('ip')), scopes: input.scopes, tokenLifetimeMs: input.lifetimeMs,
       expiresAt: now() + 600000, interval: 5, nextPollAt: now() + 5000, attempts: 0, status: 'pending', userId: null });
-    const verificationUri = `${config.origin}/device`;
+    const verificationUri = `${originFor(c)}/device`;
     return c.json({ device_code: deviceCode, user_code: userCode, verification_uri: verificationUri,
       verification_id: id, verification_uri_complete: `${verificationUri}?${new URLSearchParams({ user_code: userCode, verification_id: id })}`,
       expires_in: 600, interval: 5 });
@@ -307,7 +362,7 @@ export function createBackend(options: BackendOptions = {}) {
   });
   const oauthFailure = (c: Ctx, error: unknown) => {
     const code = error instanceof ApiError && oauthBrowserErrors.has(error.code) ? error.code : 'INTERNAL_ERROR';
-    return c.redirect(`${config.origin}/login?error=${code}`);
+    return c.redirect(`${originFor(c)}/login?error=${code}`);
   };
   app.get('/api/auth/:provider', c => {
     limit(c, 'auth', config.rateAuth, false);
@@ -320,7 +375,7 @@ export function createBackend(options: BackendOptions = {}) {
     let linkUserId: string | null = null;
     if (c.req.query('link') !== undefined) {
       const auth = c.get('session');
-      if (!auth || auth.bearer) return c.redirect(`${config.origin}/login?error=UNAUTHENTICATED`);
+      if (!auth || auth.bearer) return c.redirect(`${originFor(c)}/login?error=UNAUTHENTICATED`);
       linkUserId = auth.user.id;
     }
     const invite = linkUserId ? undefined : c.req.query('invite');
@@ -328,14 +383,14 @@ export function createBackend(options: BackendOptions = {}) {
     const liveInvite = inviteHash ? repo.invite(inviteHash, now()) : undefined;
     // Invite-first applies after the installation has an account. An unknown
     // token must not stop the first sign-up while the users table is empty.
-    if (inviteHash && !liveInvite && repo.users().length > 0) return c.redirect(`${config.origin}/login?error=INVITE_INVALID`);
+    if (inviteHash && !liveInvite && repo.users().length > 0) return c.redirect(`${originFor(c)}/login?error=INVITE_INVALID`);
     const state = token();
     const browser = token();
     const verifier = token();
     repo.saveFlow({ stateHash: hash(state), browserHash: hash(browser), provider: providerName, verifier,
       inviteHash: liveInvite ? inviteHash : null, expiresAt: now() + 600000, linkUserId });
-    setCookie(c, flowCookie, browser, { ...cookie, path: '/api/auth', maxAge: 600 });
-    return c.redirect(provider.authorizationUrl(state, hash(verifier), callbackUrl(providerName)));
+    setCookie(c, flowCookieName(c), browser, { ...cookieFor(c), path: '/api/auth', maxAge: 600 });
+    return c.redirect(provider.authorizationUrl(state, hash(verifier), callbackUrl(c, providerName)));
   });
   app.get('/api/auth/:provider/callback', async c => {
     let linking = false;
@@ -345,16 +400,16 @@ export function createBackend(options: BackendOptions = {}) {
       const providers = activeProviders();
       const provider = Object.hasOwn(providers, providerName) ? providers[providerName] : undefined;
       const state = c.req.query('state');
-      const browser = getCookie(c, flowCookie);
+      const browser = getCookie(c, flowCookieName(c));
       if (!provider || !state || !browser) throw new ApiError(400, 'OAUTH_STATE_INVALID');
       const flow = repo.consumeFlow(hash(state), hash(browser), providerName, now());
       if (!flow) throw new ApiError(400, 'OAUTH_STATE_INVALID');
-      deleteCookie(c, flowCookie, { ...cookie, path: '/api/auth' });
+      deleteCookie(c, flowCookieName(c), { ...cookieFor(c), path: '/api/auth' });
       linking = Boolean(flow.linkUserId);
       const code = c.req.query('code');
       // Provider error text stays off the redirect. Only a fixed code is shown.
       if (!code || code.length > 4096 || c.req.query('error')) throw new ApiError(400, 'OAUTH_DENIED');
-      const identity = await provider.exchange(code, flow.verifier, callbackUrl(providerName));
+      const identity = await provider.exchange(code, flow.verifier, callbackUrl(c, providerName));
       if (identity.provider !== providerName) throw new ApiError(400, 'OAUTH_PROVIDER_ERROR');
       const retry = limiter.consume(`auth:identity:${hash(`${providerName}:${identity.subject}`)}`, config.rateAuth, now());
       if (retry) { c.header('Retry-After', String(retry)); throw new ApiError(429, 'RATE_LIMITED'); }
@@ -365,17 +420,17 @@ export function createBackend(options: BackendOptions = {}) {
         // The browser that started the bind must still be signed in as the same user.
         if (!auth || auth.bearer || auth.user.id !== flow.linkUserId) throw new ApiError(401, 'UNAUTHENTICATED');
         const added = repo.linkIdentity(auth.user.id, identity, now());
-        return c.redirect(`${config.origin}/settings?${new URLSearchParams({ linked: providerName, ...(added ? {} : { already: '1' }) })}#login-methods`);
+        return c.redirect(`${originFor(c)}/settings?${new URLSearchParams({ linked: providerName, ...(added ? {} : { already: '1' }) })}#login-methods`);
       }
       const session = token();
       repo.login(identity, flow.inviteHash, config.adminEmails, hash(session), now() + config.sessionMs, now(),
         { userAgent: c.req.header('user-agent') ?? null, ipSummary: ipSummary(c.get('ip')) });
-      setCookie(c, sessionCookie, session, { ...cookie, maxAge: Math.floor(config.sessionMs / 1000) });
-      return c.redirect(`${config.origin}/`);
+      setCookie(c, sessionCookieName(c), session, { ...cookieFor(c), maxAge: Math.floor(config.sessionMs / 1000) });
+      return c.redirect(`${originFor(c)}/`);
     } catch (error) {
       if (linking) {
         const code = error instanceof ApiError && oauthBrowserErrors.has(error.code) ? error.code : 'INTERNAL_ERROR';
-        return c.redirect(`${config.origin}/settings?link_error=${code}#login-methods`);
+        return c.redirect(`${originFor(c)}/settings?link_error=${code}#login-methods`);
       }
       return oauthFailure(c, error);
     }
@@ -392,10 +447,10 @@ export function createBackend(options: BackendOptions = {}) {
     return c.body(null, 204);
   });
   // RHEA-190 m11: OAuth app configuration (admins). Secrets are write-only.
-  const oauthView = () => ({ origin: config.origin, providers: oauthApps().map(app => ({
+  const oauthView = (c: Ctx) => ({ origin: originFor(c), providers: oauthApps().map(app => ({
     provider: app.provider, label: providerInfo[app.provider].label,
     consoleUrl: providerInfo[app.provider].consoleUrl, docsUrl: providerInfo[app.provider].docsUrl,
-    callbackUrl: callbackUrl(app.provider), homepageUrl: config.origin,
+    callbackUrl: callbackUrl(c, app.provider), homepageUrl: originFor(c),
     source: app.source, enabled: app.enabled, active: Object.hasOwn(activeProviders(), app.provider),
     clientId: app.credentials?.clientId ?? '', secretSet: Boolean(app.credentials?.clientSecret),
     secretHint: app.credentials?.clientSecret ? maskSecret(app.credentials.clientSecret) : null,
@@ -413,7 +468,7 @@ export function createBackend(options: BackendOptions = {}) {
     if (auth.bearer) throw new ApiError(403, 'BROWSER_SESSION_REQUIRED');
     return auth;
   };
-  app.get('/api/admin/oauth', c => { adminBrowser(c); return c.json(oauthView()); });
+  app.get('/api/admin/oauth', c => { adminBrowser(c); return c.json(oauthView(c)); });
   app.put('/api/admin/oauth/:provider', async c => {
     const auth = adminBrowser(c);
     limit(c, 'oauth-config', config.rateAuth);
@@ -432,13 +487,13 @@ export function createBackend(options: BackendOptions = {}) {
       clientSecret = envOAuthApps(oauthEnv)[provider]?.clientSecret ?? null;
     }
     repo.saveOAuthApp({ provider, clientId, clientSecret, enabled: body.enabled !== false, now: now(), actor: auth.user.email });
-    return c.json(oauthView());
+    return c.json(oauthView(c));
   });
   app.delete('/api/admin/oauth/:provider', c => {
     adminBrowser(c);
     limit(c, 'oauth-config', config.rateAuth);
     repo.deleteOAuthApp(oauthProviderParam(c));
-    return c.json(oauthView());
+    return c.json(oauthView(c));
   });
   app.post('/api/admin/oauth/:provider/verify', async c => {
     adminBrowser(c);
@@ -446,9 +501,42 @@ export function createBackend(options: BackendOptions = {}) {
     const provider = oauthProviderParam(c);
     const app = oauthApps().find(entry => entry.provider === provider)!;
     if (!app.credentials) throw new ApiError(400, 'PROVIDER_UNAVAILABLE');
-    const result = await checkOAuthCredentials(provider, app.credentials.clientId, app.credentials.clientSecret, callbackUrl(provider), oauthFetch);
+    const result = await checkOAuthCredentials(provider, app.credentials.clientId, app.credentials.clientSecret, callbackUrl(c, provider), oauthFetch);
     if (app.db) repo.recordOAuthCheck(provider, result.ok, result.code, now());
-    return c.json({ ...result, checkedAt: now(), source: app.source, ...oauthView() });
+    return c.json({ ...result, checkedAt: now(), source: app.source, ...oauthView(c) });
+  });
+  // RHEA-190 auth step 1: 管理 → 站点地址. Admin setting > APP_ORIGIN > request's own origin.
+  const siteView = (c: Ctx) => {
+    const row = repo.setting(ORIGIN_SETTING);
+    return {
+      origin: siteOrigin() || null, source: originSource(), adminOrigin: adminOrigin || null, envOrigin: config.origin || null,
+      requestOrigin: requestOrigin(c), effectiveOrigin: originFor(c), production: config.production, secureCookies: secureFor(c),
+      trustProxy: config.trustProxy.length > 0, updatedAt: row?.updatedAt ?? null, updatedBy: row?.updatedBy ?? null,
+      callbacks: supportedProviders.map(provider => ({ provider, label: providerInfo[provider].label, url: callbackUrl(c, provider) })),
+    };
+  };
+  app.get('/api/admin/site', c => { adminBrowser(c); return c.json(siteView(c)); });
+  app.put('/api/admin/site', async c => {
+    const auth = adminBrowser(c);
+    limit(c, 'site-config', config.rateAuth);
+    const body = await json(c, 2048);
+    if (body.confirm !== undefined && typeof body.confirm !== 'boolean') throw new ApiError(400, 'INVALID_INPUT');
+    let next = '';
+    if (body.origin !== null && body.origin !== '' && body.origin !== undefined) {
+      if (typeof body.origin !== 'string') throw new ApiError(400, 'INVALID_INPUT');
+      next = parseOrigin(body.origin) ?? '';
+      if (!next) throw new ApiError(400, 'INVALID_ORIGIN');
+    } else if (body.origin === undefined) throw new ApiError(400, 'INVALID_INPUT');
+    // An address other than the one this browser is using makes the very next request fail the
+    // Origin check (and OAuth return elsewhere), so that needs an explicit confirm.
+    const effective = next || config.origin;
+    const current = c.req.header('origin') ?? '';
+    if (effective && effective !== current && body.confirm !== true)
+      throw new ApiError(409, 'ORIGIN_CONFIRM_REQUIRED', { origin: effective, current });
+    repo.saveSetting(ORIGIN_SETTING, next || null, now(), auth.user.email);
+    adminOrigin = next;
+    console.info(`Site address ${next ? 'saved' : 'cleared'} in 管理 → 站点地址; APP_ORIGIN is now ${describeOrigin()}`);
+    return c.json(siteView(c));
   });
   app.get('/api/me', c => {
     const auth = service.requireSession(c.get('session'));
@@ -461,7 +549,7 @@ export function createBackend(options: BackendOptions = {}) {
     if (auth.bearer) repo.revokeAccessToken(auth.bearer.id, auth.user.id);
     else repo.logout(auth.sessionHash);
     events.revalidate();
-    if (!auth.bearer) deleteCookie(c, sessionCookie, cookie);
+    if (!auth.bearer) deleteCookie(c, sessionCookieName(c), cookieFor(c));
     return c.body(null, 204);
   });
   // RHEA-190 r4: 登录设备. Each browser login is listed with a readable name and
@@ -490,7 +578,7 @@ export function createBackend(options: BackendOptions = {}) {
     limit(c, 'session-revoke', config.rateAuth);
     const removed = repo.revokeSession(c.req.param('id'), auth.user.id);
     events.revalidate();
-    if (removed === auth.sessionHash) deleteCookie(c, sessionCookie, cookie);
+    if (removed === auth.sessionHash) deleteCookie(c, sessionCookieName(c), cookieFor(c));
     return c.body(null, 204);
   });
   app.post('/api/sessions/revoke-others', c => {
@@ -509,7 +597,7 @@ export function createBackend(options: BackendOptions = {}) {
     const auth = service.admin(c.get('session'));
     const removed = repo.revokeSession(c.req.param('id'));
     events.revalidate();
-    if (removed === auth.sessionHash) deleteCookie(c, sessionCookie, cookie);
+    if (removed === auth.sessionHash) deleteCookie(c, sessionCookieName(c), cookieFor(c));
     return c.body(null, 204);
   });
   app.get('/api/invites/:token', c => {
@@ -597,7 +685,7 @@ export function createBackend(options: BackendOptions = {}) {
   app.post('/api/admin/invites', async c => {
     service.admin(c.get('session')); limit(c, 'invite', config.rateInvite);
     const body = await json(c, 2048);
-    return c.json(service.createInvite(c.get('session'), string(body.spaceId), integer(body.maxUses ?? 1, 1, 100), integer(body.expiresInHours ?? 24, 1, 720)), 201);
+    return c.json(service.createInvite(c.get('session'), string(body.spaceId), integer(body.maxUses ?? 1, 1, 100), integer(body.expiresInHours ?? 24, 1, 720), originFor(c)), 201);
   });
   app.delete('/api/admin/invites/:id', c => {
     service.admin(c.get('session')); limit(c, 'invite', config.rateInvite);
@@ -619,10 +707,10 @@ export function createBackend(options: BackendOptions = {}) {
         deviceKey = body.deviceKey;
       }
     }
-    const existing = deviceKey ? service.deviceRoom(deviceKey) : null;
+    const existing = deviceKey ? service.deviceRoom(deviceKey, originFor(c)) : null;
     if (existing) return c.json(existing, 200);
     limit(c, 'room-create', config.rateRoom);
-    return c.json(service.createRoom(deviceKey), 201);
+    return c.json(service.createRoom(deviceKey, originFor(c)), 201);
   });
   const shareLimit = (c: Ctx, raw: string) => {
     limit(c, 'share', config.rateAuth, false);
@@ -826,7 +914,7 @@ export function createBackend(options: BackendOptions = {}) {
       limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
       const body = await json(c, 2048);
       const maxViews = body.maxViews === undefined || body.maxViews === null ? null : integer(body.maxViews, 1, 100);
-      return c.json(service.createShare(space, c.get('session'), c.req.param('id')!, string(body.expiresIn, 8), maxViews), 201);
+      return c.json(service.createShare(space, c.get('session'), c.req.param('id')!, string(body.expiresIn, 8), maxViews, originFor(c)), 201);
     });
     app.get(`${base}/items/:id/shares`, c => {
       const space = scope(c);
@@ -878,7 +966,7 @@ export function createBackend(options: BackendOptions = {}) {
   };
   for (const base of ['/api/spaces/:space', '/api/rooms/:room']) {
     app.get(`${base}/ws`, c => {
-      if (!c.get('session')?.bearer && c.req.header('origin') !== config.origin) throw new ApiError(403, 'ORIGIN_REJECTED');
+      if (!c.get('session')?.bearer && !originAllowed(c, c.req.header('origin'))) throw originRejected(c);
       const space = scope(c);
       const auth = c.get('session');
       const ip = c.get('ip');
@@ -947,7 +1035,7 @@ export function createBackend(options: BackendOptions = {}) {
   const alive = new WeakSet<object>();
   wss.on('connection', ws => { alive.add(ws); ws.on('pong', () => alive.add(ws)); });
   return {
-    app, repo, files, events, service, config, update, websocket: { server: wss },
+    app, repo, files, events, service, config, update, websocket: { server: wss }, describeOrigin, originWarnings,
     async startMaintenance() {
       await service.cleanup();
       timer = setInterval(() => { void service.cleanup().catch(() => console.error('Cleanup failed; will retry')); }, config.cleanupMs).unref();

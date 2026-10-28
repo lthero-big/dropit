@@ -229,7 +229,9 @@ test('AC-U3: unknown, cross-user (including shared space) and cross-room ids giv
 test('AC-U1/U3: cookie Origin, independent Bearer scopes and header precedence match existing uploads', async t => {
   const f = await fixture(); t.after(() => f.dispose());
   const { uploadId } = await ok(await f.create(1), 201);
-  await error(await f.request(`${f.admin.base}/uploads/${uploadId}/chunks/0`, { method: 'PUT', body: 'x', headers: { origin: 'https://evil.example' } }), 403, 'ORIGIN_REJECTED');
+  const rejected = await f.request(`${f.admin.base}/uploads/${uploadId}/chunks/0`, { method: 'PUT', body: 'x', headers: { origin: 'https://evil.example' } });
+  assert.equal(rejected.status, 403);
+  assert.deepEqual(await rejected.json(), { error: { code: 'ORIGIN_REJECTED', expected: origin, received: 'https://evil.example', source: 'env' } });
   const readOnly = f.pat(['read']);
   await error(await f.request(`${f.admin.base}/uploads/${uploadId}/chunks/0`, { method: 'PUT', body: 'x', headers: { authorization: `Bearer ${readOnly}` } }), 403, 'INSUFFICIENT_SCOPE');
   await error(await f.request(`${f.admin.base}/uploads/${uploadId}`, { headers: { authorization: 'Bearer invalid' } }), 401, 'UNAUTHENTICATED');

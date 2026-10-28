@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
-import { CopyIcon, GaugeIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, SlidersHorizontalIcon, TicketIcon, UsersIcon } from 'lucide-react'
+import { CopyIcon, GaugeIcon, GlobeIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, SlidersHorizontalIcon, TicketIcon, UsersIcon } from 'lucide-react'
 import { DeviceSessions } from '@/components/device-sessions.tsx'
 import { LimitsEditor } from '@/components/limits-editor.tsx'
 import { OAuthSettings } from '@/components/oauth-settings.tsx'
+import { SiteOriginSettings } from '@/components/site-origin-settings.tsx'
 import { Panel, SectionHeader, SettingsLayout, SideNav, StatusPill, Switch, fieldClass, labelClass, selectClass, type NavGroup, type Tone } from '@/components/settings-ui.tsx'
 import { PageTitle, Shell } from '@/components/shell.tsx'
 import { UpdateNotice, UpdatePanel } from '@/components/update-panel.tsx'
@@ -23,8 +24,8 @@ const hourChoices = [
 ]
 const quotaCapMb = 102400
 
-type Tab = 'invites' | 'users' | 'usage' | 'limits' | 'oauth' | 'update'
-const tabIds: Tab[] = ['invites', 'users', 'usage', 'limits', 'oauth', 'update']
+type Tab = 'invites' | 'users' | 'usage' | 'limits' | 'site' | 'oauth' | 'update'
+const tabIds: Tab[] = ['invites', 'users', 'usage', 'limits', 'site', 'oauth', 'update']
 
 /**
  * RHEA-190 m22: 管理 is grouped by what the admin is doing, and OAuth (an
@@ -45,7 +46,13 @@ const NAV: NavGroup<Tab>[] = [
       { id: 'limits', label: '限制', icon: SlidersHorizontalIcon, hint: '容量、时间、限流' },
     ],
   },
-  { label: '登录与安全', items: [{ id: 'oauth', label: 'OAuth 登录', icon: KeyRoundIcon, hint: 'GitHub / Google 应用凭据' }] },
+  {
+    label: '登录与安全',
+    items: [
+      { id: 'site', label: '站点地址', icon: GlobeIcon, hint: 'APP_ORIGIN、链接与回调地址' },
+      { id: 'oauth', label: 'OAuth 登录', icon: KeyRoundIcon, hint: 'GitHub / Google 应用凭据' },
+    ],
+  },
   { label: '系统', items: [{ id: 'update', label: '更新', icon: RefreshCwIcon, hint: '版本与升级' }] },
 ]
 
@@ -54,6 +61,7 @@ const HEADERS: Record<Tab, { title: string; description: string }> = {
   users: { title: '用户', description: '预创建账号、调整角色与配额、停用或强制下线。dropit 没有密码，首次 OAuth 登录时按邮箱绑定。' },
   usage: { title: '用量', description: '每个用户当前占用的存储与配额。调低配额不会删除已有内容。' },
   limits: { title: '限制', description: '上传大小、保留时间、会话与限流。修改立即生效，并写入变更记录。' },
+  site: { title: '站点地址', description: '浏览器访问本站的地址（APP_ORIGIN）。可以在这里改，不用重启；优先级高于环境变量。' },
   oauth: { title: 'OAuth 登录', description: '配置登录页使用的 GitHub / Google 应用。这是整个站点的设置，只有管理员能看到。' },
   update: { title: '更新', description: '当前版本、可用更新和升级方式。' },
 }
@@ -400,6 +408,7 @@ export function AdminPage() {
             </Panel>
           ) : null}
           {tab === 'limits' ? limits ? <LimitsEditor limits={limits} onChange={setLimits} /> : <p className="text-sm text-muted-foreground">正在读取…</p> : null}
+          {tab === 'site' ? <SiteOriginSettings /> : null}
           {tab === 'oauth' ? <OAuthSettings /> : null}
           {tab === 'update' ? <UpdatePanel /> : null}
         </div>

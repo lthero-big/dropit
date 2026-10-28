@@ -41,21 +41,21 @@ export class ClipboardService {
    * secret room key. Its token is re-derived from the key (the server still
    * stores only token hashes), so only that browser can re-enter it this way.
    */
-  deviceRoom(deviceKey: string) {
+  deviceRoom(deviceKey: string, origin = this.config.origin) {
     const space = this.repo.deviceRoom(deviceRoomHash(deviceKey), this.now());
     if (!space) return null;
     const roomToken = deviceRoomToken(deviceKey, space.id);
     if (space.roomHash !== hash(roomToken)) return null;
-    return { token: roomToken, expiresAt: space.expiresAt as number, url: `${this.config.origin}/rooms/${roomToken}`, reused: true };
+    return { token: roomToken, expiresAt: space.expiresAt as number, url: `${origin}/rooms/${roomToken}`, reused: true };
   }
   /** A new temporary room; with a browser room key it replaces nothing live (callers check deviceRoom first) and is bound to that browser. */
-  createRoom(deviceKey?: string) {
+  createRoom(deviceKey?: string, origin = this.config.origin) {
     const id = randomUUID();
     const roomToken = deviceKey ? deviceRoomToken(deviceKey, id) : token();
     const space: Space = { id, name: 'Temporary room', ownerId: null,
       expiresAt: this.now() + this.config.roomRetentionMs, roomHash: hash(roomToken) };
     this.repo.createRoom(space, deviceKey ? deviceRoomHash(deviceKey) : null);
-    return { token: roomToken, expiresAt: space.expiresAt as number, url: `${this.config.origin}/rooms/${roomToken}`, reused: false };
+    return { token: roomToken, expiresAt: space.expiresAt as number, url: `${origin}/rooms/${roomToken}`, reused: false };
   }
   private canManage(space: Space, authorId: string | null, session: Session | undefined) {
     if (space.roomHash) return;
@@ -67,7 +67,7 @@ export class ClipboardService {
     if (window === undefined) throw new ApiError(400, 'INVALID_INPUT');
     return window === null ? null : this.now() + window;
   }
-  createShare(space: Space, session: Session | undefined, itemId: string, expiresIn: string, maxViews: number | null): SharePublic & { token: string; url: string } {
+  createShare(space: Space, session: Session | undefined, itemId: string, expiresIn: string, maxViews: number | null, origin = this.config.origin): SharePublic & { token: string; url: string } {
     const item = this.item(space, itemId);
     this.canManage(space, item.userId, session);
     if (maxViews !== null && (!Number.isSafeInteger(maxViews) || maxViews < 1 || maxViews > 100)) throw new ApiError(400, 'INVALID_INPUT');
@@ -81,7 +81,7 @@ export class ClipboardService {
     return {
       id: share.id, itemId: share.itemId, expiresAt: share.expiresAt, maxViews: share.maxViews,
       views: share.views, revoked: share.revoked, createdAt: share.createdAt,
-      token: raw, url: `${this.config.origin}/s/${raw}`,
+      token: raw, url: `${origin}/s/${raw}`,
     };
   }
   listShares(space: Space, session: Session | undefined, itemId: string) {
@@ -114,7 +114,7 @@ export class ClipboardService {
     if (!item) throw new ApiError(404, 'NOT_FOUND');
     return item;
   }
-  createInvite(session: Session | undefined, spaceId: string, maxUses: number, hours: number) {
+  createInvite(session: Session | undefined, spaceId: string, maxUses: number, hours: number, origin = this.config.origin) {
     const auth = this.admin(session);
     this.space(spaceId, auth);
     const inviteToken = token();
@@ -122,7 +122,7 @@ export class ClipboardService {
       uses: 0, expiresAt: this.now() + hours * 3600000, revoked: 0, createdBy: auth.user.id };
     this.repo.createInvite(invite);
     const { tokenHash: _hash, ...publicInvite } = invite;
-    return { ...publicInvite, token: inviteToken, url: `${this.config.origin}/invite/${inviteToken}` };
+    return { ...publicInvite, token: inviteToken, url: `${origin}/invite/${inviteToken}` };
   }
   snapshot(space: Space) {
     return { type: 'snapshot', items: this.repo.items(space.id, this.now()).map(publicItem), groups: this.repo.groups(space.id),

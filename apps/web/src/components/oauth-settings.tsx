@@ -124,7 +124,7 @@ function hashProvider(): string {
   return typeof window === 'undefined' ? '' : (/^#oauth-(.+)$/.exec(window.location.hash)?.[1] ?? '')
 }
 
-function CopyRow({ label, value }: { label: string; value: string }) {
+export function CopyRow({ label, value }: { label: string; value: string }) {
   const id = useId()
   return (
     <div className="grid gap-1.5">

@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 export class ApiError extends Error {
-  constructor(public status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 429 | 503, public code: string) { super(code); }
+  /** details are extra JSON fields next to code (for example the expected origin of ORIGIN_REJECTED). */
+  constructor(public status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 429 | 503, public code: string, public details?: Record<string, string>) { super(code); }
 }
 export const token = () => randomBytes(32).toString('base64url');
 export const hash = (value: string) => createHash('sha256').update(value).digest('base64url');

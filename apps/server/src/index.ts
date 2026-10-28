@@ -21,6 +21,9 @@ const server = serve({ fetch: backend.app.fetch, port: backend.config.port, host
 server.requestTimeout = 0;
 server.headersTimeout = 30000;
 console.info(`dropit listening on port ${backend.config.port}`);
+// RHEA-190 auth step 1: say which address the Origin check and generated links use.
+console.info(`dropit APP_ORIGIN: ${backend.describeOrigin()}`);
+for (const warning of backend.originWarnings()) console.warn(`dropit warning: ${warning}`);
 
 let stopping = false;
 const shutdown = () => {

@@ -33,6 +33,8 @@ volumes:
 
 If nginx runs on the host and requests enter the container through the Docker bridge gateway, `TRUST_PROXY` must include that gateway address (for example, after pinning the network to a fixed subnet, use `loopback,10.87.87.1`).
 
+`APP_ORIGIN` can also be left out of compose and set after deployment in “Admin → Site address” (the admin setting wins over env). If the proxy is not in `TRUST_PROXY` and no site address is set, dropit cannot see the original https, so generated OAuth callbacks will be http — set a site address or `TRUST_PROXY`. The `dropit APP_ORIGIN:` startup log line shows the effective value.
+
 The image ships with a `HEALTHCHECK` (requests `/healthz`) and runs as the non-root user `node`.
 
 ## nginx
@@ -67,12 +69,11 @@ server {
 
 ## HTTP deployment on an internal network
 
-Without TLS you must use `NODE_ENV=development`, and `APP_ORIGIN` must exactly match the address you access:
+Without TLS the default image (`NODE_ENV=production`) works as is. `APP_ORIGIN` can be left unset (the access address is used) or set to the address you use; cookies are then not Secure, and the log and admin panel warn that the site is HTTP:
 
 ```bash
 docker run -d --name dropit \
   -p 192.168.1.10:8787:8787 \
-  -e NODE_ENV=development \
   -e APP_ORIGIN=http://192.168.1.10:8787 \
   -e GITHUB_CLIENT_ID -e GITHUB_CLIENT_SECRET \
   -v dropit-data:/data lthero1/dropit:latest

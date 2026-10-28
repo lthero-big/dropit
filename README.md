@@ -39,21 +39,21 @@
 ```bash
 docker run -d --name dropit \
   -p 127.0.0.1:8787:8787 \
-  -e NODE_ENV=development \
-  -e APP_ORIGIN=http://localhost:8787 \
   -v dropit-data:/data \
   lthero1/dropit:latest
 ```
 
-打开 <http://localhost:8787>。未配置 OAuth 时可以直接「进入临时房间」体验实时同步。
+打开 <http://localhost:8787>。不需要任何环境变量：未设置 `APP_ORIGIN` 时按浏览器访问的地址自动处理，之后可在「管理 → 站点地址」固定。未配置 OAuth 时可以直接「进入临时房间」体验实时同步。
+
+也可以用仓库里的 `docker compose up -d`：配置放在可选的 `.env`（`cp .env.example .env`，文件里分了必填 / 推荐 / 可选，并标出哪些能在管理后台改）。
 
 ### 启用登录
 
-成对设置 `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`（或 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`），回调地址为 `${APP_ORIGIN}/api/auth/github/callback`（或 `.../google/callback`）。用户表为空时，**第一个成功登录的人自动成为管理员**。
+成对设置 `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`（或 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`），回调地址为 `${APP_ORIGIN}/api/auth/github/callback`（或 `.../google/callback`），「管理 → 站点地址」会直接列出可复制的回调地址。用户表为空时，**第一个成功登录的人自动成为管理员**。
 
 ### 生产部署
 
-设 `NODE_ENV=production`、`APP_ORIGIN=https://你的域名`，容器只绑定 `127.0.0.1:8787`，由 nginx 等反向代理终止 TLS 并转发 WebSocket；`TRUST_PROXY` 填反代地址（如 `loopback`）。完整的 compose、nginx、升级与备份说明见 [部署文档](https://lthero-big.github.io/dropit/deploy/deployment/)。
+镜像默认 `NODE_ENV=production`。设 `APP_ORIGIN=https://你的域名`（或登录后在「管理 → 站点地址」填写，页面设置优先于环境变量），容器只绑定 `127.0.0.1:8787`，由 nginx 等反向代理终止 TLS 并转发 WebSocket；`TRUST_PROXY` 填反代地址（如 `loopback`）。完整的 compose、nginx、升级与备份说明见 [部署文档](https://lthero-big.github.io/dropit/deploy/deployment/)。
 
 ### 从源码运行
 

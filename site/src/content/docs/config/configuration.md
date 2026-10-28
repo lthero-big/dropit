@@ -8,13 +8,24 @@ title: 配置
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `NODE_ENV` | `development` | `production` 启用 Secure Cookie 与 HSTS，要求 HTTPS |
-| `APP_ORIGIN` | `http://localhost:$PORT` | 浏览器访问的精确 origin，无路径 |
+| `NODE_ENV` | `development`；镜像 `production` | `production` 且站点地址为 https 时启用 Secure Cookie 与 HSTS；站点地址为 http 时只警告，不拒绝启动 |
+| `APP_ORIGIN` | 空 | 浏览器访问的 origin（协议 + 域名或 IP + 端口，无路径）。为空时按每个请求自己的地址处理。可在「管理 → 站点地址」修改，页面设置优先 |
+| `RESET_APP_ORIGIN` | 未设置 | 设为 `1` 时启动会清除页面保存的站点地址（改错地址、进不去后台时用，用完删掉） |
 | `PORT` | `8787` | 监听端口 |
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `DATA_DIR` | 仓库 `data/`；镜像 `/data` | SQLite 与文件目录 |
 | `STATIC_DIR` | `apps/web/dist`；镜像 `/app/public` | 前端构建产物 |
 | `TRUST_PROXY` | 空 | 受信任反代 IP/CIDR，逗号分隔，可用 `loopback` |
+
+## 站点地址（APP_ORIGIN）
+
+生效顺序：**「管理 → 站点地址」页面设置 > 环境变量 `APP_ORIGIN` > 按请求地址自动处理**。
+
+- 设置了站点地址时：写请求和 WebSocket 的 `Origin` 必须与它完全一致；OAuth 回调、邀请 / 分享链接、`/device` 链接都用它生成。
+- 未设置时：`Origin` 必须与请求自身的地址一致（协议取连接本身，只有 `TRUST_PROXY` 里的反代发来的 `X-Forwarded-Proto` / `X-Forwarded-Host` 才被采用；主机取 `Host` 头），链接也按请求地址生成。适合快速试用和局域网。
+- 页面上保存的地址立即生效，不用重启；保存一个与当前访问地址不同的值需要二次确认，防止把自己锁在外面。真锁住了就用 `RESET_APP_ORIGIN=1` 启动一次。
+- 地址不一致时，登录页和错误提示会直接写出「当前访问地址」和「APP_ORIGIN」，并说明改成什么。
+- 启动日志会打印 `dropit APP_ORIGIN: ...`（以及来源）；`NODE_ENV=production` 但站点地址是 http、或页面设置覆盖了环境变量时，会打印 `dropit warning: ...`，后台也会显示同样的提示。
 
 ## 更新检查
 
@@ -84,4 +95,4 @@ title: 配置
 - 修改对新请求立即生效，无需重启；每次修改都写入 `/api/admin/limits/audit` 审计记录。
 - 保留期修改只影响新条目和新房间；调低配额不会删除已有内容。
 - 硬上限（如单文件 1 GiB、配额 100 GiB、保留期 365 天、房间保留 24 小时）对环境变量和覆盖同样生效。
-- `APP_ORIGIN`、`TRUST_PROXY`、`DATA_DIR`、`ADMIN_EMAILS`、OAuth 凭据、`RATE_TOKEN`、端口和清理间隔只在启动时读取。
+- `TRUST_PROXY`、`DATA_DIR`、`ADMIN_EMAILS`、`RATE_TOKEN`、端口和清理间隔只在启动时读取；站点地址（`APP_ORIGIN`）可以在「管理 → 站点地址」修改并立即生效。

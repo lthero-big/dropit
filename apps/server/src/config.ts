@@ -1,8 +1,16 @@
 import { fileURLToPath } from 'node:url';
 import { validateLimits } from './limits.js';
+import { parseOrigin } from './origin.js';
 
 export interface Config {
-  origin: string; production: boolean; port: number; dataDir: string; adminEmails: string[];
+  /**
+   * APP_ORIGIN from the environment, '' when unset. The effective site address is
+   * 管理 → 站点地址 > APP_ORIGIN > each request's own origin (see backend.ts).
+   */
+  origin: string;
+  /** RESET_APP_ORIGIN=1 clears the address saved in 管理 → 站点地址 at startup (lock-out recovery). */
+  resetOrigin: boolean;
+  production: boolean; port: number; dataDir: string; adminEmails: string[];
   trustProxy: string[]; maxFileBytes: number; userQuotaBytes: number; retentionMs: number;
   roomQuotaBytes: number; roomMaxFileBytes: number; roomRetentionMs: number;
   sessionMs: number; cleanupMs: number; maxTextBytes: number; maxItems: number;
@@ -22,11 +30,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const production = env.NODE_ENV === 'production';
   const port = number('PORT', 8787);
   if (port > 65535) throw new Error('Invalid PORT');
-  const url = new URL(env.APP_ORIGIN ?? `http://localhost:${port}`);
-  if (!['http:', 'https:'].includes(url.protocol) || url.origin !== url.href.replace(/\/$/, '') ||
-      (production && url.protocol !== 'https:')) throw new Error('APP_ORIGIN must be an origin (HTTPS in production)');
+  // Optional. Plain http is allowed even in production (a fresh docker deploy on an IP);
+  // index.ts logs a warning and session cookies are only marked Secure over https.
+  const rawOrigin = env.APP_ORIGIN?.trim() ?? '';
+  const origin = rawOrigin ? parseOrigin(rawOrigin) : '';
+  if (origin === null) throw new Error('APP_ORIGIN must be an origin such as https://dropit.example.com (scheme + host [+ port], no path)');
   const config: Config = {
-    origin: url.origin, production, port, dataDir: env.DATA_DIR || fileURLToPath(new URL('../../../data', import.meta.url)),
+    origin, resetOrigin: ['1', 'true', 'yes'].includes((env.RESET_APP_ORIGIN ?? '').trim().toLowerCase()), production, port, dataDir: env.DATA_DIR || fileURLToPath(new URL('../../../data', import.meta.url)),
     adminEmails: (env.ADMIN_EMAILS ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
     trustProxy: (env.TRUST_PROXY ?? '').split(',').map(s => s.trim()).filter(Boolean),
     maxFileBytes: number('MAX_FILE_BYTES', 25 * 1024 ** 2), userQuotaBytes: number('USER_QUOTA_BYTES', 1024 ** 3),

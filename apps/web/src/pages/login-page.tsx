@@ -8,6 +8,7 @@ import { takeReturn } from '@/lib/machine.ts'
 import { useSession } from '@/lib/session.tsx'
 import { Logo } from '@/components/logo.tsx'
 import { ProviderIcon } from '@/components/brand-icons.tsx'
+import { originMismatch, type SiteInfo } from '@/lib/site.ts'
 
 const PROVIDER_NAME: Record<string, string> = { github: 'GitHub', google: 'Google' }
 
@@ -18,6 +19,20 @@ export function LoginPage({ invite }: { invite?: string }) {
   const loginError = invite ? null : loginErrorText(params.get('error'))
   const [providers, setProviders] = useState<string[] | null>(null)
   const [busy, setBusy] = useState(false)
+  const [mismatch, setMismatch] = useState<string | null>(null)
+
+  // RHEA-190 auth step 1: explain an APP_ORIGIN mismatch up front instead of a bare 403 later.
+  useEffect(() => {
+    let cancelled = false
+    api<SiteInfo>('/api/site')
+      .then((site) => {
+        if (!cancelled) setMismatch(originMismatch(site, window.location.origin))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -62,6 +77,11 @@ export function LoginPage({ invite }: { invite?: string }) {
       </h1>
       <p className="mt-4 text-sm text-muted-foreground">跨设备传递文本和文件。没有密码，使用 GitHub 或 Google 登录。</p>
       <div className="mt-8 flex flex-col gap-3 border-t border-line-1 pt-6">
+        {mismatch ? (
+          <p role="alert" data-origin-mismatch="" className="rounded-md border border-line-1 border-l border-l-destructive bg-surface-2 px-3 py-2 text-sm">
+            {mismatch}
+          </p>
+        ) : null}
         {loginError ? (
           <p role="alert" className="rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">
             {loginError}

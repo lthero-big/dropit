@@ -48,7 +48,7 @@ test('OAuth configuration contains no enabled mock provider and provider failure
 
 test('Configuration rejects unsafe origin, invalid limits and weak room policy', () => {
   for (const env of [
-    { APP_ORIGIN: 'http://example.com', NODE_ENV: 'production' },
+    { APP_ORIGIN: 'ftp://example.com' }, { APP_ORIGIN: 'https://user@example.com' },
     { APP_ORIGIN: 'https://example.com/path' }, { MAX_FILE_BYTES: '-1' },
     { ROOM_RETENTION_HOURS: '25' }, { ROOM_MAX_FILE_BYTES: String(25 * 1024 ** 2) },
     { RATE_AUTH: '240' },

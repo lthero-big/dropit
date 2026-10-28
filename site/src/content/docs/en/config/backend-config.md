@@ -6,13 +6,15 @@ description: Full reference for environment variables, runtime overrides and har
 Load `.env` into the process using your process manager / Compose; the backend
 does not read a secrets file itself. `loadConfig()` validates environment defaults
 at startup; persisted runtime overrides then take precedence.
-Run a single Node 22+ process. Local HTTP is supported; production requires HTTPS
-at `APP_ORIGIN` (typically terminated by a trusted reverse proxy).
+Run a single Node 22+ process. HTTP works in every mode; with `NODE_ENV=production` and an https
+site address (typically TLS terminated by a trusted reverse proxy) cookies are
+Secure and HSTS is sent. Production on an http site address only logs a warning.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `NODE_ENV` | development | `production` enables Secure cookies and HSTS |
-| `APP_ORIGIN` | `http://localhost:$PORT` | Exact browser origin, no path; example uses 5173 for Vite |
+| `NODE_ENV` | development (image: production) | `production` enables Secure cookies and HSTS when the site address is https |
+| `APP_ORIGIN` | empty | Browser origin, no path. Empty: each request's own origin is used. Overridden by admin → site address (`/api/admin/site`) |
+| `RESET_APP_ORIGIN` | unset | `1` clears the admin site address at startup |
 | `PORT` | 8787 | Listen port |
 | `HOST` | `0.0.0.0` | Listen address (example uses loopback for local development) |
 | `DATA_DIR` | repository `data/` | Persistent SQLite and file directory; image sets `/data` |
@@ -126,7 +128,7 @@ added to it. Session lifetime changes affect only new OAuth sessions, not curren
 sessions or PATs. Rate threshold changes retain current counts; window changes
 retain active reset deadlines and apply the new duration to new buckets.
 
-Startup-only settings include `APP_ORIGIN`, `TRUST_PROXY`, `DATA_DIR`,
+Startup-only settings include `TRUST_PROXY`, `DATA_DIR`,
 `ADMIN_EMAILS`, OAuth credentials, `RATE_TOKEN`, ports, cleanup interval and all
 other settings outside the editable list. Any externally managed
 `SESSION_SECRET` also remains outside this API; the backend uses random

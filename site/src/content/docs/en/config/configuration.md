@@ -8,13 +8,24 @@ All configuration comes from process environment variables (in development mode 
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `NODE_ENV` | `development` | `production` enables Secure cookies and HSTS and requires HTTPS |
-| `APP_ORIGIN` | `http://localhost:$PORT` | The exact origin the browser uses, without a path |
+| `NODE_ENV` | `development`; image `production` | With `production` and an https site address, enables Secure cookies and HSTS; an http site address only logs a warning instead of refusing to start |
+| `APP_ORIGIN` | empty | The origin the browser uses (scheme + host or IP + port, no path). Empty means each request's own address is used. Can be changed in “Admin → Site address”; the admin setting wins |
+| `RESET_APP_ORIGIN` | unset | `1` clears the site address saved in the admin panel at startup (for when a wrong value locks you out; remove it afterwards) |
 | `PORT` | `8787` | Listen port |
 | `HOST` | `0.0.0.0` | Listen address |
 | `DATA_DIR` | repository `data/`; image `/data` | SQLite and file directory |
 | `STATIC_DIR` | `apps/web/dist`; image `/app/public` | Built frontend assets |
 | `TRUST_PROXY` | empty | Trusted reverse-proxy IPs/CIDRs, comma-separated; `loopback` allowed |
+
+## Site address (APP_ORIGIN)
+
+Precedence: **“Admin → Site address” > `APP_ORIGIN` env > the request's own address**.
+
+- When a site address is set, the `Origin` of write requests and WebSockets must match it exactly, and OAuth callbacks, invite / share links and `/device` links are generated from it.
+- When unset, `Origin` must match the request's own address (scheme from the connection — `X-Forwarded-Proto` / `X-Forwarded-Host` are used only from `TRUST_PROXY` peers; host from the `Host` header), and links use that address. Good for quick starts and LANs.
+- A value saved in the admin panel takes effect immediately without a restart. Saving a value that differs from the address you are using requires confirmation so you cannot lock yourself out by accident; if you do, start once with `RESET_APP_ORIGIN=1`.
+- On a mismatch, the login page and error messages name both the current address and APP_ORIGIN and say what to change.
+- The startup log prints `dropit APP_ORIGIN: ...` with its source, and `dropit warning: ...` when production runs on an http site address or the admin setting overrides the env value; the admin panel shows the same warnings.
 
 ## Update checks
 
@@ -84,4 +95,4 @@ Admins can change 23 of the limits above (content limits / rate limiting / chunk
 - Changes apply to new requests immediately without a restart; every change is recorded in the `/api/admin/limits/audit` audit log.
 - Retention changes only affect new items and new rooms; lowering a quota does not delete existing content.
 - Hard caps (e.g. 1 GiB per file, 100 GiB quota, 365-day retention, 24-hour room retention) apply equally to environment variables and overrides.
-- `APP_ORIGIN`, `TRUST_PROXY`, `DATA_DIR`, `ADMIN_EMAILS`, OAuth credentials, `RATE_TOKEN`, ports and the cleanup interval are read only at startup.
+- `TRUST_PROXY`, `DATA_DIR`, `ADMIN_EMAILS`, `RATE_TOKEN`, ports and the cleanup interval are read only at startup; the site address (`APP_ORIGIN`) can be changed in “Admin → Site address” and applies immediately.

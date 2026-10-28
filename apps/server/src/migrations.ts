@@ -175,3 +175,10 @@ ALTER TABLE flows ADD COLUMN linkUserId TEXT;
 CREATE INDEX identity_user ON identities(userId);
 PRAGMA user_version=12;
 `;
+
+// RHEA-190 auth step 1: installation-wide text settings edited in 管理 (first: the
+// site address, key appOrigin). Admin setting > environment variable.
+export const migration13 = `
+CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updatedAt INTEGER NOT NULL, updatedBy TEXT);
+PRAGMA user_version=13;
+`;

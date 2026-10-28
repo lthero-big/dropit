@@ -5,13 +5,16 @@ export class ApiError extends Error {
   status: number
   code: string
   retryAfter: number | null
+  /** Extra string fields next to `code` (e.g. ORIGIN_REJECTED → expected / received). */
+  details: Record<string, string> | undefined
 
-  constructor(status: number, code: string, retryAfter: number | null) {
+  constructor(status: number, code: string, retryAfter: number | null, details?: Record<string, string>) {
     super(code)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.retryAfter = retryAfter
+    this.details = details
   }
 }
 
@@ -70,6 +73,8 @@ const labels: Record<string, string> = {
   OAUTH_SECRET_REQUIRED: '请填写 Client Secret',
   INVALID_CLIENT_ID: 'Client ID 格式无效',
   PROVIDER_UNSUPPORTED: '不支持的登录方式',
+  INVALID_ORIGIN: '站点地址格式不对，只能是 协议 + 域名或 IP + 端口，例如 https://dropit.example.com',
+  ORIGIN_CONFIRM_REQUIRED: '新地址与当前访问地址不同，需要确认',
 }
 
 const oauthLoginErrors = new Set([
@@ -101,6 +106,12 @@ export function loginErrorText(code: string | null): string | null {
 
 export function errorText(error: unknown): string {
   if (error instanceof ApiError) {
+    // RHEA-190 auth step 1: say which address is expected instead of a bare 403.
+    const expected = error.details?.expected
+    if (error.code === 'ORIGIN_REJECTED' && expected) {
+      const current = error.details?.received && error.details.received !== 'null' ? error.details.received : window.location.origin
+      return `当前访问地址（${current}）与 APP_ORIGIN（${expected}）不一致，请求被拒绝。请改用 ${expected} 访问；如果当前地址才是正确的，请把 APP_ORIGIN 改为 ${current}（管理 → 站点地址，或 .env）。`
+    }
     const label = labels[error.code] ?? '请求失败'
     return error.retryAfter ? `${label}，${error.retryAfter} 秒后再试` : label
   }
@@ -109,15 +120,19 @@ export function errorText(error: unknown): string {
 
 async function readError(response: Response): Promise<ApiError> {
   let code = 'INTERNAL_ERROR'
+  let details: Record<string, string> | undefined
   try {
-    const body = (await response.json()) as { error?: { code?: string } }
+    const body = (await response.json()) as { error?: { code?: string } & Record<string, unknown> }
     if (body.error?.code) code = body.error.code
+    for (const [key, value] of Object.entries(body.error ?? {})) {
+      if (key !== 'code' && typeof value === 'string') details = { ...details, [key]: value }
+    }
   } catch {
     // Non-JSON errors still surface as a status code.
   }
   const retry = response.headers.get('Retry-After')
   const retryAfter = retry && /^\d+$/.test(retry) ? Number(retry) : null
-  return new ApiError(response.status, code, retryAfter)
+  return new ApiError(response.status, code, retryAfter, details)
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {

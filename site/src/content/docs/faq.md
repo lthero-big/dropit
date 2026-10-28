@@ -9,10 +9,10 @@ title: 常见问题
 错误码在 `/login?error=CODE`：`INVITATION_REQUIRED` 表示需要邀请；`VERIFIED_EMAIL_REQUIRED` 表示 provider 未返回已验证邮箱；`OAUTH_STATE_INVALID` 多为回调地址或 `APP_ORIGIN` 不一致、流程超时（10 分钟）。
 
 **请求返回 `403 ORIGIN_REJECTED`？**
-`APP_ORIGIN` 必须与浏览器地址栏的 origin 完全一致（协议、域名、端口）。
+设置了站点地址（`APP_ORIGIN` 或「管理 → 站点地址」）时，它必须与浏览器地址栏的 origin 完全一致（协议、域名、端口）。登录页和错误提示会写出期望地址和当前地址：改用期望地址访问，或把站点地址改成当前地址。改错进不去后台时，用 `RESET_APP_ORIGIN=1` 启动一次清除页面设置。启动日志的 `dropit APP_ORIGIN:` 一行显示当前生效值。
 
 **生产模式下用 HTTP 无法登录？**
-`NODE_ENV=production` 使用 Secure Cookie，必须 HTTPS。内网纯 HTTP 请用 `NODE_ENV=development`。
+现在可以：站点地址是 http 时 Cookie 不带 Secure，日志和后台只会警告。面向公网的实例仍建议 HTTPS。如果浏览器用 https 访问而站点地址写的是 http（或反过来），按上一条处理。
 
 **限流对所有人生效 / 看到的都是代理 IP？**
 反代后面请设置 `TRUST_PROXY` 为反代地址（宿主机 nginx 访问容器时通常还需加入 Docker 网关地址）。

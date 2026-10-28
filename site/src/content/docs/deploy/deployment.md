@@ -33,6 +33,8 @@ volumes:
 
 如果 nginx 在宿主机、请求经 Docker 网桥网关进入容器，`TRUST_PROXY` 需要包含该网关地址（例如为网络固定子网后填 `loopback,10.87.87.1`）。
 
+`APP_ORIGIN` 也可以不写在 compose 里，部署后在「管理 → 站点地址」填写（页面设置优先于环境变量）。如果反代不在 `TRUST_PROXY` 里、又没有设置站点地址，dropit 看不到原始的 https，生成的 OAuth 回调会是 http——请设置站点地址或 `TRUST_PROXY`。启动日志的 `dropit APP_ORIGIN:` 一行可以确认当前生效值。
+
 镜像自带 `HEALTHCHECK`（请求 `/healthz`），以非 root 用户 `node` 运行。
 
 ## nginx
@@ -67,12 +69,11 @@ server {
 
 ## 内网 HTTP 部署
 
-没有 TLS 时只能使用 `NODE_ENV=development`，并让 `APP_ORIGIN` 与访问地址完全一致：
+没有 TLS 时直接用默认镜像即可（`NODE_ENV=production`）。`APP_ORIGIN` 可以不设（按访问地址自动处理），也可以设成实际访问地址；此时 Cookie 不带 Secure，日志和后台会提示站点是 HTTP：
 
 ```bash
 docker run -d --name dropit \
   -p 192.168.1.10:8787:8787 \
-  -e NODE_ENV=development \
   -e APP_ORIGIN=http://192.168.1.10:8787 \
   -e GITHUB_CLIENT_ID -e GITHUB_CLIENT_SECRET \
   -v dropit-data:/data lthero1/dropit:latest

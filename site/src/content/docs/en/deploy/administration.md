@@ -33,6 +33,13 @@ The admin panel lives at `/admin` and is only accessible to enabled admins.
 - The limits editor shows each setting's current value, environment default, whether it is overridden, and its lower/upper bounds.
 - Changes are validated as a whole, committed atomically and recorded in an audit log (paginated). See [Configuration](../../config/configuration/#runtime-overrides) for the detailed rules.
 
+## Site address
+
+- “Admin → Site address” shows the effective address and its source (admin setting / environment / request address), and whether cookies are Secure and proxies are trusted.
+- Input must be scheme + host or IP + port (e.g. `https://dropit.example.com`, `http://192.168.1.10:8787`) without a path. It applies immediately and wins over `APP_ORIGIN`. “Clear” falls back to the env value or the request address.
+- A value different from the current address needs confirmation; afterwards use the new address. If you lock yourself out, start once with `RESET_APP_ORIGIN=1`.
+- The GitHub / Google OAuth callback URLs are listed ready to copy.
+
 ## Version and updates
 
 - “Admin → Updates” shows the current version, short git hash, build time and install method (Docker image / compose local build / source).

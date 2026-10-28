@@ -9,10 +9,10 @@ No OAuth provider is configured. Set `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` o
 The error code is in `/login?error=CODE`: `INVITATION_REQUIRED` means an invitation is required; `VERIFIED_EMAIL_REQUIRED` means the provider did not return a verified email; `OAUTH_STATE_INVALID` is usually a mismatched callback URL or `APP_ORIGIN`, or the flow timed out (10 minutes).
 
 **Requests return `403 ORIGIN_REJECTED`?**
-`APP_ORIGIN` must exactly match the origin in the browser's address bar (scheme, host and port).
+When a site address is set (`APP_ORIGIN` or “Admin → Site address”), it must exactly match the origin in the browser's address bar (scheme, host and port). The login page and error message show the expected and the current address: use the expected one, or change the site address to the current one. If a wrong value locks you out of the admin panel, start once with `RESET_APP_ORIGIN=1`. The `dropit APP_ORIGIN:` startup log line shows the effective value.
 
 **Can't sign in over HTTP in production mode?**
-`NODE_ENV=production` uses Secure cookies and requires HTTPS. For plain HTTP on an internal network use `NODE_ENV=development`.
+You can now: with an http site address cookies are not Secure, and the log and admin panel only warn. Public instances should still use HTTPS. If the browser uses https while the site address says http (or the other way round), see the previous answer.
 
 **Rate limiting hits everyone / every client shows the proxy's IP?**
 Behind a reverse proxy, set `TRUST_PROXY` to the proxy address (when nginx on the host reaches the container you usually also need to add the Docker gateway address).
