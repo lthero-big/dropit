@@ -11,3 +11,5 @@ cd dropit.wiki && git add . && git commit -m "Publish wiki" && git push
 
 本目录内使用带 `.md` 的相对链接，便于在仓库里直接浏览；发布到 Wiki 时用上面的 sed 去掉 `.md`。
 页面内容以仓库代码与 `docs/` 为准，修改功能时请同步更新。
+
+> 文档站（Starlight，<https://lthero-big.github.io/dropit/>，源文件 `site/`）现为主要文档；本目录保留为 GitHub Wiki 源文件。

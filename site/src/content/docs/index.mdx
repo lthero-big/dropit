@@ -1,0 +1,61 @@
+---
+title: dropit
+description: 跨设备实时传递文本和文件的自托管云剪贴板
+template: splash
+hero:
+  tagline: 跨设备实时传递文本和文件的自托管云剪贴板。网页、命令行与临时房间共用一套实时 API：在一台设备上粘贴，其他设备立即看到。
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: 快速开始
+      link: start/getting-started/
+      icon: right-arrow
+    - text: 部署到服务器
+      link: deploy/deployment/
+      variant: secondary
+    - text: GitHub
+      link: https://github.com/lthero-big/dropit
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## 主要特性
+
+<CardGrid>
+  <Card title="剪贴板" icon="document">
+    文本 / 文件条目、实时同步、就地编辑、Markdown 安全渲染、标签、置顶、分组、来源设备、命令面板。
+  </Card>
+  <Card title="文件" icon="seti:image">
+    WebP 缩略图与预览、视频/音频内联播放、`Range` 断点下载、分片续传上传。
+  </Card>
+  <Card title="分享与临时房间" icon="external">
+    有时限、可限次、可撤销的只读链接；无需账号的临时房间（≤ 24 小时，二维码加入）。
+  </Card>
+  <Card title="账号" icon="github">
+    GitHub / Google OAuth（无密码）、邀请制、首位登录者为管理员、个人访问令牌、设备码登录。
+  </Card>
+  <Card title="管理" icon="setting">
+    用户、邀请、令牌、运行时限额（即时生效 + 审计）。
+  </Card>
+  <Card title="运维" icon="rocket">
+    单进程 Node + SQLite（WAL）+ 本地磁盘；单 Docker 镜像；`/healthz`。
+  </Card>
+</CardGrid>
+
+## 从这里开始
+
+<CardGrid>
+  <LinkCard title="快速开始" description="第一次使用：Docker、Compose 或本地开发" href="start/getting-started/" />
+  <LinkCard title="部署与配置" description="生产部署、nginx、升级与环境变量" href="deploy/deployment/" />
+  <LinkCard title="使用指南与命令行" description="日常使用、分享链接、临时房间、dropit CLI" href="start/user-guide/" />
+  <LinkCard title="API 与开发" description="HTTP / WebSocket API、架构、开发与贡献" href="api/overview/" />
+</CardGrid>
+
+## 项目信息
+
+- 源码：[github.com/lthero-big/dropit](https://github.com/lthero-big/dropit)
+- 镜像：[`lthero1/dropit`](https://hub.docker.com/r/lthero1/dropit)（`latest` 及按提交号的标签）
+- 运行要求：Node.js 22+（源码）或 Docker
+- 许可证：[GNU AGPL-3.0-only](https://github.com/lthero-big/dropit/blob/main/LICENSE)（可商用；修改后对外提供网络服务须公开源码，详见 [常见问题](faq/)）

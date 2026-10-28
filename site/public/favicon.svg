@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <style>
+    .tile { fill: #1d1b18 } .glyph { fill: #fafaf8 } .dot { fill: #d0021b }
+    @media (prefers-color-scheme: dark) { .tile { fill: #eeebe6 } .glyph { fill: #121110 } .dot { fill: #f0434f } }
+  </style>
+  <rect class="tile" x="2" y="8" width="54" height="54" rx="12"/>
+  <text class="glyph" x="29" y="49" text-anchor="middle" font-family="Geist, 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="38" font-weight="600">d</text>
+  <circle class="dot" cx="52" cy="12" r="9"/>
+</svg>
