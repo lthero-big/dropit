@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
+import { Panel, fieldClass, labelClass } from '@/components/settings-ui.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText } from '@/lib/api.ts'
 import { formatRemain, useClock } from '@/lib/format.ts'
@@ -117,20 +118,18 @@ export function DeviceConfirm({
   }
 
   return (
-    <section className="rounded-md border border-line-2 p-4">
-      <h2 className="text-xs font-medium">设备码</h2>
-      <p className="mt-2 text-sm text-muted-foreground">核对终端上的代码、设备名和网络概要后再允许。允许后，令牌要等终端领取才会创建。</p>
+    <Panel id="device-code" title="设备码" description="核对终端上的代码、设备名和网络概要后再允许。允许后，令牌要等终端领取才会创建。">
       <form
-        className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end"
+        className="flex flex-col gap-3 sm:flex-row sm:items-end"
         onSubmit={(event) => {
           event.preventDefault()
           void lookup()
         }}
       >
-        <label className="grow text-xs font-medium">
+        <label className={`grow ${labelClass}`}>
           用户码
           <input
-            className="mt-1 block w-full rounded-md border border-line-2 bg-background px-3 py-2 font-mono text-lg font-semibold tracking-[0.3em] normal-case"
+            className={`${fieldClass} font-mono text-lg font-semibold tracking-[0.3em]`}
             value={code}
             onChange={(event) => onCodeChange(event.target.value)}
             autoComplete="off"
@@ -141,7 +140,7 @@ export function DeviceConfirm({
             placeholder="ABCD-EFGH"
           />
         </label>
-        <Button type="submit" variant="outline" disabled={busy}>
+        <Button type="submit" variant="outline" className="h-10" disabled={busy}>
           查询
         </Button>
       </form>
@@ -198,6 +197,6 @@ export function DeviceConfirm({
           已拒绝。这台设备拿不到令牌。
         </p>
       ) : null}
-    </section>
+    </Panel>
   )
 }

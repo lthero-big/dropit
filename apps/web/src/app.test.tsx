@@ -317,7 +317,7 @@ describe('dropit web', () => {
     fireEvent.change(screen.getByLabelText('邮箱'), { target: { value: 'new@example.com' } })
     fireEvent.change(screen.getByLabelText('显示名称'), { target: { value: 'New' } })
     fireEvent.change(screen.getByLabelText('角色'), { target: { value: 'admin' } })
-    fireEvent.click(screen.getByRole('checkbox', { name: '使用安装默认配额' }))
+    fireEvent.click(screen.getByRole('switch', { name: '使用安装默认配额' }))
     fireEvent.change(screen.getByLabelText('配额（MB）'), { target: { value: '2' } })
     fireEvent.click(screen.getByRole('button', { name: '创建用户' }))
     await waitFor(() => expect(calls.some((call) => call.url === '/api/admin/users' && call.init?.method === 'POST')).toBe(true))

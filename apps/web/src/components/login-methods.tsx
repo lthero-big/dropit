@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
+import { Panel, StatusPill } from '@/components/settings-ui.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText, linkErrorText } from '@/lib/api.ts'
 import { formatStamp } from '@/lib/machine.ts'
@@ -58,11 +59,7 @@ export function LoginMethods() {
 
   const providers = [...new Set([...(identities ?? []).map((identity) => identity.provider), ...available])]
   return (
-    <section id="login-methods" className="mb-8 scroll-mt-20" aria-labelledby="login-methods-title">
-      <h2 id="login-methods-title" className="mb-1 text-xs font-medium">
-        登录方式
-      </h2>
-      <p className="mb-3 text-sm text-muted-foreground">同一个账号可以同时绑定 GitHub 和 Google，任选其一登录。绑定只能在已登录时进行，不会按邮箱自动合并账号。</p>
+    <Panel id="login-methods" title="登录方式" description="同一个账号可以同时绑定 GitHub 和 Google，任选其一登录。绑定只能在已登录时进行，不会按邮箱自动合并账号。">
       {error ? <p className="rounded-md border border-line-2 p-4 text-sm text-muted-foreground">{error}</p> : null}
       {identities === null && !error ? <p className="text-sm text-muted-foreground">正在读取…</p> : null}
       {identities ? (
@@ -71,10 +68,13 @@ export function LoginMethods() {
             const bound = identities.find((identity) => identity.provider === provider)
             const canBind = available.includes(provider)
             return (
-              <li key={provider} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-line-2 p-4" data-provider={provider}>
-                <div>
-                  <h3 className="text-base font-semibold">{providerLabel(provider)}</h3>
-                  <p className="text-sm text-muted-foreground">
+              <li key={provider} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-line-1 bg-surface-0 px-4 py-3" data-provider={provider}>
+                <div className="min-w-0">
+                  <h3 className="flex items-center gap-2 text-sm font-semibold text-fg">
+                    {providerLabel(provider)}
+                    <StatusPill tone={bound ? 'good' : 'neutral'}>{bound ? '已连接' : '未连接'}</StatusPill>
+                  </h3>
+                  <p className="mt-0.5 text-[13px] text-muted-foreground">
                     {bound
                       ? `已绑定${bound.email ? ` · ${bound.email}` : ''}${bound.linkedAt ? ` · ${formatStamp(bound.linkedAt)}` : ''}`
                       : canBind
@@ -84,7 +84,7 @@ export function LoginMethods() {
                 </div>
                 {bound ? (
                   identities.length <= 1 ? (
-                    <span className="text-xs text-muted-foreground">唯一的登录方式，不能解绑</span>
+                    <span className="text-xs text-fg-4">唯一的登录方式，不能解绑</span>
                   ) : pending === provider ? (
                     <div className="flex gap-2">
                       <Button type="button" variant="destructive" onClick={() => void unlink(provider)}>
@@ -109,6 +109,6 @@ export function LoginMethods() {
           })}
         </ul>
       ) : null}
-    </section>
+    </Panel>
   )
 }
