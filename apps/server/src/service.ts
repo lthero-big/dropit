@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { Config } from './config.js';
-import { ApiError, MAX_GROUPS, cleanFilename, cleanGroupName, hash, publicItem, publicShareItem, token, type Item, type ItemMeta, type Session, type SharePublic, type Space } from './domain.js';
+import { ApiError, MAX_GROUPS, cleanFilename, cleanGroupName, hash, isShortToken, publicItem, publicShareItem, randomRoomCode, shortToken, shortTokenFrom, token, type Invite, type Item, type ItemMeta, type Session, type SharePublic, type Space } from './domain.js';
 import type { FileStorage } from './files.js';
 import type { Broadcaster } from './events.js';
 import type { Repository } from './repository.js';
@@ -32,9 +32,19 @@ export class ClipboardService {
     return space;
   }
   room(roomToken: string) {
-    const space = this.repo.room(hash(roomToken), this.now());
-    if (!space) throw new ApiError(404, 'NOT_FOUND');
+    const entry = entryParts(roomToken);
+    const space = entry ? this.repo.roomById(entry.spaceId, this.now()) : this.repo.room(hash(roomToken), this.now());
+    if (!space || (entry && !space.roomHash)) throw new ApiError(404, 'NOT_FOUND');
+    if (entry && entryToken(space) !== roomToken) throw new ApiError(404, 'NOT_FOUND');
     return space;
+  }
+  /**
+   * Entering by code (and PIN, checked by the caller) hands out an entry token for the room. The server only
+   * stores the hash of the room link, so the entry token is derived from it instead: `<space id>.<proof>`.
+   * It is accepted wherever the room link is, and keeps working when the code or PIN is changed later.
+   */
+  enterRoomByCode(space: Space) {
+    return { token: entryToken(space), expiresAt: space.expiresAt as number, ...roomCodeInfo(space) };
   }
   /**
    * RHEA-190 step 7: the live temporary room already bound to this browser's
@@ -44,19 +54,48 @@ export class ClipboardService {
   deviceRoom(deviceKey: string, origin = this.config.origin) {
     const space = this.repo.deviceRoom(deviceRoomHash(deviceKey), this.now());
     if (!space) return null;
-    const roomToken = deviceRoomToken(deviceKey, space.id);
-    if (space.roomHash !== hash(roomToken)) return null;
-    return { token: roomToken, expiresAt: space.expiresAt as number, url: `${origin}/rooms/${roomToken}`, reused: true };
+    const roomToken = deviceRoomTokens(deviceKey, space.id).find(candidate => space.roomHash === hash(candidate));
+    if (!roomToken) return null;
+    return { token: roomToken, expiresAt: space.expiresAt as number, url: `${origin}/r/${roomToken}`, reused: true, ...roomCodeInfo(space) };
   }
-  /** A new temporary room; with a browser room key it replaces nothing live (callers check deviceRoom first) and is bound to that browser. */
-  createRoom(deviceKey?: string, origin = this.config.origin) {
+  /**
+   * A new temporary room; with a browser room key it replaces nothing live (callers check deviceRoom first)
+   * and is bound to that browser. The room link is 6 characters; the room code is the random 5-character
+   * one, or the custom code the caller chose (refused with CODE_TAKEN when a live room already has it).
+   */
+  createRoom(deviceKey?: string, origin = this.config.origin, options: { code?: string; pinHash?: string | null } = {}) {
     const id = randomUUID();
-    const roomToken = deviceKey ? deviceRoomToken(deviceKey, id) : token();
-    const space: Space = { id, name: 'Temporary room', ownerId: null,
-      expiresAt: this.now() + this.config.roomRetentionMs, roomHash: hash(roomToken) };
-    this.repo.createRoom(space, deviceKey ? deviceRoomHash(deviceKey) : null);
-    return { token: roomToken, expiresAt: space.expiresAt as number, url: `${origin}/rooms/${roomToken}`, reused: false };
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const roomToken = deviceKey ? deviceRoomToken(deviceKey, id, attempt) : shortToken();
+      const space: Space = { id, name: 'Temporary room', ownerId: null,
+        expiresAt: this.now() + this.config.roomRetentionMs, roomHash: hash(roomToken),
+        roomCode: options.code ?? randomRoomCode(), pinHash: options.code ? options.pinHash ?? null : null };
+      try {
+        this.repo.createRoom(space, deviceKey ? deviceRoomHash(deviceKey) : null, this.now());
+      } catch (error) {
+        if (error instanceof ApiError && (error.code === 'TOKEN_COLLISION' || (error.code === 'CODE_TAKEN' && !options.code))) continue;
+        throw error;
+      }
+      return { token: roomToken, expiresAt: space.expiresAt as number, url: `${origin}/r/${roomToken}`, reused: false, ...roomCodeInfo(space) };
+    }
+    throw new ApiError(503, 'UNAVAILABLE');
   }
+  /** Changes the code (a custom one, or a fresh random one when omitted) and pin of a live room. */
+  setRoomCode(space: Space, options: { code?: string; pinHash?: string | null }) {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const code = options.code ?? randomRoomCode();
+      const pinHash = options.code ? options.pinHash ?? null : null;
+      try {
+        this.repo.setRoomCode(space.id, code, pinHash, this.now());
+      } catch (error) {
+        if (error instanceof ApiError && error.code === 'CODE_TAKEN' && !options.code) continue;
+        throw error;
+      }
+      return { code, hasPin: pinHash !== null };
+    }
+    throw new ApiError(503, 'UNAVAILABLE');
+  }
+  roomByCode(code: string) { return this.repo.roomByCode(code, this.now()); }
   private canManage(space: Space, authorId: string | null, session: Session | undefined) {
     if (space.roomHash) return;
     if (!session) throw new ApiError(401, 'UNAUTHENTICATED');
@@ -71,13 +110,22 @@ export class ClipboardService {
     const item = this.item(space, itemId);
     this.canManage(space, item.userId, session);
     if (maxViews !== null && (!Number.isSafeInteger(maxViews) || maxViews < 1 || maxViews > 100)) throw new ApiError(400, 'INVALID_INPUT');
-    const raw = token();
+    // 6 random base62 characters; a collision with an existing link just draws another one.
+    let raw = shortToken();
     const share = {
       id: randomUUID(), tokenHash: hash(raw), itemId: item.id, spaceId: space.id, createdBy: session?.user.id ?? null,
       expiresAt: this.shareExpires(expiresIn), maxViews, views: 0, revoked: 0, createdAt: this.now(),
       downloadTicketHash: null, downloadTicketExpiresAt: null,
     };
-    this.repo.createShare(share);
+    for (let attempt = 0; ; attempt++) {
+      try { this.repo.createShare(share); break; }
+      catch (error) {
+        const unique = (error as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE';
+        if (!unique || attempt >= 12) throw error;
+        raw = shortToken();
+        share.tokenHash = hash(raw);
+      }
+    }
     return {
       id: share.id, itemId: share.itemId, expiresAt: share.expiresAt, maxViews: share.maxViews,
       views: share.views, revoked: share.revoked, createdAt: share.createdAt,
@@ -96,7 +144,7 @@ export class ClipboardService {
     this.repo.revokeShare(shareId, space.id);
   }
   private shareToken(raw: string) {
-    if (!/^[A-Za-z0-9_-]{43}$/.test(raw)) throw new ApiError(404, 'NOT_FOUND');
+    if (!isShortToken(raw) && !/^[A-Za-z0-9_-]{43}$/.test(raw)) throw new ApiError(404, 'NOT_FOUND');
     return hash(raw);
   }
   openPublicShare(raw: string) {
@@ -119,10 +167,40 @@ export class ClipboardService {
     this.space(spaceId, auth);
     const inviteToken = token();
     const invite = { id: randomUUID(), tokenHash: hash(inviteToken), spaceId, maxUses,
-      uses: 0, expiresAt: this.now() + hours * 3600000, revoked: 0, createdBy: auth.user.id };
+      uses: 0, expiresAt: this.now() + hours * 3600000, revoked: 0, createdBy: auth.user.id, joinSpace: 1, createdAt: this.now() };
     this.repo.createInvite(invite);
     const { tokenHash: _hash, ...publicInvite } = invite;
     return { ...publicInvite, token: inviteToken, url: `${origin}/invite/${inviteToken}` };
+  }
+  /**
+   * RHEA-190 auth step 3: any signed-in user can invite someone to register. The invite is single use, never adds
+   * the invitee to the inviter's space and counts against the inviter's limit (admins are not limited).
+   */
+  createPersonalInvite(session: Session | undefined, settings: UserInviteSettings, hours: number, origin = this.config.origin) {
+    const auth = this.requireSession(session);
+    const admin = auth.user.role === 'admin';
+    if (!admin && !settings.enabled) throw new ApiError(403, 'INVITES_DISABLED');
+    const spaceId = this.repo.personalSpaceId(auth.user.id);
+    if (!spaceId) throw new ApiError(404, 'NOT_FOUND');
+    const inviteToken = token();
+    const invite: Invite = { id: randomUUID(), tokenHash: hash(inviteToken), spaceId, maxUses: 1, uses: 0,
+      expiresAt: this.now() + hours * 3600000, revoked: 0, createdBy: auth.user.id, joinSpace: 0, createdAt: this.now() };
+    this.repo.createPersonalInvite(invite, admin ? null : this.inviteLimitFor(auth.user.id, settings), this.now());
+    const { tokenHash: _hash, spaceId: _space, ...publicInvite } = invite;
+    return { ...publicInvite, token: inviteToken, url: `${origin}/invite/${inviteToken}` };
+  }
+  inviteLimitFor(userId: string, settings: UserInviteSettings) { return this.repo.inviteLimit(userId) ?? settings.defaultLimit; }
+  personalInvites(session: Session | undefined, settings: UserInviteSettings) {
+    const auth = this.requireSession(session);
+    const admin = auth.user.role === 'admin';
+    const now = this.now();
+    const limit = admin ? null : this.inviteLimitFor(auth.user.id, settings);
+    const used = this.repo.inviteUsage(auth.user.id, now);
+    return {
+      enabled: admin || settings.enabled, limit, used, remaining: limit === null ? null : Math.max(0, limit - used),
+      invites: this.repo.personalInvites(auth.user.id).map(({ spaceId: _space, createdBy: _by, joinSpace: _join, ...invite }) => ({
+        ...invite, status: inviteStatus(invite, now) })),
+    };
   }
   snapshot(space: Space) {
     return { type: 'snapshot', items: this.repo.items(space.id, this.now()).map(publicItem), groups: this.repo.groups(space.id),
@@ -304,5 +382,21 @@ export class ClipboardService {
 
 /** A browser's secret room key (random, kept in its localStorage) → the binding stored on its room. */
 export const deviceRoomHash = (deviceKey: string) => hash(`room-device:${deviceKey}`);
-/** 32-byte room token derived from the browser's key and the room id, so it can be handed back without being stored. */
-export const deviceRoomToken = (deviceKey: string, spaceId: string) => createHash('sha256').update(`room-token:${deviceKey}:${spaceId}`).digest('base64url');
+/** Rooms created before step 3 used the full 43-character digest as their link. */
+const legacyDeviceRoomToken = (deviceKey: string, spaceId: string) => createHash('sha256').update(`room-token:${deviceKey}:${spaceId}`).digest('base64url');
+/** 6-character room link derived from the browser's key; attempt > 0 only when an earlier derivation collided with another room. */
+export const deviceRoomToken = (deviceKey: string, spaceId: string, attempt = 0) =>
+  shortTokenFrom(createHash('sha256').update(`room-token:${deviceKey}:${spaceId}${attempt ? `:${attempt}` : ''}`).digest());
+const deviceRoomTokens = (deviceKey: string, spaceId: string) =>
+  [legacyDeviceRoomToken(deviceKey, spaceId), ...Array.from({ length: 12 }, (_, attempt) => deviceRoomToken(deviceKey, spaceId, attempt))];
+const entryProof = (space: Space) => createHash('sha256').update(`room-entry:${space.id}:${space.roomHash}`).digest('base64url');
+const entryToken = (space: Space) => `${space.id}.${entryProof(space)}`;
+const entryParts = (raw: string) => {
+  const match = /^([0-9a-f-]{36})\.[A-Za-z0-9_-]{43}$/.exec(raw);
+  return match ? { spaceId: match[1] } : null;
+};
+export const roomCodeInfo = (space: Space) => ({ code: space.roomCode ?? null, hasPin: Boolean(space.pinHash) });
+
+export interface UserInviteSettings { enabled: boolean; defaultLimit: number }
+export const inviteStatus = (invite: { uses: number; maxUses: number; revoked: number; expiresAt: number }, now: number) =>
+  invite.revoked ? 'revoked' : invite.uses >= invite.maxUses ? 'used' : invite.expiresAt <= now ? 'expired' : 'open';

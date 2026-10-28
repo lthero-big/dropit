@@ -6,6 +6,12 @@ export class RateLimiter {
   constructor(private windowMs: number) {}
   // Active buckets retain counts and reset times; the new duration applies when they expire.
   setWindow(windowMs: number) { this.windowMs = windowMs; }
+  /** Seconds until a key may try again when it has already used up `limit`, without counting this look. */
+  blocked(key: string, limit: number, now: number): number | undefined {
+    const bucket = this.buckets.get(key);
+    if (!bucket || bucket.reset <= now || bucket.count < limit) return undefined;
+    return Math.max(1, Math.ceil((bucket.reset - now) / 1000));
+  }
   consume(key: string, limit: number, now: number): number | undefined {
     for (const [key, bucket] of this.buckets) if (bucket.reset <= now) this.buckets.delete(key);
     let bucket = this.buckets.get(key);

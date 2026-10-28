@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ApiError, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14 } from './migrations.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14, migration15 } from './migrations.js';
 import type { RegistrationPolicy } from './password.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
@@ -95,22 +95,37 @@ export interface Repository {
   deviceForUserCode(userCodeHash: string, verificationId: string | undefined, now: number): DeviceAuthorization | undefined;
   decideDevice(id: string, userId: string, approve: boolean, now: number): void;
   pollDevice(deviceCodeHash: string, now: number, tokenId: string, tokenHash: string): DevicePoll;
-  users(): (User & { usedBytes: number; quotaBytes: number | null; hasPassword: number; mustChangePassword: number; providers: string | null })[];
+  users(): (User & { usedBytes: number; quotaBytes: number | null; inviteLimit: number | null; hasPassword: number; mustChangePassword: number; providers: string | null })[];
   provisionUser(input: { email: string; name: string; role: 'admin' | 'user'; quotaBytes: number | null; now: number }): User;
-  updateUser(id: string, patch: { disabled?: boolean; role?: 'admin' | 'user'; name?: string; quotaBytes?: number | null }): void;
+  updateUser(id: string, patch: { disabled?: boolean; role?: 'admin' | 'user'; name?: string; quotaBytes?: number | null; inviteLimit?: number | null }): void;
   revokeSessions(id: string): void;
   quotaOverride(userId: string): number | null;
   spaces(userId: string): Space[];
   space(id: string): Space | undefined;
   room(roomHash: string, now: number): Space | undefined;
-  createRoom(space: Space, deviceHash?: string | null): void;
+  roomById(id: string, now: number): Space | undefined;
+  /** Throws TOKEN_COLLISION (retry with another token) or CODE_TAKEN. A room's own code and pin are on the Space. */
+  createRoom(space: Space, deviceHash: string | null, now: number): void;
+  roomByCode(code: string, now: number): Space | undefined;
+  /** Replaces the code and pin of a live room. Throws CODE_TAKEN when another live room holds the code. */
+  setRoomCode(spaceId: string, code: string, pinHash: string | null, now: number): void;
   /** the live temporary room bound to this browser, if any */
   deviceRoom(deviceHash: string, now: number): Space | undefined;
   isMember(spaceId: string, userId: string): boolean;
   invite(tokenHash: string, now: number): Invite | undefined;
   createInvite(invite: Invite): void;
-  invites(): Omit<Invite, 'tokenHash'>[];
+  invites(): (Omit<Invite, 'tokenHash'> & { createdByEmail: string | null })[];
   revokeInvite(id: string): void;
+  /** Personal invites (joinSpace=0) a user created that still exist, newest first. */
+  personalInvites(userId: string): Omit<Invite, 'tokenHash'>[];
+  /** Invites a user has spent from their limit: used ones plus those still open. */
+  inviteUsage(userId: string, now: number): number;
+  inviteUsageByUser(now: number): Map<string, number>;
+  /** Atomic: counts the user's usage, refuses beyond limit (INVITE_LIMIT_REACHED), then inserts. limit null = unlimited. */
+  createPersonalInvite(invite: Invite, limit: number | null, now: number): void;
+  revokePersonalInvite(id: string, userId: string): void;
+  inviteLimit(userId: string): number | null;
+  personalSpaceId(userId: string): string | undefined;
   usage(userId: string): number;
   items(spaceId: string, now: number): Item[];
   item(id: string, now: number): Item | undefined;
@@ -153,8 +168,8 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 14) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 14) this.db.transaction(() => {
+    if (version > 15) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 15) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
@@ -168,7 +183,8 @@ export class SqliteRepository implements Repository {
       if (version < 11) this.db.exec(migration11);
       if (version < 12) this.db.exec(migration12);
       if (version < 13) this.db.exec(migration13);
-      this.db.exec(migration14);
+      if (version < 14) this.db.exec(migration14);
+      this.db.exec(migration15);
     })();
   }
   setting(key: string) {
@@ -273,6 +289,7 @@ export class SqliteRepository implements Repository {
     return this.db.transaction(() => {
       let row = this.db.prepare('SELECT u.* FROM users u JOIN identities i ON i.userId=u.id WHERE i.provider=? AND i.subject=?')
         .get(identity.provider, identity.subject) as UserRow | undefined;
+      let created = false;
       if (row?.disabled) throw new ApiError(403, 'USER_DISABLED');
       if (row) this.db.prepare('UPDATE identities SET email=? WHERE provider=? AND subject=?').run(identity.email, identity.provider, identity.subject);
       const invite = inviteHash ? this.invite(inviteHash, now) : undefined;
@@ -314,13 +331,21 @@ export class SqliteRepository implements Repository {
         const spaceId = randomUUID();
         this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
         this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
+        created = true;
       } else if (inviteHash && !invite) throw new ApiError(403, 'INVITE_INVALID');
-      if (invite) this.spendInvite(invite, row.id, now);
+      if (invite) this.spendInvite(invite, row.id, now, created);
       this.createSession(row.id, sessionHash, expiresAt, now, meta);
       return toUser(row);
     }).immediate();
   }
-  private spendInvite(invite: Invite, userId: string, now: number) {
+  private spendInvite(invite: Invite, userId: string, now: number, created = false) {
+    // A personal invite only opens registration: it never adds anyone to the inviter's space and an existing account never spends it.
+    if (invite.joinSpace === 0) {
+      if (!created) return;
+      const spent = this.db.prepare('UPDATE invites SET uses=uses+1 WHERE id=? AND uses<maxUses AND revoked=0 AND expiresAt>?').run(invite.id, now);
+      if (spent.changes !== 1) throw new ApiError(403, 'INVITE_INVALID');
+      return;
+    }
     // Membership already held: login is idempotent and does not spend another use.
     if (this.isMember(invite.spaceId, userId)) return;
     const result = this.db.prepare('UPDATE invites SET uses=uses+1 WHERE id=? AND uses<maxUses AND revoked=0 AND expiresAt>?').run(invite.id, now);
@@ -380,7 +405,7 @@ export class SqliteRepository implements Repository {
       const spaceId = randomUUID();
       this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
       this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
-      if (invite) this.spendInvite(invite, row.id, input.now);
+      if (invite) this.spendInvite(invite, row.id, input.now, true);
       return toUser(row);
     }).immediate();
   }
@@ -496,11 +521,11 @@ export class SqliteRepository implements Repository {
     }).immediate();
   }
   users() {
-    return this.db.prepare(`SELECT u.id,u.email,u.name,u.role,u.disabled,u.createdAt,u.pending,u.quotaBytes,
+    return this.db.prepare(`SELECT u.id,u.email,u.name,u.role,u.disabled,u.createdAt,u.pending,u.quotaBytes,u.inviteLimit,
       coalesce((SELECT sum(storedBytes) FROM items WHERE userId=u.id),0) AS usedBytes,
       (u.passwordHash IS NOT NULL) AS hasPassword, u.mustChangePassword,
       (SELECT group_concat(provider) FROM identities WHERE userId=u.id) AS providers
-      FROM users u ORDER BY createdAt`).all() as (User & { usedBytes: number; quotaBytes: number | null; hasPassword: number; mustChangePassword: number; providers: string | null })[];
+      FROM users u ORDER BY createdAt`).all() as (User & { usedBytes: number; quotaBytes: number | null; inviteLimit: number | null; hasPassword: number; mustChangePassword: number; providers: string | null })[];
   }
   provisionUser(input: { email: string; name: string; role: 'admin' | 'user'; quotaBytes: number | null; now: number }) {
     return this.db.transaction(() => {
@@ -514,7 +539,7 @@ export class SqliteRepository implements Repository {
       return toUser(row);
     }).immediate();
   }
-  updateUser(id: string, patch: { disabled?: boolean; role?: 'admin' | 'user'; name?: string; quotaBytes?: number | null }) {
+  updateUser(id: string, patch: { disabled?: boolean; role?: 'admin' | 'user'; name?: string; quotaBytes?: number | null; inviteLimit?: number | null }) {
     this.db.transaction(() => {
       const user = this.db.prepare('SELECT * FROM users WHERE id=?').get(id) as UserRow | undefined;
       if (!user) throw new ApiError(404, 'NOT_FOUND');
@@ -526,9 +551,10 @@ export class SqliteRepository implements Repository {
         const { n } = this.db.prepare("SELECT count(*) AS n FROM users WHERE role='admin' AND disabled=0").get() as { n: number };
         if (n <= 1) throw new ApiError(409, 'LAST_ADMIN');
       }
-      this.db.prepare('UPDATE users SET disabled=?, role=?, name=?, quotaBytes=? WHERE id=?').run(
+      this.db.prepare('UPDATE users SET disabled=?, role=?, name=?, quotaBytes=?, inviteLimit=? WHERE id=?').run(
         Number(nextDisabled), nextRole, patch.name ?? user.name,
-        patch.quotaBytes === undefined ? user.quotaBytes : patch.quotaBytes, id);
+        patch.quotaBytes === undefined ? user.quotaBytes : patch.quotaBytes,
+        patch.inviteLimit === undefined ? (user as UserRow & { inviteLimit?: number | null }).inviteLimit ?? null : patch.inviteLimit, id);
       if (nextDisabled && user.disabled === 0) {
         this.db.prepare('DELETE FROM sessions WHERE userId=?').run(id);
         this.db.prepare('UPDATE access_tokens SET revoked=1 WHERE userId=?').run(id);
@@ -546,14 +572,30 @@ export class SqliteRepository implements Repository {
   }
   spaces(userId: string) { return this.db.prepare('SELECT s.* FROM spaces s JOIN members m ON m.spaceId=s.id WHERE m.userId=?').all(userId) as Space[]; }
   space(id: string) { return this.db.prepare('SELECT * FROM spaces WHERE id=?').get(id) as Space | undefined; }
+  roomById(id: string, now: number) { return this.db.prepare('SELECT * FROM spaces WHERE id=? AND roomHash IS NOT NULL AND expiresAt>?').get(id, now) as Space | undefined; }
   room(roomHash: string, now: number) { return this.db.prepare('SELECT * FROM spaces WHERE roomHash=? AND expiresAt>?').get(roomHash, now) as Space | undefined; }
-  createRoom(space: Space, deviceHash: string | null = null) {
+  createRoom(space: Space, deviceHash: string | null, now: number) {
     this.db.transaction(() => {
-      // an expired room that cleanup has not removed yet gives up its browser binding
+      // an expired room that cleanup has not removed yet gives up its browser binding and its code
       if (deviceHash) this.db.prepare('UPDATE spaces SET deviceHash=NULL WHERE deviceHash=?').run(deviceHash);
-      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash,deviceHash) VALUES (?,?,?,?,?,?)')
-        .run(space.id, space.name, space.ownerId, space.expiresAt, space.roomHash, deviceHash);
-    })();
+      if (this.db.prepare('SELECT 1 FROM spaces WHERE roomHash=?').get(space.roomHash)) throw new ApiError(409, 'TOKEN_COLLISION');
+      if (space.roomCode) this.releaseExpiredCode(space.roomCode, now);
+      if (space.roomCode && this.db.prepare('SELECT 1 FROM spaces WHERE roomCode=?').get(space.roomCode)) throw new ApiError(409, 'CODE_TAKEN');
+      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash,deviceHash,roomCode,pinHash) VALUES (?,?,?,?,?,?,?,?)')
+        .run(space.id, space.name, space.ownerId, space.expiresAt, space.roomHash, deviceHash, space.roomCode ?? null, space.pinHash ?? null);
+    }).immediate();
+  }
+  private releaseExpiredCode(code: string, now: number) {
+    this.db.prepare('UPDATE spaces SET roomCode=NULL, pinHash=NULL WHERE roomCode=? AND expiresAt<=?').run(code, now);
+  }
+  roomByCode(code: string, now: number) { return this.db.prepare('SELECT * FROM spaces WHERE roomCode=? AND expiresAt>?').get(code, now) as Space | undefined; }
+  setRoomCode(spaceId: string, code: string, pinHash: string | null, now: number) {
+    this.db.transaction(() => {
+      this.releaseExpiredCode(code, now);
+      const holder = this.db.prepare('SELECT id FROM spaces WHERE roomCode=?').get(code) as { id: string } | undefined;
+      if (holder && holder.id !== spaceId) throw new ApiError(409, 'CODE_TAKEN');
+      if (!this.db.prepare('UPDATE spaces SET roomCode=?, pinHash=? WHERE id=? AND roomHash IS NOT NULL AND expiresAt>?').run(code, pinHash, spaceId, now).changes) throw new ApiError(404, 'NOT_FOUND');
+    }).immediate();
   }
   deviceRoom(deviceHash: string, now: number) {
     return this.db.prepare('SELECT * FROM spaces WHERE deviceHash=? AND roomHash IS NOT NULL AND expiresAt>?').get(deviceHash, now) as Space | undefined;
@@ -563,9 +605,46 @@ export class SqliteRepository implements Repository {
     return this.db.prepare('SELECT * FROM invites WHERE tokenHash=? AND revoked=0 AND uses<maxUses AND expiresAt>?').get(tokenHash, now) as Invite | undefined;
   }
   createInvite(invite: Invite) {
-    this.db.prepare('INSERT INTO invites VALUES (@id,@tokenHash,@spaceId,@maxUses,@uses,@expiresAt,@revoked,@createdBy)').run(invite);
+    this.db.prepare(`INSERT INTO invites (id,tokenHash,spaceId,maxUses,uses,expiresAt,revoked,createdBy,joinSpace,createdAt)
+      VALUES (@id,@tokenHash,@spaceId,@maxUses,@uses,@expiresAt,@revoked,@createdBy,@joinSpace,@createdAt)`)
+      .run({ ...invite, joinSpace: invite.joinSpace ?? 1, createdAt: invite.createdAt ?? null });
   }
-  invites() { return this.db.prepare('SELECT id,spaceId,maxUses,uses,expiresAt,revoked,createdBy FROM invites ORDER BY expiresAt DESC').all() as Omit<Invite, 'tokenHash'>[]; }
+  invites() {
+    return this.db.prepare(`SELECT i.id,i.spaceId,i.maxUses,i.uses,i.expiresAt,i.revoked,i.createdBy,i.joinSpace,i.createdAt,u.email AS createdByEmail
+      FROM invites i LEFT JOIN users u ON u.id=i.createdBy ORDER BY i.expiresAt DESC`).all() as (Omit<Invite, 'tokenHash'> & { createdByEmail: string | null })[];
+  }
+  personalInvites(userId: string) {
+    return this.db.prepare(`SELECT id,spaceId,maxUses,uses,expiresAt,revoked,createdBy,joinSpace,createdAt FROM invites
+      WHERE createdBy=? AND joinSpace=0 AND NOT (revoked=1 AND uses=0) ORDER BY coalesce(createdAt,0) DESC, expiresAt DESC`).all(userId) as Omit<Invite, 'tokenHash'>[];
+  }
+  // A personal invite counts against the user's limit once it was used, or while it can still be used.
+  // Revoking or letting an unused one expire gives the slot back.
+  inviteUsage(userId: string, now: number) {
+    return (this.db.prepare(`SELECT count(*) AS n FROM invites WHERE createdBy=? AND joinSpace=0 AND (uses>0 OR (revoked=0 AND expiresAt>?))`).get(userId, now) as { n: number }).n;
+  }
+  inviteUsageByUser(now: number) {
+    const rows = this.db.prepare(`SELECT createdBy, count(*) AS n FROM invites WHERE joinSpace=0 AND (uses>0 OR (revoked=0 AND expiresAt>?)) GROUP BY createdBy`).all(now) as { createdBy: string; n: number }[];
+    return new Map(rows.map(row => [row.createdBy, row.n]));
+  }
+  createPersonalInvite(invite: Invite, limit: number | null, now: number) {
+    this.db.transaction(() => {
+      if (limit !== null && this.inviteUsage(invite.createdBy, now) >= limit) throw new ApiError(403, 'INVITE_LIMIT_REACHED');
+      this.createInvite({ ...invite, joinSpace: 0 });
+    }).immediate();
+  }
+  revokePersonalInvite(id: string, userId: string) {
+    const row = this.db.prepare('SELECT uses,revoked FROM invites WHERE id=? AND createdBy=? AND joinSpace=0').get(id, userId) as { uses: number; revoked: number } | undefined;
+    if (!row || row.revoked) throw new ApiError(404, 'NOT_FOUND');
+    if (row.uses > 0) throw new ApiError(409, 'INVITE_USED');
+    this.db.prepare('UPDATE invites SET revoked=1 WHERE id=?').run(id);
+  }
+  inviteLimit(userId: string) {
+    const row = this.db.prepare('SELECT inviteLimit FROM users WHERE id=?').get(userId) as { inviteLimit: number | null } | undefined;
+    return row?.inviteLimit ?? null;
+  }
+  personalSpaceId(userId: string) {
+    return (this.db.prepare('SELECT id FROM spaces WHERE ownerId=?').get(userId) as { id: string } | undefined)?.id;
+  }
   revokeInvite(id: string) {
     if (!this.db.prepare('UPDATE invites SET revoked=1 WHERE id=?').run(id).changes) throw new ApiError(404, 'NOT_FOUND');
   }
@@ -816,7 +895,8 @@ export class SqliteRepository implements Repository {
       this.db.prepare('DELETE FROM sessions WHERE expiresAt<=?').run(now);
       this.db.prepare('DELETE FROM flows WHERE expiresAt<=?').run(now);
       this.db.prepare('DELETE FROM device_authorizations WHERE expiresAt<=?').run(now);
-      this.db.prepare('DELETE FROM invites WHERE expiresAt<=? OR revoked=1').run(now);
+      // spent invites stay: they count against their creator's invite limit and are the usage history
+      this.db.prepare('DELETE FROM invites WHERE uses=0 AND (expiresAt<=? OR revoked=1)').run(now);
       this.db.prepare('DELETE FROM shares WHERE revoked=1 OR (expiresAt IS NOT NULL AND expiresAt<=?)').run(now);
       return items;
     })();

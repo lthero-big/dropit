@@ -345,7 +345,7 @@ test('D3/E: temporary room capability, uniform unknown responses, strict limits 
   const response = await f.request('/api/rooms', { method: 'POST' });
   assert.equal(response.status, 201);
   const room = await response.json();
-  assert.equal(Buffer.from(room.token, 'base64url').length, 32);
+  assert.match(room.token, /^[A-Za-z0-9]{6}$/);
   const base = `/api/rooms/${room.token}`;
   assert.equal((await f.request('/api/rooms')).status, 404);
   assert.equal((await f.request('/api/rooms/guess/items')).status, 404);
@@ -670,7 +670,7 @@ test('share links enforce token, expiry, revocation, view limits and owner-only 
   const createdShare = await f.json(`${base}/items/${itemId}/shares`, { expiresIn: '1h', maxViews: 2 }, member.cookie);
   assert.equal(createdShare.status, 201);
   const share = await createdShare.json();
-  assert.equal(Buffer.from(share.token, 'base64url').length, 32);
+  assert.match(share.token, /^[A-Za-z0-9]{6}$/);
   assert.equal(share.url, `${origin}/s/${share.token}`);
   assert.equal(share.maxViews, 2);
   const listed = await (await f.request(`${base}/items/${itemId}/shares`, {}, member.cookie)).json();
@@ -1407,7 +1407,7 @@ test('RHEA-190 step 7: one live temporary room per browser key', async t => {
   assert.equal(first.status, 201);
   const room = await first.json();
   assert.equal(room.reused, false);
-  assert.equal(Buffer.from(room.token, 'base64url').length, 32);
+  assert.match(room.token, /^[A-Za-z0-9]{6}$/);
   // clicking 临时房间 again from the same browser re-enters the same live room,
   // and doing so does not spend the room-create rate limit
   for (let i = 0; i < 5; i++) {
@@ -1455,10 +1455,10 @@ test('RHEA-190 step 7: migration 10 adds the per-browser room binding to old dat
   t.after(() => repo.close());
   assert.equal(repo.room('rh', 1)?.id, 's1');
   assert.equal(repo.deviceRoom('dh', 1), undefined);
-  repo.createRoom({ id: 's2', name: 'Temporary room', ownerId: null, expiresAt: 9999999999999, roomHash: 'rh2' }, 'dh');
+  repo.createRoom({ id: 's2', name: 'Temporary room', ownerId: null, expiresAt: 9999999999999, roomHash: 'rh2' }, "dh", 1);
   assert.equal(repo.deviceRoom('dh', 1)?.id, 's2');
   assert.equal(repo.deviceRoom('dh', 9999999999999), undefined);
   const check = new Database(path, { readonly: true });
   t.after(() => check.close());
-  assert.equal(check.pragma('user_version', { simple: true }), 14);
+  assert.equal(check.pragma('user_version', { simple: true }), 15);
 });

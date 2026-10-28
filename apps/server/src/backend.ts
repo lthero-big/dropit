@@ -7,19 +7,20 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import { upgradeWebSocket } from '@hono/node-server';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { loadConfig, type Config } from './config.js';
-import { ApiError, hash, parseDevice, token, type AccessToken, type BrowserSession, type Item, type ItemDevice, type ItemMeta, type Session, type TokenScope } from './domain.js';
+import { ApiError, CUSTOM_CODE_PATTERN, PIN_MAX, PIN_MIN, hash, parseDevice, token, type AccessToken, type BrowserSession, type Item, type ItemDevice, type ItemMeta, type Session, type TokenScope } from './domain.js';
 import { parseByteRange, sniffMedia } from './media.js';
 import { SqliteRepository, type Repository } from './repository.js';
 import { DiskFileStorage, jsonFileStore, readJsonFile, type FileStorage } from './files.js';
 import { MemoryBroadcaster, type Broadcaster } from './events.js';
 import { checkOAuthCredentials, createOAuthProvider, envOAuthApps, isSupportedProvider, providerInfo, supportedProviders, type OAuthProvider } from './oauth.js';
-import { ClipboardService } from './service.js';
+import { ClipboardService, deviceRoomHash, inviteStatus, roomCodeInfo } from './service.js';
 import { clientIpResolver, RateLimiter } from './rate-limit.js';
 import { limitRanges, RuntimeLimits } from './limits.js';
 import { describeAgent } from './agent.js';
 import { loadUpdateSettings, UpdateChecker } from './update-check.js';
 import { buildInfoPath, loadBuildInfo } from './version.js';
 import { ORIGIN_SETTING, parseOrigin, requestOriginResolver, sameOrigin } from './origin.js';
+import { MAX_INVITE_LIMIT, USER_INVITES_SETTING, editUserInvites, parseUserInvites } from './invites.js';
 import { PASSWORD_MAX, REGISTRATION_SETTING, checkPassword, hashPassword, hashPasswordSync, parsePolicy, sameSetupCode, setupCode, temporaryPassword, verifyPassword, type RegistrationPolicy } from './password.js';
 
 type Env = { Variables: { session: Session | undefined; ip: string; remote: string } };
@@ -159,6 +160,7 @@ export function createBackend(options: BackendOptions = {}) {
     if (firstRunCode && repo.userCount() > 0) firstRunCode = null;
     return firstRunCode !== null;
   };
+  const userInviteSettings = () => parseUserInvites(repo.setting(USER_INVITES_SETTING)?.value);
   const registrationPolicy = (): RegistrationPolicy => parsePolicy(repo.setting(REGISTRATION_SETTING)?.value) ?? 'invite';
   const service = new ClipboardService(config, repo, files, events, now);
   const update = options.update ?? new UpdateChecker(loadBuildInfo(process.env, readJsonFile(buildInfoPath)), loadUpdateSettings(),
@@ -707,13 +709,20 @@ export function createBackend(options: BackendOptions = {}) {
     limit(c, 'invite', config.rateInvite);
     const invite = repo.invite(hash(c.req.param('token')), now());
     if (!invite) throw new ApiError(404, 'NOT_FOUND');
+    if (invite.joinSpace === 0) {
+      const inviter = repo.users().find(user => user.id === invite.createdBy);
+      return c.json({ personal: true, spaceName: null, inviterName: inviter?.name ?? null, expiresAt: invite.expiresAt, remainingUses: invite.maxUses - invite.uses });
+    }
     const space = repo.space(invite.spaceId)!;
-    return c.json({ spaceName: space.name, expiresAt: invite.expiresAt, remainingUses: invite.maxUses - invite.uses });
+    return c.json({ personal: false, spaceName: space.name, expiresAt: invite.expiresAt, remainingUses: invite.maxUses - invite.uses });
   });
   const effectiveQuota = (userId: string) => repo.quotaOverride(userId) ?? config.userQuotaBytes;
   app.get('/api/admin/users', c => {
     service.admin(c.get('session'));
+    const usage = repo.inviteUsageByUser(now());
+    const defaults = userInviteSettings();
     return c.json({ users: repo.users().map(user => ({
+      inviteLimit: user.inviteLimit, inviteLimitEffective: user.inviteLimit ?? defaults.defaultLimit, invitesUsed: usage.get(user.id) ?? 0,
       id: user.id, email: user.email, name: user.name, role: user.role, disabled: user.disabled,
       pending: user.pending, createdAt: user.createdAt, usedBytes: user.usedBytes,
       quotaBytes: user.quotaBytes ?? config.userQuotaBytes, quotaOverride: user.quotaBytes,
@@ -741,15 +750,20 @@ export function createBackend(options: BackendOptions = {}) {
   // RHEA-190 auth step 2: 管理 → 注册. closed / invite (default) / open.
   const registrationView = () => {
     const row = repo.setting(REGISTRATION_SETTING);
-    return { policy: registrationPolicy(), default: 'invite', updatedAt: row?.updatedAt ?? null, updatedBy: row?.updatedBy ?? null };
+    return { policy: registrationPolicy(), default: 'invite', updatedAt: row?.updatedAt ?? null, updatedBy: row?.updatedBy ?? null,
+      userInvites: userInviteSettings() };
   };
   app.get('/api/admin/registration', c => { adminBrowser(c); return c.json(registrationView()); });
   app.put('/api/admin/registration', async c => {
     const auth = adminBrowser(c);
     limit(c, 'registration-config', config.rateAuth);
-    const policy = parsePolicy((await json(c, 1024)).policy);
-    if (!policy) throw new ApiError(400, 'INVALID_INPUT');
-    repo.saveSetting(REGISTRATION_SETTING, policy, now(), auth.user.email);
+    const body = await json(c, 1024);
+    if (!('policy' in body) && !('userInvites' in body)) throw new ApiError(400, 'INVALID_INPUT');
+    const policy = 'policy' in body ? parsePolicy(body.policy) : null;
+    if ('policy' in body && !policy) throw new ApiError(400, 'INVALID_INPUT');
+    const invites = 'userInvites' in body ? editUserInvites(userInviteSettings(), body.userInvites) : null;
+    if (policy) repo.saveSetting(REGISTRATION_SETTING, policy, now(), auth.user.email);
+    if (invites) repo.saveSetting(USER_INVITES_SETTING, JSON.stringify(invites), now(), auth.user.email);
     return c.json(registrationView());
   });
   app.post('/api/admin/users', async c => {
@@ -782,7 +796,7 @@ export function createBackend(options: BackendOptions = {}) {
   app.patch('/api/admin/users/:id', async c => {
     service.admin(c.get('session'));
     const body = await json(c, 2048);
-    const patch: { disabled?: boolean; role?: 'admin' | 'user'; name?: string; quotaBytes?: number | null } = {};
+    const patch: { disabled?: boolean; role?: 'admin' | 'user'; name?: string; quotaBytes?: number | null; inviteLimit?: number | null } = {};
     if ('disabled' in body) {
       if (typeof body.disabled !== 'boolean') throw new ApiError(400, 'INVALID_INPUT');
       patch.disabled = body.disabled;
@@ -793,7 +807,11 @@ export function createBackend(options: BackendOptions = {}) {
     }
     if ('name' in body) patch.name = personName(body.name);
     if ('quotaBytes' in body) patch.quotaBytes = body.quotaBytes === null ? null : integer(body.quotaBytes, 1, maxQuotaBytes);
-    if (!('disabled' in body || 'role' in body || 'name' in body || 'quotaBytes' in body)) throw new ApiError(400, 'INVALID_INPUT');
+    if ('inviteLimit' in body) {
+      if (body.inviteLimit !== null && typeof body.inviteLimit !== 'number') throw new ApiError(400, 'INVALID_INPUT');
+      patch.inviteLimit = body.inviteLimit === null ? null : integer(body.inviteLimit, 0, MAX_INVITE_LIMIT);
+    }
+    if (!('disabled' in body || 'role' in body || 'name' in body || 'quotaBytes' in body || 'inviteLimit' in body)) throw new ApiError(400, 'INVALID_INPUT');
     repo.updateUser(c.req.param('id'), patch);
     if (patch.disabled) await service.uploads.cancelUser(c.req.param('id'));
     events.revalidate();
@@ -822,7 +840,25 @@ export function createBackend(options: BackendOptions = {}) {
     const more = entries.length > size;
     return c.json({ entries: entries.slice(0, size), nextCursor: more ? entries[size - 1].id : null });
   });
-  app.get('/api/admin/invites', c => { service.admin(c.get('session')); return c.json({ invites: repo.invites() }); });
+  app.get('/api/admin/invites', c => {
+    service.admin(c.get('session'));
+    return c.json({ invites: repo.invites().map(invite => ({ ...invite, status: inviteStatus(invite, now()) })) });
+  });
+  // RHEA-190 auth step 3: 设置 → 邀请. Every signed-in user may invite someone to register (admin switch and limit in 管理 → 注册).
+  app.get('/api/me/invites', c => c.json({ ...service.personalInvites(c.get('session'), userInviteSettings()), registration: registrationPolicy() }));
+  app.post('/api/me/invites', async c => {
+    service.requireSession(c.get('session'));
+    limit(c, 'invite', config.rateInvite);
+    const body = c.req.header('content-type')?.startsWith('application/json') ? await json(c, 1024) : {};
+    const hours = integer(body.expiresInHours ?? 168, 1, 720);
+    return c.json(service.createPersonalInvite(c.get('session'), userInviteSettings(), hours, originFor(c)), 201);
+  });
+  app.delete('/api/me/invites/:id', c => {
+    const auth = service.requireSession(c.get('session'));
+    limit(c, 'invite', config.rateInvite);
+    repo.revokePersonalInvite(c.req.param('id'), auth.user.id);
+    return c.body(null, 204);
+  });
   app.post('/api/admin/invites', async c => {
     service.admin(c.get('session')); limit(c, 'invite', config.rateInvite);
     const body = await json(c, 2048);
@@ -837,21 +873,93 @@ export function createBackend(options: BackendOptions = {}) {
     const auth = service.requireSession(c.get('session'));
     return c.json({ spaces: repo.spaces(auth.user.id).map(({ roomHash: _room, deviceHash: _device, ...space }) => space) });
   });
+  // RHEA-190 auth step 3: short codes are guessable, so every wrong guess (unknown code, wrong PIN, a
+  // custom code that is already taken, a share link that does not exist) is charged to the caller's IP.
+  // The budget is RATE_AUTH per window; a blocked caller gets 429 before any lookup happens.
+  const guessBlocked = (c: Ctx, extra?: string) => {
+    for (const key of [`guess:ip:${c.get('ip')}`, ...(extra ? [`guess:${extra}`] : [])]) {
+      const retry = limiter.blocked(key, config.rateAuth, now());
+      if (retry) { c.header('Retry-After', String(retry)); throw new ApiError(429, 'RATE_LIMITED'); }
+    }
+  };
+  const guessFailed = (c: Ctx, extra?: string) => {
+    for (const key of [`guess:ip:${c.get('ip')}`, ...(extra ? [`guess:${extra}`] : [])]) limiter.consume(key, config.rateAuth, now());
+  };
+  const roomCodeInput = (value: unknown) => {
+    if (typeof value !== 'string' || !CUSTOM_CODE_PATTERN.test(value)) throw new ApiError(400, 'INVALID_CODE');
+    return value;
+  };
+  const pinInput = (value: unknown) => {
+    if (typeof value !== 'string') throw new ApiError(400, 'INVALID_PIN');
+    const length = [...value].length;
+    if (length < PIN_MIN || length > PIN_MAX || [...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) throw new ApiError(400, 'INVALID_PIN');
+    return value;
+  };
+  // code / pin as typed by a client: an absent code means "random", a pin needs a custom code.
+  const roomCodeOptions = async (body: Record<string, unknown>) => {
+    const has = (value: unknown) => value !== undefined && value !== null && value !== '';
+    if (!has(body.code)) {
+      if (has(body.pin)) throw new ApiError(400, 'PIN_NEEDS_CODE');
+      return {};
+    }
+    const code = roomCodeInput(body.code);
+    return { code, pinHash: has(body.pin) ? await hashPassword(pinInput(body.pin)) : null };
+  };
+  const deviceKeyInput = (value: unknown) => {
+    if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(value)) throw new ApiError(400, 'INVALID_INPUT');
+    return value;
+  };
   // RHEA-190 step 7: browsers send their secret room key so 临时房间 re-enters the
   // one live room they already have instead of minting a new room per click.
+  // Step 3: an optional custom code (and PIN) is set on the new room, or on the live one this browser already has.
   app.post('/api/rooms', async c => {
     let deviceKey: string | undefined;
+    let body: Record<string, unknown> = {};
     if (c.req.header('content-type')?.startsWith('application/json')) {
-      const body = await json(c, 2048);
-      if (body.deviceKey !== undefined) {
-        if (typeof body.deviceKey !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(body.deviceKey)) throw new ApiError(400, 'INVALID_INPUT');
-        deviceKey = body.deviceKey;
-      }
+      body = await json(c, 2048);
+      if (body.deviceKey !== undefined) deviceKey = deviceKeyInput(body.deviceKey);
     }
+    const options = await roomCodeOptions(body);
+    if (options.code) guessBlocked(c);
     const existing = deviceKey ? service.deviceRoom(deviceKey, originFor(c)) : null;
-    if (existing) return c.json(existing, 200);
+    if (existing) {
+      if (!options.code) return c.json(existing, 200);
+      const space = service.room(existing.token);
+      try { service.setRoomCode(space, options); }
+      catch (error) { if (error instanceof ApiError && error.code === 'CODE_TAKEN') guessFailed(c); throw error; }
+      return c.json(service.deviceRoom(deviceKey!, originFor(c)), 200);
+    }
     limit(c, 'room-create', config.rateRoom);
-    return c.json(service.createRoom(deviceKey, originFor(c)), 201);
+    try { return c.json(service.createRoom(deviceKey, originFor(c), options), 201); }
+    catch (error) { if (error instanceof ApiError && error.code === 'CODE_TAKEN') guessFailed(c); throw error; }
+  });
+  // Enter a room by its code (and PIN when it has one) without signing in.
+  app.post('/api/rooms/enter', async c => {
+    const body = await json(c, 2048);
+    const code = typeof body.code === 'string' && body.code.length <= 64 ? body.code.trim() : '';
+    const pin = typeof body.pin === 'string' && body.pin.length <= 256 ? body.pin : '';
+    if (!code) throw new ApiError(400, 'INVALID_CODE');
+    const codeKey = `code:${hash(code).slice(0, 24)}`;
+    guessBlocked(c, codeKey);
+    const space = service.roomByCode(code);
+    if (!space) { guessFailed(c); throw new ApiError(404, 'NOT_FOUND'); }
+    if (space.pinHash) {
+      if (!pin) throw new ApiError(401, 'PIN_REQUIRED');
+      if (!await verifyPassword(pin, space.pinHash)) { guessFailed(c, codeKey); throw new ApiError(403, 'PIN_INVALID'); }
+    }
+    return c.json(service.enterRoomByCode(space));
+  });
+  // The browser that owns a temporary room (it proves it with its secret room key) can change the room's code and PIN.
+  app.put('/api/rooms/:room/code', async c => {
+    limit(c, 'room-create', config.rateRoom);
+    const body = await json(c, 2048);
+    const deviceKey = deviceKeyInput(body.deviceKey);
+    const space = service.room(c.req.param('room'));
+    if (!space.deviceHash || space.deviceHash !== deviceRoomHash(deviceKey)) throw new ApiError(403, 'FORBIDDEN');
+    guessBlocked(c);
+    const options = await roomCodeOptions(body);
+    try { return c.json(service.setRoomCode(space, options)); }
+    catch (error) { if (error instanceof ApiError && error.code === 'CODE_TAKEN') guessFailed(c); throw error; }
   });
   const shareLimit = (c: Ctx, raw: string) => {
     limit(c, 'share', config.rateAuth, false);
@@ -1000,7 +1108,7 @@ export function createBackend(options: BackendOptions = {}) {
     app.get(base, c => {
       const space = scope(c);
       const session = c.get('session');
-      return c.json({ id: space.id, name: space.name, expiresAt: space.expiresAt,
+      return c.json({ id: space.id, name: space.name, expiresAt: space.expiresAt, ...(space.roomHash ? roomCodeInfo(space) : {}),
         maxFileBytes: space.roomHash ? config.roomMaxFileBytes : config.maxFileBytes,
         quotaBytes: space.roomHash ? config.roomQuotaBytes : effectiveQuota(session!.user.id) });
     });

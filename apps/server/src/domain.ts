@@ -1,19 +1,39 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomInt } from 'node:crypto';
 
 export class ApiError extends Error {
   /** details are extra JSON fields next to code (for example the expected origin of ORIGIN_REJECTED). */
   constructor(public status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 429 | 503, public code: string, public details?: Record<string, string>) { super(code); }
 }
 export const token = () => randomBytes(32).toString('base64url');
+const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+/** RHEA-190 auth step 3: share links and room links are 6 case-sensitive base62 characters (older 43-character links keep working). */
+export const SHORT_TOKEN_LENGTH = 6;
+export const shortToken = () => Array.from({ length: SHORT_TOKEN_LENGTH }, () => BASE62[randomInt(BASE62.length)]).join('');
+export const isShortToken = (value: string) => /^[A-Za-z0-9]{6}$/.test(value);
+/** Derives a 6-character base62 token from a digest (device rooms re-derive their link from the browser's secret key). */
+export const shortTokenFrom = (digest: Buffer) => {
+  let n = BigInt(`0x${digest.subarray(0, 8).toString('hex')}`);
+  let out = '';
+  for (let i = 0; i < SHORT_TOKEN_LENGTH; i++) { out += BASE62[Number(n % 62n)]; n /= 62n; }
+  return out;
+};
+/** Random room codes: 5 case-sensitive characters without the look-alikes 0 O o 1 I l. */
+export const ROOM_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz';
+export const RANDOM_ROOM_CODE_LENGTH = 5;
+export const randomRoomCode = () => Array.from({ length: RANDOM_ROOM_CODE_LENGTH }, () => ROOM_CODE_ALPHABET[randomInt(ROOM_CODE_ALPHABET.length)]).join('');
+/** A code somebody typed: case-sensitive letters, digits, '-' and '_'. */
+export const CUSTOM_CODE_PATTERN = /^[A-Za-z0-9_-]{3,32}$/;
+export const PIN_MIN = 4;
+export const PIN_MAX = 32;
 export const hash = (value: string) => createHash('sha256').update(value).digest('base64url');
 export interface User { id: string; email: string; name: string; role: 'admin' | 'user'; disabled: number; pending: number; createdAt: number }
-export interface Space { id: string; name: string; ownerId: string | null; expiresAt: number | null; roomHash: string | null; deviceHash?: string | null }
+export interface Space { id: string; name: string; ownerId: string | null; expiresAt: number | null; roomHash: string | null; deviceHash?: string | null; roomCode?: string | null; pinHash?: string | null }
 export interface UploadSession {
   id: string; spaceId: string; userId: string | null; principal: string;
   filename: string; mime: string; size: number; chunkSize: number; createdAt: number; expiresAt: number;
 }
 export interface UploadChunk { uploadId: string; index: number; key: string; size: number; sha256: string }
-export interface Invite { id: string; tokenHash: string; spaceId: string; maxUses: number; uses: number; expiresAt: number; revoked: number; createdBy: string }
+export interface Invite { id: string; tokenHash: string; spaceId: string; maxUses: number; uses: number; expiresAt: number; revoked: number; createdBy: string; joinSpace?: number; createdAt?: number | null }
 export interface Item {
   id: string; spaceId: string; userId: string | null; kind: 'text' | 'file'; text: string | null;
   filename: string | null; mime: string | null; size: number; storedBytes: number;

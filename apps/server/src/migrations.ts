@@ -192,3 +192,17 @@ ALTER TABLE users ADD COLUMN mustChangePassword INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN passwordUpdatedAt INTEGER;
 PRAGMA user_version=14;
 `;
+
+// RHEA-190 auth step 3: short room codes (typed to enter a room, optionally with a PIN), per-user
+// invite limits and personal invites. roomCode is case-sensitive and unique among rooms that still
+// exist (expired rooms give theirs up on creation of a new one). pinHash is scrypt. joinSpace=0 marks
+// a personal invite: it only lets someone register and never adds the invitee to the inviter's space.
+export const migration15 = `
+ALTER TABLE spaces ADD COLUMN roomCode TEXT;
+ALTER TABLE spaces ADD COLUMN pinHash TEXT;
+CREATE UNIQUE INDEX room_code ON spaces(roomCode) WHERE roomCode IS NOT NULL;
+ALTER TABLE users ADD COLUMN inviteLimit INTEGER;
+ALTER TABLE invites ADD COLUMN joinSpace INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE invites ADD COLUMN createdAt INTEGER;
+PRAGMA user_version=15;
+`;

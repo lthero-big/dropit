@@ -85,11 +85,11 @@ test('fallback: same-origin writes pass, cross-site and missing Origin are rejec
   const f = await setup(); t.after(() => f.close());
   const room = await f.request('/api/rooms', { method: 'POST' });
   assert.equal(room.status, 201);
-  assert.match((await room.json()).url, /^http:\/\/dropit\.lan:8787\/rooms\//);
+  assert.match((await room.json()).url, /^http:\/\/dropit\.lan:8787\/r\//);
   // Another address of the same server works too (IP, other hostname) without configuration.
   const ip = await f.request('/api/rooms', { method: 'POST', host: '192.0.2.10:8787', origin: 'http://192.0.2.10:8787' });
   assert.equal(ip.status, 201);
-  assert.match((await ip.json()).url, /^http:\/\/192\.0\.2\.10:8787\/rooms\//);
+  assert.match((await ip.json()).url, /^http:\/\/192\.0\.2\.10:8787\/r\//);
   for (const origin of ['https://evil.example', 'http://dropit.lan:8788', 'http://dropit.lan', 'null']) {
     const denied = await f.request('/api/rooms', { method: 'POST', origin });
     assert.equal(denied.status, 403, origin);
@@ -113,7 +113,7 @@ test('fallback behind a trusted proxy uses X-Forwarded-Proto and rejects the dow
   const headers = { 'x-test-peer': '127.0.0.1', 'x-forwarded-proto': 'https' };
   const ok = await f.request('/api/rooms', { method: 'POST', host: 'drop.example', origin: 'https://drop.example', headers });
   assert.equal(ok.status, 201);
-  assert.match((await ok.json()).url, /^https:\/\/drop\.example\/rooms\//);
+  assert.match((await ok.json()).url, /^https:\/\/drop\.example\/r\//);
   assert.equal((await f.request('/api/rooms', { method: 'POST', host: 'drop.example', origin: 'http://drop.example', headers })).status, 403);
 });
 
@@ -150,7 +150,7 @@ test('admin site address: validation, confirm, precedence over env, persistence 
   assert.deepEqual(await denied.json(), { error: { code: 'ORIGIN_REJECTED', expected: 'https://dropit.example', received: LAN, source: 'admin' } });
   const room = await f.request('/api/rooms', { method: 'POST', origin: 'https://dropit.example' });
   assert.equal(room.status, 201);
-  assert.match((await room.json()).url, /^https:\/\/dropit\.example\/rooms\//);
+  assert.match((await room.json()).url, /^https:\/\/dropit\.example\/r\//);
   assert.deepEqual(await (await f.request('/api/site', { origin: null })).json(), { origin: 'https://dropit.example', source: 'admin', requestOrigin: LAN });
   await f.close(true);
   // Restart with APP_ORIGIN set: the admin setting still wins.
