@@ -14,7 +14,7 @@
 [![Docs](https://img.shields.io/badge/docs-lthero--big.github.io%2Fdropit-0a7bbb)](https://lthero-big.github.io/dropit/)
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
 
-**[📖 文档站](https://lthero-big.github.io/dropit/)** · [快速开始](https://lthero-big.github.io/dropit/start/getting-started/) · [部署](https://lthero-big.github.io/dropit/deploy/deployment/) · [配置](https://lthero-big.github.io/dropit/config/configuration/) · [API](https://lthero-big.github.io/dropit/api/overview/)
+**[📖 文档站](https://lthero-big.github.io/dropit/)** · [快速开始](https://lthero-big.github.io/dropit/start/getting-started/) · [部署](https://lthero-big.github.io/dropit/deploy/deployment/) · [配置](https://lthero-big.github.io/dropit/config/configuration/) · [API](https://lthero-big.github.io/dropit/api/overview/) · [English docs](https://lthero-big.github.io/dropit/en/)
 
 </div>
 

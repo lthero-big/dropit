@@ -1,0 +1,61 @@
+---
+title: dropit
+description: A self-hosted cloud clipboard for sending text and files across devices in real time
+template: splash
+hero:
+  tagline: A self-hosted cloud clipboard for sending text and files across devices in real time. The web app, the CLI and temporary rooms all share one real-time API — paste on one device and every other device sees it instantly.
+  image:
+    file: ../../../assets/logo.svg
+  actions:
+    - text: Getting started
+      link: start/getting-started/
+      icon: right-arrow
+    - text: Deploy to a server
+      link: deploy/deployment/
+      variant: secondary
+    - text: GitHub
+      link: https://github.com/lthero-big/dropit
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## Features
+
+<CardGrid>
+  <Card title="Clipboard" icon="document">
+    Text / file items, real-time sync, in-place editing, safe Markdown rendering, tags, pinning, groups, source device, command palette.
+  </Card>
+  <Card title="Files" icon="seti:image">
+    WebP thumbnails and previews, inline video/audio playback, resumable `Range` downloads, resumable chunked uploads.
+  </Card>
+  <Card title="Sharing and temporary rooms" icon="external">
+    Read-only links that can expire, be view-limited and be revoked; account-free temporary rooms (≤ 24 hours, join by QR code).
+  </Card>
+  <Card title="Accounts" icon="github">
+    GitHub / Google OAuth (passwordless), invite-only, first sign-in becomes admin, personal access tokens, device-code login.
+  </Card>
+  <Card title="Administration" icon="setting">
+    Users, invitations, tokens, runtime limits (applied instantly + audited).
+  </Card>
+  <Card title="Operations" icon="rocket">
+    Single Node process + SQLite (WAL) + local disk; a single Docker image; `/healthz`.
+  </Card>
+</CardGrid>
+
+## Start here
+
+<CardGrid>
+  <LinkCard title="Getting started" description="First run: Docker, Compose or local development" href="start/getting-started/" />
+  <LinkCard title="Deployment and configuration" description="Production deployment, nginx, upgrades and environment variables" href="deploy/deployment/" />
+  <LinkCard title="User guide and CLI" description="Everyday use, share links, temporary rooms, the dropit CLI" href="start/user-guide/" />
+  <LinkCard title="API and development" description="HTTP / WebSocket API, architecture, development and contributing" href="api/overview/" />
+</CardGrid>
+
+## Project info
+
+- Source: [github.com/lthero-big/dropit](https://github.com/lthero-big/dropit)
+- Image: [`lthero1/dropit`](https://hub.docker.com/r/lthero1/dropit) (`latest` plus per-commit tags)
+- Requirements: Node.js 22+ (from source) or Docker
+- License: [GNU AGPL-3.0-only](https://github.com/lthero-big/dropit/blob/main/LICENSE) (commercial use allowed; if you offer a modified version as a network service you must publish its source — see the [FAQ](faq/))

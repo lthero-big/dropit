@@ -13,11 +13,11 @@ export default defineConfig({
       description: '跨设备实时传递文本和文件的自托管云剪贴板',
       logo: { src: './src/assets/logo.svg' },
       favicon: '/favicon.svg',
-      // 中文为根语言（URL 无前缀）。以后加英文：在 locales 里加
-      // en: { label: 'English', lang: 'en' }，并在 src/content/docs/en/ 下放同名页面。
+      // 中文为根语言（URL 无前缀）；英文在 /en/ 下，页面放在 src/content/docs/en/（与中文同名）。
       defaultLocale: 'root',
       locales: {
         root: { label: '简体中文', lang: 'zh-CN' },
+        en: { label: 'English', lang: 'en' },
       },
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/lthero-big/dropit' },
@@ -29,6 +29,7 @@ export default defineConfig({
       sidebar: [
         {
           label: '入门',
+          translations: { en: 'Getting started' },
           items: [
             { slug: 'start/getting-started' },
             { slug: 'start/user-guide' },
@@ -37,6 +38,7 @@ export default defineConfig({
         },
         {
           label: '部署',
+          translations: { en: 'Deployment' },
           items: [
             { slug: 'deploy/deployment' },
             { slug: 'deploy/administration' },
@@ -45,6 +47,7 @@ export default defineConfig({
         },
         {
           label: '配置',
+          translations: { en: 'Configuration' },
           items: [
             { slug: 'config/configuration' },
             { slug: 'config/backend-config' },
@@ -52,6 +55,7 @@ export default defineConfig({
         },
         {
           label: 'API',
+          translations: { en: 'API' },
           items: [
             { slug: 'api/overview' },
             { slug: 'api/reference' },
@@ -59,6 +63,7 @@ export default defineConfig({
         },
         {
           label: '开发',
+          translations: { en: 'Development' },
           items: [
             { slug: 'dev/architecture' },
             { slug: 'dev/development' },
