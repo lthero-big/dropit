@@ -1,5 +1,5 @@
-// RHEA-190 step 8: drag-to-group is desktop-mouse only, the drag ghost follows the
-// pointer at a fixed offset, and on desktop 撤回 has no press-and-hold entry.
+// Drag-to-group is desktop-mouse only, the drag ghost follows the pointer at a fixed
+// offset, and on desktop 撤回 has no press-and-hold entry.
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ClipboardBoard } from './clipboard-board.tsx'

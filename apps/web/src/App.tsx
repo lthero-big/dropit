@@ -1,4 +1,3 @@
-import { lazy, Suspense } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router'
 import { Toaster } from '@/components/ui/sonner.tsx'
 import { SessionProvider } from '@/lib/session.tsx'
@@ -10,9 +9,6 @@ import { LoginPage } from '@/pages/login-page.tsx'
 import { RoomPage } from '@/pages/room-page.tsx'
 import { SettingsPage } from '@/pages/settings-page.tsx'
 import { SharePage } from '@/pages/share-page.tsx'
-
-// RHEA-191: standalone UI demo with fake data, lazy so it adds nothing to the main bundle.
-const UiDemoPage = lazy(() => import('@/demo/ui-demo-page.tsx'))
 
 export function App() {
   return (
@@ -27,7 +23,6 @@ export function App() {
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/device" element={<DevicePage />} />
-          <Route path="/demo/ui" element={<Suspense fallback={null}><UiDemoPage /></Suspense>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
         <Toaster position="top-center" />
