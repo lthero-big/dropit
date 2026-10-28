@@ -24,6 +24,13 @@ console.info(`dropit listening on port ${backend.config.port}`);
 // RHEA-190 auth step 1: say which address the Origin check and generated links use.
 console.info(`dropit APP_ORIGIN: ${backend.describeOrigin()}`);
 for (const warning of backend.originWarnings()) console.warn(`dropit warning: ${warning}`);
+// RHEA-190 auth step 2: first run.
+if (backend.bootstrappedAdmin) console.info(`dropit: created the first admin ${backend.bootstrappedAdmin} from ADMIN_EMAIL / ADMIN_PASSWORD`);
+const firstRunCode = backend.setupCode();
+if (firstRunCode) {
+  console.info('dropit: no account exists yet. Open /setup in the browser and enter this one-time code to create the first admin:');
+  console.info(`dropit setup code: ${firstRunCode}`);
+}
 
 let stopping = false;
 const shutdown = () => {

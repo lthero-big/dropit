@@ -4,8 +4,11 @@ title: 安全模型
 
 ## 身份与会话
 
-- 只支持 OAuth（GitHub / Google），无密码；OAuth 流程使用 state + PKCE，state 一次性、10 分钟有效，不保存 provider 的 access/refresh token。
-- 新身份需要有效邀请或管理员预创建；第一位用户例外（成为管理员）。不同 provider 身份不按邮箱合并。
+- 支持邮箱 + 密码和 OAuth（GitHub / Google）。OAuth 流程使用 state + PKCE，state 一次性、10 分钟有效，不保存 provider 的 access/refresh token。
+- 密码用 scrypt（N=16384, r=8, p=1，每用户 16 字节随机盐，64 字节密钥，`node:crypto`）保存，比较用 `timingSafeEqual`；邮箱不存在时也计算一次哈希，返回同样的 `INVALID_CREDENTIALS`，不暴露账号是否存在。登录按 IP 和按邮箱分别受 `RATE_AUTH` 限流。修改密码会登出该账号的其他设备；管理员重置会登出全部设备。
+- 首次运行的 `/setup` 需要启动日志里的一次性初始化码（每次启动随机生成，8 位，按 IP 与全局双重限流），创建出第一个账号后失效。若 OAuth 已通过环境变量配好，空库时第一个 OAuth 登录者同样成为管理员——公网部署请先完成 `/setup` 或使用 `ADMIN_EMAIL` / `ADMIN_PASSWORD`。
+- 临时密码（管理员重置 / `dropit-admin`）带「必须修改」标记：浏览器会话在改密码前只能访问 `/api/me`、改密码和退出等少数接口；个人访问令牌不受此限制，泄露时请在「设置 → 访问令牌」吊销。
+- 新身份需要符合注册策略（默认仅邀请：有效邀请或管理员预创建）；第一位用户例外（成为管理员）。不同 provider 身份不按邮箱合并；密码注册时邮箱已被任何账号使用则拒绝。开放注册不验证邮箱。
 - 会话为服务端保存的随机令牌，数据库只存 SHA-256；`NODE_ENV=production` 且站点地址为 https 时 Cookie 为 Secure（`__Host-` 前缀）并启用 HSTS；站点地址为 http 时不加 Secure（否则浏览器不保存），并在日志与后台警告。
 - 禁用用户立即吊销其会话、个人访问令牌与 WebSocket。
 

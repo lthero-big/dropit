@@ -16,6 +16,7 @@ Secure and HSTS is sent. Production on an http site address only logs a warning.
 | `HOST` | `0.0.0.0` | Listen address (example uses loopback for local development) |
 | `DATA_DIR` | repository `data/` | Persistent SQLite and file directory; image sets `/data` |
 | `STATIC_DIR` | `apps/web/dist` | Built frontend directory; image sets `/app/public` |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | unset | Optional pair. While no account exists, creates this admin at startup and skips `/setup` (otherwise the log prints `dropit setup code: XXXX-XXXX`). Ignored once any account exists. Must be set together; email validated, password 8–256 characters, else startup fails |
 | `ADMIN_EMAILS` | empty | Optional comma-separated verified emails that are also created as admins. The first sign-in on an empty users table is admin whether or not this is set |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | unset | Enables GitHub login only when both are set |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | unset | Enables Google login only when both are set |
@@ -126,7 +127,7 @@ sessions or PATs. Rate threshold changes retain current counts; window changes
 retain active reset deadlines and apply the new duration to new buckets.
 
 Startup-only settings include `TRUST_PROXY`, `DATA_DIR`,
-`ADMIN_EMAILS`, OAuth credentials, `RATE_TOKEN`, ports, cleanup interval and all
+`ADMIN_EMAIL` / `ADMIN_PASSWORD`, `ADMIN_EMAILS`, OAuth credentials, `RATE_TOKEN`, ports, cleanup interval and all
 other settings outside the editable list. Any externally managed
 `SESSION_SECRET` also remains outside this API; the backend uses random
 server-stored opaque sessions and has no editable session signing secret.

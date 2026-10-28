@@ -20,6 +20,7 @@ import { describeAgent } from './agent.js';
 import { loadUpdateSettings, UpdateChecker } from './update-check.js';
 import { buildInfoPath, loadBuildInfo } from './version.js';
 import { ORIGIN_SETTING, parseOrigin, requestOriginResolver, sameOrigin } from './origin.js';
+import { PASSWORD_MAX, REGISTRATION_SETTING, checkPassword, hashPassword, hashPasswordSync, parsePolicy, sameSetupCode, setupCode, temporaryPassword, verifyPassword, type RegistrationPolicy } from './password.js';
 
 type Env = { Variables: { session: Session | undefined; ip: string; remote: string } };
 type Ctx = Context<Env>;
@@ -61,8 +62,11 @@ function string(value: unknown, max = 200): string {
 const oauthBrowserErrors = new Set([
   'OAUTH_STATE_INVALID', 'OAUTH_DENIED', 'OAUTH_PROVIDER_ERROR', 'INVITE_INVALID',
   'INVITATION_REQUIRED', 'USER_DISABLED', 'VERIFIED_EMAIL_REQUIRED', 'RATE_LIMITED', 'INTERNAL_ERROR',
-  'ACCOUNT_EXISTS', 'IDENTITY_IN_USE', 'PROVIDER_ALREADY_LINKED', 'UNAUTHENTICATED',
+  'ACCOUNT_EXISTS', 'IDENTITY_IN_USE', 'PROVIDER_ALREADY_LINKED', 'UNAUTHENTICATED', 'REGISTRATION_CLOSED',
 ]);
+// RHEA-190 auth step 2: while a temporary password is in use, a browser session may only
+// read who it is, change the password or sign out.
+const openWhileChangingPassword = new Set(['/api/me', '/api/me/password', '/api/auth/logout', '/api/auth/providers', '/api/site', '/api/version', '/api/setup']);
 /** Shows that a secret is stored without revealing it (last 4 chars only for long secrets). */
 function maskSecret(secret: string) {
   return secret.length >= 16 ? `••••••••${secret.slice(-4)}` : '••••••••';
@@ -141,6 +145,21 @@ export function createBackend(options: BackendOptions = {}) {
       result[app.provider] = createOAuthProvider(app.provider, app.credentials.clientId, app.credentials.clientSecret, oauthFetch);
     return result;
   };
+  // RHEA-190 auth step 2 — first run. ADMIN_EMAIL + ADMIN_PASSWORD create the first admin;
+  // otherwise, while no account exists, /setup needs the one-time code printed in the log.
+  let bootstrappedAdmin: string | null = null;
+  if (config.adminEmail && config.adminPassword && repo.userCount() === 0) {
+    const user = repo.createPasswordUser({ email: config.adminEmail, name: config.adminEmail.slice(0, config.adminEmail.indexOf('@')).slice(0, 80),
+      passwordHash: hashPasswordSync(config.adminPassword), now: now(), firstAdmin: true });
+    bootstrappedAdmin = user.email;
+  }
+  let firstRunCode: string | null = repo.userCount() === 0 ? setupCode() : null;
+  const setupRequired = () => {
+    // The first OAuth sign-in (OAuth configured through the environment) also ends first-run mode.
+    if (firstRunCode && repo.userCount() > 0) firstRunCode = null;
+    return firstRunCode !== null;
+  };
+  const registrationPolicy = (): RegistrationPolicy => parsePolicy(repo.setting(REGISTRATION_SETTING)?.value) ?? 'invite';
   const service = new ClipboardService(config, repo, files, events, now);
   const update = options.update ?? new UpdateChecker(loadBuildInfo(process.env, readJsonFile(buildInfoPath)), loadUpdateSettings(),
     { cache: jsonFileStore(join(config.dataDir, 'update-check.json')) });
@@ -253,6 +272,7 @@ export function createBackend(options: BackendOptions = {}) {
     const publicDevice = c.req.method === 'POST' && ['/api/auth/device/authorize', '/api/auth/device/token'].includes(c.req.path) &&
       !rawSession && (!c.req.header('origin') || originAllowed(c, c.req.header('origin')));
     if (!safe && !bearer && !publicDevice && !originAllowed(c, c.req.header('origin'))) throw originRejected(c);
+    if (auth && !bearer && auth.mustChangePassword && !openWhileChangingPassword.has(c.req.path)) throw new ApiError(403, 'PASSWORD_CHANGE_REQUIRED');
     await next();
   });
   app.onError((error, c) => {
@@ -276,7 +296,9 @@ export function createBackend(options: BackendOptions = {}) {
     await update.checkNow();
     return c.json(update.report());
   });
-  app.get('/api/auth/providers', c => c.json({ providers: Object.keys(activeProviders()) }));
+  // providers: OAuth buttons. password: email + password sign-in is always available.
+  app.get('/api/auth/providers', c => c.json({ providers: Object.keys(activeProviders()), password: true,
+    registration: registrationPolicy(), setupRequired: setupRequired() }));
   // Public: the login page compares this with the address bar to explain a mismatch
   // ("change APP_ORIGIN to X") before the user hits a 403. The address is in every link anyway.
   app.get('/api/site', c => c.json({ origin: siteOrigin() || null, source: originSource(), requestOrigin: requestOrigin(c) }));
@@ -424,7 +446,7 @@ export function createBackend(options: BackendOptions = {}) {
       }
       const session = token();
       repo.login(identity, flow.inviteHash, config.adminEmails, hash(session), now() + config.sessionMs, now(),
-        { userAgent: c.req.header('user-agent') ?? null, ipSummary: ipSummary(c.get('ip')) });
+        { userAgent: c.req.header('user-agent') ?? null, ipSummary: ipSummary(c.get('ip')) }, registrationPolicy());
       setCookie(c, sessionCookieName(c), session, { ...cookieFor(c), maxAge: Math.floor(config.sessionMs / 1000) });
       return c.redirect(`${originFor(c)}/`);
     } catch (error) {
@@ -434,6 +456,86 @@ export function createBackend(options: BackendOptions = {}) {
       }
       return oauthFailure(c, error);
     }
+  });
+  // RHEA-190 auth step 2: email + password, first-run setup, password changes and resets.
+  const startSession = (c: Ctx, userId: string) => {
+    const session = token();
+    repo.createSession(userId, hash(session), now() + config.sessionMs, now(),
+      { userAgent: c.req.header('user-agent') ?? null, ipSummary: ipSummary(c.get('ip')) });
+    setCookie(c, sessionCookieName(c), session, { ...cookieFor(c), maxAge: Math.floor(config.sessionMs / 1000) });
+  };
+  const optionalInvite = (value: unknown) => {
+    if (value === undefined || value === null || value === '') return null;
+    return hash(string(value, 128));
+  };
+  const nameFor = (value: unknown, email: string) =>
+    value === undefined || value === null || value === '' ? email.slice(0, email.indexOf('@')).slice(0, 80) : personName(value);
+  app.get('/api/setup', c => c.json({ required: setupRequired(), providers: Object.keys(activeProviders()) }));
+  app.post('/api/setup', async c => {
+    limit(c, 'setup', config.rateAuth, false);
+    // A global budget on top of the per-IP one: the 8-character code cannot be brute forced from many addresses.
+    consume(c, 'setup:global', config.rateAuth * 5);
+    if (!setupRequired()) throw new ApiError(409, 'SETUP_DONE');
+    const body = await json(c, 4096);
+    if (!sameSetupCode(body.code, firstRunCode!)) throw new ApiError(403, 'SETUP_CODE_INVALID');
+    const email = emailAddress(body.email);
+    const password = checkPassword(body.password);
+    const user = repo.createPasswordUser({ email, name: nameFor(body.name, email), passwordHash: await hashPassword(password), now: now(), firstAdmin: true });
+    firstRunCode = null;
+    console.info(`dropit: first admin ${user.email} created through /setup`);
+    startSession(c, user.id);
+    return c.json({ user, mustChangePassword: false }, 201);
+  });
+  app.post('/api/auth/password/login', async c => {
+    limit(c, 'auth', config.rateAuth, false);
+    const body = await json(c, 4096);
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const password = body.password;
+    if (!email || email.length > 200 || typeof password !== 'string' || !password || password.length > PASSWORD_MAX) throw new ApiError(400, 'INVALID_INPUT');
+    // Per-address budget too, so one account cannot be guessed from many IPs at full speed.
+    consume(c, `auth:email:${hash(email)}`, config.rateAuth);
+    const inviteHash = optionalInvite(body.invite);
+    const account = repo.passwordAccount(email);
+    const ok = await verifyPassword(password, account?.passwordHash);
+    if (!account || !ok) throw new ApiError(401, 'INVALID_CREDENTIALS');
+    if (account.disabled) throw new ApiError(403, 'USER_DISABLED');
+    if (inviteHash) repo.acceptInvite(inviteHash, account.id, now());
+    if (account.pending) repo.activate(account.id);
+    startSession(c, account.id);
+    return c.json({ user: { id: account.id, email: account.email, name: account.name, role: account.role }, mustChangePassword: Boolean(account.mustChangePassword) });
+  });
+  app.post('/api/auth/password/register', async c => {
+    limit(c, 'auth', config.rateAuth, false);
+    const body = await json(c, 4096);
+    if (setupRequired()) throw new ApiError(409, 'SETUP_REQUIRED');
+    const email = emailAddress(body.email);
+    const password = checkPassword(body.password);
+    const inviteHash = optionalInvite(body.invite);
+    const policy = registrationPolicy();
+    if (policy === 'closed') throw new ApiError(403, 'REGISTRATION_CLOSED');
+    if (policy === 'invite' && !inviteHash) throw new ApiError(403, 'INVITATION_REQUIRED');
+    const user = repo.createPasswordUser({ email, name: nameFor(body.name, email), passwordHash: await hashPassword(password), now: now(), inviteHash, policy });
+    startSession(c, user.id);
+    return c.json({ user, mustChangePassword: false }, 201);
+  });
+  app.put('/api/me/password', async c => {
+    const auth = browserSession(c);
+    limit(c, 'password', config.rateAuth);
+    const body = await json(c, 4096);
+    const next = checkPassword(body.newPassword);
+    const state = repo.passwordState(auth.user.id);
+    if (!state) throw new ApiError(401, 'UNAUTHENTICATED');
+    // OAuth-only accounts may add a password without one; everyone else proves the current one.
+    if (state.passwordHash) {
+      const current = typeof body.currentPassword === 'string' && body.currentPassword.length <= PASSWORD_MAX ? body.currentPassword : '';
+      if (!await verifyPassword(current, state.passwordHash)) throw new ApiError(400, 'CURRENT_PASSWORD_INVALID');
+      if (current === next) throw new ApiError(400, 'PASSWORD_UNCHANGED');
+    }
+    repo.setPassword(auth.user.id, await hashPassword(next), false, now());
+    // Other browsers signed in with the old password are signed out.
+    const revoked = repo.revokeOtherSessions(auth.user.id, auth.sessionHash);
+    events.revalidate();
+    return c.json({ hasPassword: true, mustChangePassword: false, revokedSessions: revoked });
   });
   // RHEA-190 m11: 登录方式 — several providers on one account.
   app.get('/api/me/identities', c => {
@@ -540,7 +642,8 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.get('/api/me', c => {
     const auth = service.requireSession(c.get('session'));
-    return c.json({ user: auth.user, usedBytes: repo.usage(auth.user.id), reservedBytes: repo.reservedBytes(auth.user.id, now()),
+    const password = repo.passwordState(auth.user.id);
+    return c.json({ user: auth.user, hasPassword: Boolean(password?.passwordHash), mustChangePassword: Boolean(password?.mustChangePassword), usedBytes: repo.usage(auth.user.id), reservedBytes: repo.reservedBytes(auth.user.id, now()),
       quotaBytes: repo.quotaOverride(auth.user.id) ?? config.userQuotaBytes,
       maxFileBytes: config.maxFileBytes, maxTextBytes: config.maxTextBytes, retentionMs: config.retentionMs });
   });
@@ -614,7 +717,40 @@ export function createBackend(options: BackendOptions = {}) {
       id: user.id, email: user.email, name: user.name, role: user.role, disabled: user.disabled,
       pending: user.pending, createdAt: user.createdAt, usedBytes: user.usedBytes,
       quotaBytes: user.quotaBytes ?? config.userQuotaBytes, quotaOverride: user.quotaBytes,
+      hasPassword: Boolean(user.hasPassword), mustChangePassword: Boolean(user.mustChangePassword),
+      providers: user.providers ? user.providers.split(',').sort() : [],
     })) });
+  });
+  // RHEA-190 auth step 2: 重置密码. A temporary password shown once; the user must change it at next sign-in.
+  const resetPassword = async (userId: string) => {
+    const temporary = temporaryPassword();
+    repo.setPassword(userId, await hashPassword(temporary), true, now());
+    return temporary;
+  };
+  app.post('/api/admin/users/:id/password', async c => {
+    const auth = adminBrowser(c);
+    limit(c, 'password-reset', config.rateAuth);
+    const id = c.req.param('id');
+    if (!repo.users().some(user => user.id === id)) throw new ApiError(404, 'NOT_FOUND');
+    const temporary = await resetPassword(id);
+    if (id === auth.user.id) repo.revokeOtherSessions(id, auth.sessionHash);
+    else repo.revokeSessions(id);
+    events.revalidate();
+    return c.json({ temporaryPassword: temporary, mustChangePassword: true });
+  });
+  // RHEA-190 auth step 2: 管理 → 注册. closed / invite (default) / open.
+  const registrationView = () => {
+    const row = repo.setting(REGISTRATION_SETTING);
+    return { policy: registrationPolicy(), default: 'invite', updatedAt: row?.updatedAt ?? null, updatedBy: row?.updatedBy ?? null };
+  };
+  app.get('/api/admin/registration', c => { adminBrowser(c); return c.json(registrationView()); });
+  app.put('/api/admin/registration', async c => {
+    const auth = adminBrowser(c);
+    limit(c, 'registration-config', config.rateAuth);
+    const policy = parsePolicy((await json(c, 1024)).policy);
+    if (!policy) throw new ApiError(400, 'INVALID_INPUT');
+    repo.saveSetting(REGISTRATION_SETTING, policy, now(), auth.user.email);
+    return c.json(registrationView());
   });
   app.post('/api/admin/users', async c => {
     service.admin(c.get('session'));
@@ -629,8 +765,13 @@ export function createBackend(options: BackendOptions = {}) {
     // Configured bootstrap addresses are admins at creation, including pre-provision.
     if (config.adminEmails.includes(email)) role = 'admin';
     const quotaBytes = body.quotaBytes === undefined ? null : integer(body.quotaBytes, 1, maxQuotaBytes);
+    if (body.temporaryPassword !== undefined && typeof body.temporaryPassword !== 'boolean') throw new ApiError(400, 'INVALID_INPUT');
     const user = repo.provisionUser({ email, name, role, quotaBytes, now: now() });
-    return c.json({ ...user, usedBytes: 0, quotaBytes: quotaBytes ?? config.userQuotaBytes, quotaOverride: quotaBytes }, 201);
+    // Optional: hand the new user a temporary password instead of (or as well as) OAuth.
+    const temporary = body.temporaryPassword === true ? await resetPassword(user.id) : undefined;
+    return c.json({ ...user, usedBytes: 0, quotaBytes: quotaBytes ?? config.userQuotaBytes, quotaOverride: quotaBytes,
+      hasPassword: Boolean(temporary), mustChangePassword: Boolean(temporary), providers: [],
+      ...(temporary ? { temporaryPassword: temporary } : {}) }, 201);
   });
   app.post('/api/admin/users/:id/logout', c => {
     service.admin(c.get('session'));
@@ -1036,6 +1177,10 @@ export function createBackend(options: BackendOptions = {}) {
   wss.on('connection', ws => { alive.add(ws); ws.on('pong', () => alive.add(ws)); });
   return {
     app, repo, files, events, service, config, update, websocket: { server: wss }, describeOrigin, originWarnings,
+    /** First-run code for /setup while no account exists (null afterwards). */
+    setupCode: () => setupRequired() ? firstRunCode : null,
+    /** Email of the admin created from ADMIN_EMAIL / ADMIN_PASSWORD at this startup, if any. */
+    bootstrappedAdmin,
     async startMaintenance() {
       await service.cleanup();
       timer = setInterval(() => { void service.cleanup().catch(() => console.error('Cleanup failed; will retry')); }, config.cleanupMs).unref();

@@ -43,8 +43,11 @@
 | --- | --- | --- |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | 未设置 | 成对设置才开放 GitHub 登录 |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | 未设置 | 成对设置才开放 Google 登录 |
-| `ADMIN_EMAILS` | 空 | 可选，逗号分隔的已验证邮箱，注册时即为管理员 |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | 未设置 | 可选，需同时设置。数据库里还没有任何账号时，启动即创建该管理员并跳过 `/setup`；已有账号后忽略。密码 8–256 位，格式不对会拒绝启动 |
+| `ADMIN_EMAILS` | 空 | 可选，逗号分隔的邮箱：经 provider **验证**的 OAuth 身份注册时即为管理员。不作用于密码注册（邮箱未验证） |
 | `SESSION_HOURS` | 168 | 会话绝对有效期 |
+
+邮箱 + 密码登录始终可用，无需配置。没有任何账号时，启动日志打印 `dropit setup code: XXXX-XXXX`，用它在 `/setup` 创建第一个管理员。注册策略（关闭 / 仅邀请 / 开放，默认仅邀请）在「管理 → 注册」设置，存在数据库里，没有对应的环境变量。密码登录与 `/setup` 共用 `RATE_AUTH` 限流（另按邮箱单独计数）。
 
 ## 内容限额
 

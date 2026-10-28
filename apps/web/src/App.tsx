@@ -1,6 +1,9 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router'
+import { useEffect } from 'react'
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { Toaster } from '@/components/ui/sonner.tsx'
-import { SessionProvider } from '@/lib/session.tsx'
+import { SessionProvider, useSession } from '@/lib/session.tsx'
+import { ChangePasswordPage } from '@/pages/change-password-page.tsx'
+import { SetupPage } from '@/pages/setup-page.tsx'
 import { AdminPage } from '@/pages/admin-page.tsx'
 import { DevicePage } from '@/pages/device-page.tsx'
 import { HomePage } from '@/pages/home-page.tsx'
@@ -10,6 +13,17 @@ import { RoomPage } from '@/pages/room-page.tsx'
 import { SettingsPage } from '@/pages/settings-page.tsx'
 import { SharePage } from '@/pages/share-page.tsx'
 
+/** RHEA-190 auth step 2: a temporary password must be replaced before anything else. */
+function PasswordGate() {
+  const { me } = useSession()
+  const location = useLocation()
+  const navigate = useNavigate()
+  useEffect(() => {
+    if (me?.mustChangePassword && location.pathname !== '/change-password') navigate('/change-password', { replace: true })
+  }, [location.pathname, me?.mustChangePassword, navigate])
+  return null
+}
+
 export function App() {
   return (
     <SessionProvider>
@@ -17,6 +31,8 @@ export function App() {
         <Routes>
           <Route path="/" element={<HomePage />} />
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/setup" element={<SetupPage />} />
+          <Route path="/change-password" element={<ChangePasswordPage />} />
           <Route path="/invite/:token" element={<InvitePage />} />
           <Route path="/rooms/:token" element={<RoomPage />} />
           <Route path="/s/:token" element={<SharePage />} />
@@ -25,6 +41,7 @@ export function App() {
           <Route path="/device" element={<DevicePage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        <PasswordGate />
         <Toaster position="top-center" />
       </BrowserRouter>
     </SessionProvider>

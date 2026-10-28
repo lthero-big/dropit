@@ -20,7 +20,7 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8787:8787"
-    env_file: .env                   # OAuth credentials, ADMIN_EMAILS, etc.
+    env_file: .env                   # optional: OAuth credentials, ADMIN_EMAIL / ADMIN_PASSWORD, etc.
     environment:
       NODE_ENV: production
       APP_ORIGIN: https://dropit.example.com
@@ -32,6 +32,8 @@ volumes:
 ```
 
 If nginx runs on the host and requests enter the container through the Docker bridge gateway, `TRUST_PROXY` must include that gateway address (for example, after pinning the network to a fixed subnet, use `loopback,10.87.87.1`).
+
+First deployment: `docker compose up -d` → `docker logs dropit 2>&1 | grep 'setup code'` for `dropit setup code: XXXX-XXXX` → open `/setup` in the browser and create the admin. Alternatively set both `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env` to create the admin on an empty database at startup. Finish initialisation of a public instance right after it starts.
 
 `APP_ORIGIN` can also be left out of compose and set after deployment in “Admin → Site address” (the admin setting wins over env). If the proxy is not in `TRUST_PROXY` and no site address is set, dropit cannot see the original https, so generated OAuth callbacks will be http — set a site address or `TRUST_PROXY`. The `dropit APP_ORIGIN:` startup log line shows the effective value.
 

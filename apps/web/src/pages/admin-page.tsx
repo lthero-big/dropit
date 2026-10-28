@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
-import { CopyIcon, GaugeIcon, GlobeIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, SlidersHorizontalIcon, TicketIcon, UsersIcon } from 'lucide-react'
+import { CopyIcon, DoorOpenIcon, GaugeIcon, GlobeIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, SlidersHorizontalIcon, TicketIcon, UsersIcon } from 'lucide-react'
 import { DeviceSessions } from '@/components/device-sessions.tsx'
 import { LimitsEditor } from '@/components/limits-editor.tsx'
 import { OAuthSettings } from '@/components/oauth-settings.tsx'
+import { RegistrationSettings } from '@/components/registration-settings.tsx'
 import { SiteOriginSettings } from '@/components/site-origin-settings.tsx'
 import { Panel, SectionHeader, SettingsLayout, SideNav, StatusPill, Switch, fieldClass, labelClass, selectClass, type NavGroup, type Tone } from '@/components/settings-ui.tsx'
 import { PageTitle, Shell } from '@/components/shell.tsx'
@@ -24,8 +25,8 @@ const hourChoices = [
 ]
 const quotaCapMb = 102400
 
-type Tab = 'invites' | 'users' | 'usage' | 'limits' | 'site' | 'oauth' | 'update'
-const tabIds: Tab[] = ['invites', 'users', 'usage', 'limits', 'site', 'oauth', 'update']
+type Tab = 'invites' | 'users' | 'registration' | 'usage' | 'limits' | 'site' | 'oauth' | 'update'
+const tabIds: Tab[] = ['invites', 'users', 'registration', 'usage', 'limits', 'site', 'oauth', 'update']
 
 /**
  * RHEA-190 m22: 管理 is grouped by what the admin is doing, and OAuth (an
@@ -37,6 +38,7 @@ const NAV: NavGroup<Tab>[] = [
     items: [
       { id: 'invites', label: '邀请', icon: TicketIcon, hint: '生成一次性邀请链接' },
       { id: 'users', label: '用户', icon: UsersIcon, hint: '预创建、编辑、停用用户' },
+      { id: 'registration', label: '注册', icon: DoorOpenIcon, hint: '关闭 / 仅邀请 / 开放' },
     ],
   },
   {
@@ -58,7 +60,8 @@ const NAV: NavGroup<Tab>[] = [
 
 const HEADERS: Record<Tab, { title: string; description: string }> = {
   invites: { title: '邀请', description: '为某个空间生成邀请链接。链接只在生成时显示一次，过期、撤销或用尽后立即失效。' },
-  users: { title: '用户', description: '预创建账号、调整角色与配额、停用或强制下线。dropit 没有密码，首次 OAuth 登录时按邮箱绑定。' },
+  users: { title: '用户', description: '预创建账号、调整角色与配额、重置密码、停用或强制下线。预创建的账号可用临时密码登录，或首次 OAuth 登录时按邮箱绑定。' },
+  registration: { title: '注册', description: '谁可以创建新账号：关闭、仅邀请（默认）或开放注册。' },
   usage: { title: '用量', description: '每个用户当前占用的存储与配额。调低配额不会删除已有内容。' },
   limits: { title: '限制', description: '上传大小、保留时间、会话与限流。修改立即生效，并写入变更记录。' },
   site: { title: '站点地址', description: '浏览器访问本站的地址（APP_ORIGIN）。可以在这里改，不用重启；优先级高于环境变量。' },
@@ -86,6 +89,11 @@ function userState(user: AdminUser): string {
 }
 
 const stateTone = (state: string): Tone => (state === '有效' || state === '正常' ? 'good' : state === '待首次登录' ? 'warn' : 'neutral')
+
+function loginSummary(user: AdminUser): string {
+  const methods = [...(user.hasPassword ? ['密码'] : []), ...(user.providers ?? []).map((provider) => (provider === 'github' ? 'GitHub' : provider === 'google' ? 'Google' : provider))]
+  return methods.length ? methods.join(' · ') : '尚未设置登录方式'
+}
 
 function mbToBytes(value: string): number {
   if (!/^\d+$/.test(value)) throw new Error('invalid')
@@ -343,6 +351,10 @@ export function AdminPage() {
                           <td className={tdClass} data-l="用户">
                             <b className="font-semibold">{user.name}</b>
                             <small className="mt-0.5 block text-xs text-muted-foreground">{user.email}</small>
+                            <small className="mt-0.5 block text-[11px] text-fg-4" data-login-summary="">
+                              {loginSummary(user)}
+                              {user.mustChangePassword ? ' · 待改临时密码' : ''}
+                            </small>
                           </td>
                           <td className={tdClass} data-l="角色">
                             {user.role === 'admin' ? <StatusPill tone="brand">管理员</StatusPill> : <span className="text-fg-2">用户</span>}
@@ -410,6 +422,7 @@ export function AdminPage() {
           {tab === 'limits' ? limits ? <LimitsEditor limits={limits} onChange={setLimits} /> : <p className="text-sm text-muted-foreground">正在读取…</p> : null}
           {tab === 'site' ? <SiteOriginSettings /> : null}
           {tab === 'oauth' ? <OAuthSettings /> : null}
+          {tab === 'registration' ? <RegistrationSettings /> : null}
           {tab === 'update' ? <UpdatePanel /> : null}
         </div>
       </SettingsLayout>
@@ -426,6 +439,25 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
   const [useDefault, setUseDefault] = useState(user ? user.quotaOverride == null : true)
   const [quotaMb, setQuotaMb] = useState(user ? String(Math.max(1, Math.round(user.quotaBytes / (1024 * 1024)))) : '1024')
   const [busy, setBusy] = useState(false)
+  const [withPassword, setWithPassword] = useState(false)
+  const [issued, setIssued] = useState<{ email: string; password: string } | null>(null)
+  const [confirmReset, setConfirmReset] = useState(false)
+
+  async function resetPassword() {
+    if (!user) return
+    setBusy(true)
+    try {
+      const body = await api<{ temporaryPassword: string }>(`/api/admin/users/${user.id}/password`, { method: 'POST' })
+      setIssued({ email: user.email, password: body.temporaryPassword })
+      setConfirmReset(false)
+      toast.success('已生成临时密码，对方的所有设备已下线')
+      await onSaved()
+    } catch (error) {
+      toast.error(errorText(error))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   async function save(event: FormEvent) {
     event.preventDefault()
@@ -439,7 +471,7 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
     setBusy(true)
     try {
       if (creating) {
-        await api('/api/admin/users', {
+        const created = await api<AdminUser>('/api/admin/users', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -447,9 +479,16 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
             ...(name.trim() ? { name: name.trim() } : {}),
             role,
             ...(quotaBytes === null ? {} : { quotaBytes }),
+            ...(withPassword ? { temporaryPassword: true } : {}),
           }),
         })
         toast.success('用户已预创建，等待首次登录')
+        if (created.temporaryPassword) {
+          // Shown once: keep the editor open so the admin can copy it.
+          setIssued({ email: created.email, password: created.temporaryPassword })
+          await onSaved()
+          return
+        }
       } else {
         if (!name.trim()) {
           toast.error('名称不能为空')
@@ -494,12 +533,25 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
       title={creating ? '新建用户' : `编辑用户 · ${user.name}`}
       description={
         creating
-          ? '无密码。这里只预创建账号和私人空间。用户首次用该邮箱完成 OAuth 登录时自动绑定，无需邀请链接。'
+          ? '预创建账号和私人空间，无需邀请链接。可以生成一个临时密码交给对方（首次登录后必须改掉），也可以等对方首次用该邮箱完成 OAuth 登录时自动绑定。'
           : '邮箱是登录身份，不能修改。调低配额不会删除已有内容，但超额后无法再上传。'
       }
       className="border-line-2 shadow-elev-2"
       data-user-editor=""
     >
+      {issued ? (
+        <div className="mb-5 rounded-md border border-line-2 border-l border-l-brand bg-surface-2 px-4 py-3 text-sm" data-temporary-password="">
+          <p className="font-medium text-fg">{issued.email} 的临时密码（只显示这一次）</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <code className="rounded bg-surface-0 px-2 py-1 font-mono text-base tracking-wide">{issued.password}</code>
+            <Button type="button" variant="outline" size="sm" onClick={() => void copyText(issued.password).then(() => toast.success('已复制'))}>
+              <CopyIcon className="size-3.5" />
+              复制
+            </Button>
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">把它通过安全渠道交给对方。用它登录后会被要求立即设置新密码。</p>
+        </div>
+      ) : null}
       <form onSubmit={(event) => void save(event)}>
         <div className="grid gap-4 sm:grid-cols-2">
           <label className={labelClass}>
@@ -539,6 +591,9 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
             <input className={fieldClass} inputMode="numeric" value={quotaMb} disabled={useDefault} onChange={(event) => setQuotaMb(event.target.value)} />
           </label>
           <Switch className="self-end" label="使用安装默认配额" description="关闭后可单独设置这个用户的配额" checked={useDefault} onChange={(event) => setUseDefault(event.target.checked)} />
+          {creating ? (
+            <Switch label="生成临时密码" description="创建后显示一次；对方首次登录必须修改。关闭则只能用 OAuth 绑定。" checked={withPassword} onChange={(event) => setWithPassword(event.target.checked)} />
+          ) : null}
         </div>
         {!creating && user ? <p className="mt-3 text-xs text-muted-foreground">已用 {formatBytes(user.usedBytes)}</p> : null}
         <div className="mt-5 flex flex-wrap gap-2 border-t border-line-1 pt-4">
@@ -548,8 +603,22 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
           <Button type="button" variant="outline" onClick={onClose}>
             取消
           </Button>
+          {creating ? null : confirmReset ? (
+            <>
+              <Button type="button" variant="destructive" className="sm:ml-auto" disabled={busy} onClick={() => void resetPassword()} data-confirm-reset="">
+                确认重置密码
+              </Button>
+              <Button type="button" variant="outline" onClick={() => setConfirmReset(false)}>
+                不重置
+              </Button>
+            </>
+          ) : (
+            <Button type="button" variant="outline" className="sm:ml-auto" disabled={busy} onClick={() => setConfirmReset(true)} data-reset-password="">
+              重置密码
+            </Button>
+          )}
           {creating ? null : (
-            <Button type="button" variant="destructive" className="sm:ml-auto" disabled={busy} onClick={() => void forceLogout()}>
+            <Button type="button" variant="destructive" disabled={busy} onClick={() => void forceLogout()}>
               强制下线（全部设备）
             </Button>
           )}

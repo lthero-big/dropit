@@ -11,6 +11,8 @@ export interface Config {
   /** RESET_APP_ORIGIN=1 clears the address saved in 管理 → 站点地址 at startup (lock-out recovery). */
   resetOrigin: boolean;
   production: boolean; port: number; dataDir: string; adminEmails: string[];
+  /** RHEA-190 auth step 2: ADMIN_EMAIL + ADMIN_PASSWORD create the first admin at startup when no users exist ('' = unset). */
+  adminEmail: string; adminPassword: string;
   trustProxy: string[]; maxFileBytes: number; userQuotaBytes: number; retentionMs: number;
   roomQuotaBytes: number; roomMaxFileBytes: number; roomRetentionMs: number;
   sessionMs: number; cleanupMs: number; maxTextBytes: number; maxItems: number;
@@ -35,7 +37,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const rawOrigin = env.APP_ORIGIN?.trim() ?? '';
   const origin = rawOrigin ? parseOrigin(rawOrigin) : '';
   if (origin === null) throw new Error('APP_ORIGIN must be an origin such as https://dropit.example.com (scheme + host [+ port], no path)');
+  const adminEmail = env.ADMIN_EMAIL?.trim().toLowerCase() ?? '';
+  const adminPassword = env.ADMIN_PASSWORD ?? '';
+  if (Boolean(adminEmail) !== Boolean(adminPassword)) throw new Error('ADMIN_EMAIL and ADMIN_PASSWORD must be set together');
+  if (adminEmail && !/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(adminEmail)) throw new Error('Invalid ADMIN_EMAIL');
+  if (adminPassword && ([...adminPassword].length < 8 || adminPassword.length > 256)) throw new Error('ADMIN_PASSWORD must be 8–256 characters');
   const config: Config = {
+    adminEmail, adminPassword,
     origin, resetOrigin: ['1', 'true', 'yes'].includes((env.RESET_APP_ORIGIN ?? '').trim().toLowerCase()), production, port, dataDir: env.DATA_DIR || fileURLToPath(new URL('../../../data', import.meta.url)),
     adminEmails: (env.ADMIN_EMAILS ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
     trustProxy: (env.TRUST_PROXY ?? '').split(',').map(s => s.trim()).filter(Boolean),

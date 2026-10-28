@@ -27,7 +27,7 @@
 | 剪贴板 | 文本 / 文件条目、WebSocket 实时同步、就地编辑、Markdown 安全渲染、标签、置顶、分组、来源设备、Ctrl/⌘ K 命令面板 |
 | 文件 | WebP 缩略图与预览、视频/音频内联播放、`Range` 断点下载、分片续传上传 |
 | 分享 | 有时限、可限次、可撤销的只读链接；无需账号的临时房间（≤ 24 小时，二维码加入） |
-| 账号 | GitHub / Google OAuth（无密码）、邀请制、首位登录者为管理员、个人访问令牌、设备码登录 |
+| 账号 | 邮箱 + 密码（scrypt）与 GitHub / Google OAuth、首次运行 /setup 初始化码、注册策略（关闭 / 仅邀请 / 开放）、管理员重置密码、个人访问令牌、设备码登录 |
 | 管理 | 用户、邀请、令牌、登录设备、运行时限额（即时生效 + 审计）、新版本提示 |
 | 命令行 | `dropit` CLI：发送、上传、下载、分享、`watch` 实时监听、临时房间 |
 | 运维 | 单进程 Node + SQLite（WAL）+ 本地磁盘；单 Docker 镜像；`/healthz` |
@@ -43,13 +43,25 @@ docker run -d --name dropit \
   lthero1/dropit:latest
 ```
 
-打开 <http://localhost:8787>。不需要任何环境变量：未设置 `APP_ORIGIN` 时按浏览器访问的地址自动处理，之后可在「管理 → 站点地址」固定。未配置 OAuth 时可以直接「进入临时房间」体验实时同步。
-
 也可以用仓库里的 `docker compose up -d`：配置放在可选的 `.env`（`cp .env.example .env`，文件里分了必填 / 推荐 / 可选，并标出哪些能在管理后台改）。
 
-### 启用登录
+### 首次运行：创建管理员
 
-成对设置 `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`（或 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`），回调地址为 `${APP_ORIGIN}/api/auth/github/callback`（或 `.../google/callback`），「管理 → 站点地址」会直接列出可复制的回调地址。用户表为空时，**第一个成功登录的人自动成为管理员**。
+```bash
+docker compose up -d                      # 或上面的 docker run
+docker logs dropit 2>&1 | grep 'setup code'
+# dropit setup code: K7QM-4XHT
+```
+
+打开 <http://localhost:8787>，会自动跳到 `/setup`：填入日志里的初始化码、管理员邮箱和密码（至少 8 位），即完成初始化并登录。初始化码每次启动重新生成，只在还没有任何账号时有效。不需要任何其他环境变量：未设置 `APP_ORIGIN` 时按浏览器访问的地址自动处理，之后可在「管理 → 站点地址」固定。
+
+不想开浏览器？在 `.env` 里同时设 `ADMIN_EMAIL` 和 `ADMIN_PASSWORD`，数据库为空时启动即创建该管理员并跳过 `/setup`（之后可删掉 `ADMIN_PASSWORD`）。
+
+忘记密码：`docker exec dropit dropit-admin reset-password 你的邮箱`，会打印一个临时密码，登录后必须立即修改。
+
+### 启用 GitHub / Google 登录（可选）
+
+成对设置 `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`（或 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`），回调地址为 `${APP_ORIGIN}/api/auth/github/callback`（或 `.../google/callback`），「管理 → 站点地址」会直接列出可复制的回调地址，也可以直接在「管理 → OAuth 登录」填写。密码账号可以在「设置 → 登录方式」绑定 GitHub / Google。若 OAuth 在初始化前就已通过环境变量配好，用户表为空时**第一个成功 OAuth 登录的人也会成为管理员**（不需要初始化码），所以公网部署请先完成 `/setup`。新账号默认**仅邀请**，可在「管理 → 注册」改为关闭或开放。
 
 ### 生产部署
 

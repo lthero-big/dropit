@@ -7,7 +7,7 @@ Same-origin HTTP API under `/api`; all responses are JSON except downloads,
 thumbnails, image/media previews, OAuth redirects and empty `204` responses. Dates are Unix milliseconds;
 sizes are bytes. Browsers use the server session cookie (`credentials: 'same-origin'`);
 CLI clients use personal access tokens (PATs) in `Authorization: Bearer <token>`.
-There are no passwords, CORS origins or public mock logins.
+There are no CORS origins or public mock logins. Passwords are optional per account (scrypt, see “Password sign-in and first run”).
 
 Cookie and anonymous POST/PUT/PATCH/DELETE requests require `Origin: <APP_ORIGIN>`
 (also for rooms/logout). A valid Bearer token bypasses Origin checking, including
@@ -23,15 +23,15 @@ Missing/expired/revoked session returns `401 UNAUTHENTICATED`.
 
 | Method | Path | Response / request |
 | --- | --- | --- |
-| GET | `/auth/providers` | `{providers: ['github','google']}`; only configured providers appear |
+| GET | `/auth/providers` | `{providers: ['github','google'], password: true, registration: 'invite', setupRequired: false}`; only configured OAuth providers appear |
 | GET | `/auth/:provider?invite=:token` | Navigate the browser here; 302 to OAuth provider, sets flow-binding cookie. Optional invite is bound to this flow when it is still valid. Once any user exists, an invalid invite redirects to `{APP_ORIGIN}/login?error=INVITE_INVALID` and does not start a flow. While the users table is empty, an invalid invite is ignored and the flow starts without it, so the first sign-up can still proceed. Unknown provider names stay JSON `404`. Auth-start rate limits stay JSON `429` with `Retry-After`. |
-| GET | `/auth/:provider/callback` | OAuth-only callback; state, browser cookie and PKCE required; sets session and redirects to `{APP_ORIGIN}/`. Browser-visible failures redirect to `{APP_ORIGIN}/login?error=CODE`. The code is one of `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR`, `INVITE_INVALID`, `INVITATION_REQUIRED`, `USER_DISABLED`, `VERIFIED_EMAIL_REQUIRED`, `RATE_LIMITED`, `INTERNAL_ERROR`. Provider error text is not copied into the URL. |
+| GET | `/auth/:provider/callback` | OAuth-only callback; state, browser cookie and PKCE required; sets session and redirects to `{APP_ORIGIN}/`. Browser-visible failures redirect to `{APP_ORIGIN}/login?error=CODE`. The code is one of `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR`, `INVITE_INVALID`, `INVITATION_REQUIRED`, `REGISTRATION_CLOSED`, `USER_DISABLED`, `VERIFIED_EMAIL_REQUIRED`, `RATE_LIMITED`, `INTERNAL_ERROR`. Provider error text is not copied into the URL. |
 | POST | `/auth/logout` | 204; immediately revokes this session, closes its sockets and clears cookie |
-| GET | `/me` | `{user, usedBytes, reservedBytes, quotaBytes, maxFileBytes, maxTextBytes, retentionMs}` |
+| GET | `/me` | `{user, hasPassword, mustChangePassword, usedBytes, reservedBytes, quotaBytes, maxFileBytes, maxTextBytes, retentionMs}` |
 | GET | `/invites/:token` | `{spaceName, expiresAt, remainingUses}`; invalid/revoked/used/expired: 404 |
 
 `User = {id, email, name, role: 'admin'|'user', disabled: 0|1, pending: 0|1, createdAt}`.
-`pending` is 1 until the first verified OAuth identity is bound. The invite page does
+`pending` is 1 until the first verified OAuth identity is bound or the first password sign-in. The invite page does
 **not** create an account or consume a use. It sends the token to the OAuth start URL.
 Only a successful verified OAuth identity can atomically consume a use, create an
 account/private space and join the invited space. Existing members do not spend
@@ -39,6 +39,35 @@ additional uses on the same still-valid invitation. Existing users may sign in
 without an invite. A consumed/expired token is never accepted, even if the user
 previously joined through it. OAuth state is single-use and valid for 10 minutes.
 Starting a new flow replaces the browser's previous flow cookie.
+
+## Password sign-in and first run (RHEA-190 auth step 2)
+
+| Method | Path | Response / request |
+| --- | --- | --- |
+| GET | `/setup` | `{required, providers}`; `required` is true only while no account exists |
+| POST | `/setup` | `{code, email, password, name?}` → 201 `{user, mustChangePassword:false}` and a session cookie. Creates the first **admin**. `code` is the one-time `dropit setup code: XXXX-XXXX` printed in the server log at startup (case, dashes and spaces ignored). Wrong code `403 SETUP_CODE_INVALID`; already set up `409 SETUP_DONE`; rate limited per IP (`RATE_AUTH`) and globally (`5 × RATE_AUTH`) per window |
+| POST | `/auth/password/login` | `{email, password, invite?}` → `{user, mustChangePassword}` and a session cookie. Unknown email and wrong password both return `401 INVALID_CREDENTIALS` (the hash is always computed). `USER_DISABLED` only after a correct password. Rate limited per IP and per email (`RATE_AUTH`). A valid `invite` joins its space; a pre-created (pending) account becomes active |
+| POST | `/auth/password/register` | `{email, password, name?, invite?}` → 201 `{user}` and a session. Subject to the registration policy: `closed` → `403 REGISTRATION_CLOSED`; `invite` (default) needs a valid invite (`403 INVITATION_REQUIRED` / `INVITE_INVALID`); `open` accepts anyone. Always a normal user (never admin, `ADMIN_EMAILS` does not apply because the email is not verified). An email already used by any account `409 EMAIL_IN_USE`. Before `/setup` `409 SETUP_REQUIRED` |
+| PUT | `/me/password` | Browser session only. `{currentPassword?, newPassword}` → `{hasPassword:true, mustChangePassword:false, revokedSessions}`. `currentPassword` is required when the account already has a password (`400 CURRENT_PASSWORD_INVALID`, `PASSWORD_UNCHANGED`); an OAuth-only account can add one without it. Other sessions of the account are revoked |
+| POST | `/admin/users/:id/password` | Admin browser session. → `{temporaryPassword, mustChangePassword:true}`. Shown once. Revokes that user's sessions; the next sign-in must change it |
+| GET / PUT | `/admin/registration` | `{policy:'closed'|'invite'|'open', default:'invite', updatedAt, updatedBy}`; PUT `{policy}` |
+
+`GET /auth/providers` also returns `password: true`, `registration` (the policy) and
+`setupRequired`. `GET /me` adds `hasPassword` and `mustChangePassword`; `GET /admin/users`
+adds `hasPassword`, `mustChangePassword` and `providers` per user. `POST /admin/users` accepts
+`temporaryPassword: true` and then returns the generated `temporaryPassword` once.
+
+Passwords are 8–256 characters, NFKC-normalised, stored as `scrypt$N$r$p$salt$hash`
+(N=16384, r=8, p=1, 16-byte random salt, 64-byte key) and compared with
+`timingSafeEqual`. While `mustChangePassword` is set, a **browser** session gets
+`403 PASSWORD_CHANGE_REQUIRED` on everything except `/me`, `/me/password`, `/auth/logout`,
+`/auth/providers`, `/site`, `/version` and `/setup`; personal access tokens are not blocked
+(revoke them in 设置 → 访问令牌 if a password was compromised). Password accounts can bind
+GitHub / Google in 设置 → 登录方式, and with a password set the last OAuth identity can be unlinked.
+
+Offline recovery: `docker exec dropit dropit-admin reset-password <email>` sets a
+temporary password (printed once), forces a change and signs the account out;
+`dropit-admin list-users` lists accounts.
 
 ## Personal access tokens
 

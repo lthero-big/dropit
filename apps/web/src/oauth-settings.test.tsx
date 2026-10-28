@@ -125,7 +125,7 @@ describe('admin: OAuth configuration', () => {
     })
     renderAt('/admin')
     const tablist = await screen.findByRole('tablist', { name: '管理分类' })
-    expect(within(tablist).getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['邀请', '用户', '用量', '限制', '站点地址', 'OAuth 登录', '更新'])
+    expect(within(tablist).getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['邀请', '用户', '注册', '用量', '限制', '站点地址', 'OAuth 登录', '更新'])
     const nav = document.querySelector('[data-side-nav]') as HTMLElement
     for (const group of ['成员与访问', '资源与限制', '登录与安全', '系统']) expect(within(nav).getByText(group)).toBeTruthy()
     fireEvent.click(within(tablist).getByRole('tab', { name: 'OAuth 登录' }))

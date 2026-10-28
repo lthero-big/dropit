@@ -8,7 +8,7 @@ const srcDir = fileURLToPath(new URL('../src/', import.meta.url))
 
 const fsAllowed = new Set(['index.ts', 'files.ts', 'repository.ts'])
 const driverAllowed = new Set(['repository.ts'])
-const compositionOnly = new Set(['index.ts', 'backend.ts'])
+const compositionOnly = new Set(['index.ts', 'backend.ts', 'admin-cli.ts'])
 const concreteImports = [
   './files.js',
   './events.js',

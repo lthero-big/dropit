@@ -49,7 +49,9 @@ ENV DROPIT_VERSION=${DROPIT_VERSION} \
 
 COPY --from=build --chown=node:node /out ./
 COPY --from=build --chown=node:node /app/apps/web/dist ./public
-RUN mkdir -p /data && chown node:node /data
+RUN mkdir -p /data && chown node:node /data \
+  && printf '#!/bin/sh\nexec node /app/dist/admin-cli.js "$@"\n' > /usr/local/bin/dropit-admin \
+  && chmod 755 /usr/local/bin/dropit-admin
 
 USER node
 EXPOSE 8787

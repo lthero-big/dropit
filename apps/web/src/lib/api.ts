@@ -75,6 +75,15 @@ const labels: Record<string, string> = {
   PROVIDER_UNSUPPORTED: '不支持的登录方式',
   INVALID_ORIGIN: '站点地址格式不对，只能是 协议 + 域名或 IP + 端口，例如 https://dropit.example.com',
   ORIGIN_CONFIRM_REQUIRED: '新地址与当前访问地址不同，需要确认',
+  INVALID_CREDENTIALS: '邮箱或密码不对',
+  PASSWORD_TOO_SHORT: '密码至少 8 位',
+  SETUP_CODE_INVALID: '初始化码不对。请从服务日志里复制 dropit setup code',
+  SETUP_DONE: '已经初始化过了，请直接登录',
+  SETUP_REQUIRED: '站点尚未初始化，请先到 /setup 创建管理员',
+  REGISTRATION_CLOSED: '本站已关闭注册，请联系管理员',
+  PASSWORD_CHANGE_REQUIRED: '请先修改临时密码',
+  CURRENT_PASSWORD_INVALID: '当前密码不对',
+  PASSWORD_UNCHANGED: '新密码不能和当前密码相同',
 }
 
 const oauthLoginErrors = new Set([
@@ -89,6 +98,7 @@ const oauthLoginErrors = new Set([
   'INTERNAL_ERROR',
   'ACCOUNT_EXISTS',
   'UNAUTHENTICATED',
+  'REGISTRATION_CLOSED',
 ])
 
 const linkErrors = new Set([...oauthLoginErrors, 'IDENTITY_IN_USE', 'PROVIDER_ALREADY_LINKED'])

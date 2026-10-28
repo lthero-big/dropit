@@ -4,8 +4,11 @@ title: Security model
 
 ## Identity and sessions
 
-- Only OAuth (GitHub / Google) is supported, with no passwords; the OAuth flow uses state + PKCE, the state is single-use and valid for 10 minutes, and provider access/refresh tokens are never stored.
-- A new identity needs a valid invitation or an admin pre-created account; the first user is the exception (and becomes admin). Identities from different providers are not merged by email.
+- Email + password and OAuth (GitHub / Google) are supported. The OAuth flow uses state + PKCE, the state is single-use and valid for 10 minutes, and provider access/refresh tokens are never stored.
+- Passwords are stored with scrypt (N=16384, r=8, p=1, a random 16-byte salt per user, 64-byte key, `node:crypto`) and compared with `timingSafeEqual`. Unknown emails are hashed too and return the same `INVALID_CREDENTIALS`, so the response does not reveal whether an account exists. Sign-in is rate limited per IP and per email (`RATE_AUTH`). Changing the password signs out the account's other devices; an admin reset signs out all of them.
+- First-run `/setup` needs the one-time code from the startup log (random per start, 8 characters, rate limited per IP and globally) and stops working once the first account exists. If OAuth is configured through the environment, the first OAuth sign-in on an empty database also becomes admin — on a public server finish `/setup` first or use `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
+- Temporary passwords (admin reset / `dropit-admin`) carry a must-change flag: until it is changed, a browser session can only reach `/api/me`, the password change, sign-out and a few public endpoints. Personal access tokens are not blocked; revoke them in “Settings → Access tokens” if a password leaked.
+- A new identity must satisfy the registration policy (default invite-only: a valid invitation or an admin pre-created account); the first user is the exception (and becomes admin). Identities from different providers are not merged by email; password sign-up is refused when any account already uses the email. Open registration does not verify emails.
 - Sessions are random server-side tokens and the database stores only their SHA-256; with `NODE_ENV=production` and an https site address cookies are Secure (`__Host-` prefix) and HSTS is enabled; with an http site address cookies are not Secure (browsers would drop them) and the log and admin panel warn.
 - Disabling a user immediately revokes their sessions, personal access tokens and WebSockets.
 

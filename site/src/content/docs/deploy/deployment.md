@@ -20,7 +20,7 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8787:8787"
-    env_file: .env                   # 放 OAuth 凭据、ADMIN_EMAILS 等
+    env_file: .env                   # 可选：OAuth 凭据、ADMIN_EMAIL / ADMIN_PASSWORD 等
     environment:
       NODE_ENV: production
       APP_ORIGIN: https://dropit.example.com
@@ -32,6 +32,8 @@ volumes:
 ```
 
 如果 nginx 在宿主机、请求经 Docker 网桥网关进入容器，`TRUST_PROXY` 需要包含该网关地址（例如为网络固定子网后填 `loopback,10.87.87.1`）。
+
+首次部署：`docker compose up -d` → `docker logs dropit 2>&1 | grep 'setup code'` 取得 `dropit setup code: XXXX-XXXX` → 浏览器打开 `/setup` 创建管理员。也可以在 `.env` 里同时设置 `ADMIN_EMAIL` / `ADMIN_PASSWORD`，空库启动时直接创建管理员并跳过 `/setup`。公网实例请在启动后尽快完成初始化。
 
 `APP_ORIGIN` 也可以不写在 compose 里，部署后在「管理 → 站点地址」填写（页面设置优先于环境变量）。如果反代不在 `TRUST_PROXY` 里、又没有设置站点地址，dropit 看不到原始的 https，生成的 OAuth 回调会是 http——请设置站点地址或 `TRUST_PROXY`。启动日志的 `dropit APP_ORIGIN:` 一行可以确认当前生效值。
 

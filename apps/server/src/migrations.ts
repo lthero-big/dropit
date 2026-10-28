@@ -182,3 +182,13 @@ export const migration13 = `
 CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updatedAt INTEGER NOT NULL, updatedBy TEXT);
 PRAGMA user_version=13;
 `;
+
+// RHEA-190 auth step 2: email + password sign-in next to OAuth. passwordHash is
+// scrypt$N$r$p$salt$key (NULL = OAuth-only account). mustChangePassword is set by an
+// admin reset or `dropit-admin reset-password` and cleared when the user picks a new one.
+export const migration14 = `
+ALTER TABLE users ADD COLUMN passwordHash TEXT;
+ALTER TABLE users ADD COLUMN mustChangePassword INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN passwordUpdatedAt INTEGER;
+PRAGMA user_version=14;
+`;

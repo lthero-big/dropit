@@ -249,7 +249,7 @@ describe('dropit web', () => {
     const count = FakeSocket.instances.length
     expect(count).toBeGreaterThan(0)
     FakeSocket.instances.at(-1)?.close(1008)
-    expect(await screen.findByText('尚未配置 GitHub / Google。管理员可在 管理 → OAuth 登录 填写凭据（或使用环境变量），配置后刷新此页。')).toBeTruthy()
+    expect(await screen.findByText('尚未配置 GitHub / Google。可以先用邮箱和密码登录；管理员可在 管理 → OAuth 登录 填写凭据（或使用环境变量），配置后刷新此页。')).toBeTruthy()
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(FakeSocket.instances.length).toBe(count)
   })

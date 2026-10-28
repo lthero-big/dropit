@@ -45,8 +45,11 @@ Precedence: **“Admin → Site address” > `APP_ORIGIN` env > the request's ow
 | --- | --- | --- |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | unset | GitHub sign-in is enabled only when both are set |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | unset | Google sign-in is enabled only when both are set |
-| `ADMIN_EMAILS` | empty | Optional comma-separated verified emails that become admin on registration |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | unset | Optional, set both. While the database has no account, the server creates this admin at startup and skips `/setup`; ignored once any account exists. Password 8–256 characters; invalid values stop startup |
+| `ADMIN_EMAILS` | empty | Optional comma-separated emails: OAuth identities whose email the provider **verified** become admin on registration. Does not apply to password sign-up (unverified email) |
 | `SESSION_HOURS` | 168 | Absolute session lifetime |
+
+Email + password sign-in is always available and needs no configuration. While no account exists, the startup log prints `dropit setup code: XXXX-XXXX`; use it at `/setup` to create the first admin. The registration policy (closed / invite-only / open, default invite-only) is set under “Admin → Registration” and stored in the database; there is no environment variable for it. Password sign-in and `/setup` share the `RATE_AUTH` limit (plus a separate per-email counter).
 
 ## Content limits
 

@@ -3,10 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ApiError, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13 } from './migrations.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14 } from './migrations.js';
+import type { RegistrationPolicy } from './password.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
-type UserRow = User & { quotaBytes: number | null };
+type UserRow = User & { quotaBytes: number | null; passwordHash?: string | null; mustChangePassword?: number };
 type DeviceRow = Omit<DeviceAuthorization, 'scopes'> & { scopes: string };
 type TokenRow = Omit<AccessToken, 'scopes'> & { scopes: string };
 type DevicePoll = { error: 'expired_token' | 'access_denied' | 'slow_down' | 'authorization_pending'; interval?: number } | { token: AccessToken };
@@ -54,7 +55,27 @@ export interface Repository {
   /** Binds a provider identity to a signed-in account. Returns false when it was already bound to it. */
   linkIdentity(userId: string, identity: Identity, now: number): boolean;
   unlinkIdentity(userId: string, provider: string): void;
-  login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number, meta?: SessionMeta): User;
+  login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number, meta?: SessionMeta, policy?: RegistrationPolicy): User;
+  /** RHEA-190 auth step 2 — password accounts. */
+  userCount(): number;
+  /** Account (and its password hash) for a password sign-in; prefers the row that has a password. */
+  passwordAccount(email: string): (User & { passwordHash: string | null; mustChangePassword: number }) | undefined;
+  /** Password state of one account. */
+  passwordState(userId: string): { passwordHash: string | null; mustChangePassword: number } | undefined;
+  /** Sets (or clears with null) the password; mustChange forces a change at next sign-in. */
+  setPassword(userId: string, passwordHash: string | null, mustChange: boolean, now: number): void;
+  /**
+   * Creates an active account with a password and its private space. firstAdmin: only while the
+   * users table is empty (setup / ADMIN_PASSWORD); otherwise the registration policy and invite apply.
+   */
+  createPasswordUser(input: { email: string; name: string; passwordHash: string; now: number; firstAdmin?: boolean;
+    inviteHash?: string | null; policy?: RegistrationPolicy }): User;
+  /** A browser session for an already-verified user (password sign-in / setup). */
+  createSession(userId: string, sessionHash: string, expiresAt: number, now: number, meta?: SessionMeta): void;
+  /** Spends an invite for an existing account (password sign-in from an invite link). Idempotent for members. */
+  acceptInvite(inviteHash: string, userId: string, now: number): void;
+  /** A pre-created account becomes active on its first password sign-in. */
+  activate(userId: string): void;
   session(sessionHash: string, now: number): Session | undefined;
   logout(sessionHash: string): void;
   /** Throttled "last active" bump for a browser session. */
@@ -74,7 +95,7 @@ export interface Repository {
   deviceForUserCode(userCodeHash: string, verificationId: string | undefined, now: number): DeviceAuthorization | undefined;
   decideDevice(id: string, userId: string, approve: boolean, now: number): void;
   pollDevice(deviceCodeHash: string, now: number, tokenId: string, tokenHash: string): DevicePoll;
-  users(): (User & { usedBytes: number; quotaBytes: number | null })[];
+  users(): (User & { usedBytes: number; quotaBytes: number | null; hasPassword: number; mustChangePassword: number; providers: string | null })[];
   provisionUser(input: { email: string; name: string; role: 'admin' | 'user'; quotaBytes: number | null; now: number }): User;
   updateUser(id: string, patch: { disabled?: boolean; role?: 'admin' | 'user'; name?: string; quotaBytes?: number | null }): void;
   revokeSessions(id: string): void;
@@ -132,8 +153,8 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 13) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 13) this.db.transaction(() => {
+    if (version > 14) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 14) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
@@ -146,7 +167,8 @@ export class SqliteRepository implements Repository {
       if (version < 10) this.db.exec(migration10);
       if (version < 11) this.db.exec(migration11);
       if (version < 12) this.db.exec(migration12);
-      this.db.exec(migration13);
+      if (version < 13) this.db.exec(migration13);
+      this.db.exec(migration14);
     })();
   }
   setting(key: string) {
@@ -234,7 +256,8 @@ export class SqliteRepository implements Repository {
       const rows = this.db.prepare('SELECT provider FROM identities WHERE userId=?').all(userId) as { provider: string }[];
       if (!rows.some(row => row.provider === provider)) throw new ApiError(404, 'NOT_FOUND');
       // The last login method cannot be removed, or the account could never sign in again.
-      if (rows.length <= 1) throw new ApiError(409, 'LAST_IDENTITY');
+      const password = this.db.prepare('SELECT passwordHash FROM users WHERE id=?').get(userId) as { passwordHash: string | null } | undefined;
+      if (rows.length <= 1 && !password?.passwordHash) throw new ApiError(409, 'LAST_IDENTITY');
       this.db.prepare('DELETE FROM identities WHERE userId=? AND provider=?').run(userId, provider);
     }).immediate();
   }
@@ -246,7 +269,7 @@ export class SqliteRepository implements Repository {
       return flow;
     })();
   }
-  login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number, meta: SessionMeta = {}) {
+  login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number, meta: SessionMeta = {}, policy: RegistrationPolicy = 'invite') {
     return this.db.transaction(() => {
       let row = this.db.prepare('SELECT u.* FROM users u JOIN identities i ON i.userId=u.id WHERE i.provider=? AND i.subject=?')
         .get(identity.provider, identity.subject) as UserRow | undefined;
@@ -280,7 +303,10 @@ export class SqliteRepository implements Repository {
         // A missing or stale invite must not block the empty-database bootstrap.
         if (inviteHash && !invite && !first) throw new ApiError(403, 'INVITE_INVALID');
         const listed = admins.includes(identity.email.toLowerCase());
-        if (!first && !listed && !invite) throw new ApiError(403, 'INVITATION_REQUIRED');
+        // RHEA-190 auth step 2: 管理 → 注册 decides who may create an account. ADMIN_EMAILS and
+        // the empty-database bootstrap are operator decisions and bypass it.
+        if (!first && !listed && policy === 'closed') throw new ApiError(403, 'REGISTRATION_CLOSED');
+        if (!first && !listed && !invite && policy !== 'open') throw new ApiError(403, 'INVITATION_REQUIRED');
         const admin = first || listed;
         row = { id: randomUUID(), email: identity.email, name: identity.name, role: admin ? 'admin' : 'user', disabled: 0, pending: 0, createdAt: now, quotaBytes: null };
         this.db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt,pending,quotaBytes) VALUES (@id,@email,@name,@role,@disabled,@createdAt,@pending,@quotaBytes)').run(row);
@@ -289,16 +315,72 @@ export class SqliteRepository implements Repository {
         this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
         this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
       } else if (inviteHash && !invite) throw new ApiError(403, 'INVITE_INVALID');
-      if (invite) {
-        // Membership already held: login is idempotent and does not spend another use.
-        if (!this.isMember(invite.spaceId, row.id)) {
-          const result = this.db.prepare('UPDATE invites SET uses=uses+1 WHERE id=? AND uses<maxUses AND revoked=0 AND expiresAt>?').run(invite.id, now);
-          if (result.changes !== 1) throw new ApiError(403, 'INVITE_INVALID');
-          this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(invite.spaceId, row.id);
-        }
+      if (invite) this.spendInvite(invite, row.id, now);
+      this.createSession(row.id, sessionHash, expiresAt, now, meta);
+      return toUser(row);
+    }).immediate();
+  }
+  private spendInvite(invite: Invite, userId: string, now: number) {
+    // Membership already held: login is idempotent and does not spend another use.
+    if (this.isMember(invite.spaceId, userId)) return;
+    const result = this.db.prepare('UPDATE invites SET uses=uses+1 WHERE id=? AND uses<maxUses AND revoked=0 AND expiresAt>?').run(invite.id, now);
+    if (result.changes !== 1) throw new ApiError(403, 'INVITE_INVALID');
+    this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(invite.spaceId, userId);
+  }
+  acceptInvite(inviteHash: string, userId: string, now: number) {
+    this.db.transaction(() => {
+      const invite = this.invite(inviteHash, now);
+      if (!invite) throw new ApiError(403, 'INVITE_INVALID');
+      this.spendInvite(invite, userId, now);
+    }).immediate();
+  }
+  createSession(userId: string, sessionHash: string, expiresAt: number, now: number, meta: SessionMeta = {}) {
+    this.db.prepare('INSERT INTO sessions (sessionHash,userId,expiresAt,id,createdAt,lastSeenAt,userAgent,ipSummary) VALUES (?,?,?,?,?,?,?,?)')
+      .run(sessionHash, userId, expiresAt, randomUUID(), now, now, meta.userAgent?.slice(0, 400) ?? null, meta.ipSummary ?? null);
+  }
+  userCount() {
+    return (this.db.prepare('SELECT count(*) AS n FROM users').get() as { n: number }).n;
+  }
+  passwordAccount(email: string) {
+    return this.db.prepare(`SELECT * FROM users WHERE lower(email)=lower(?) ORDER BY passwordHash IS NULL, createdAt LIMIT 1`)
+      .get(email) as (User & { passwordHash: string | null; mustChangePassword: number }) | undefined;
+  }
+  passwordState(userId: string) {
+    return this.db.prepare('SELECT passwordHash, mustChangePassword FROM users WHERE id=?').get(userId) as { passwordHash: string | null; mustChangePassword: number } | undefined;
+  }
+  setPassword(userId: string, passwordHash: string | null, mustChange: boolean, now: number) {
+    if (!this.db.prepare('UPDATE users SET passwordHash=?, mustChangePassword=?, passwordUpdatedAt=? WHERE id=?')
+      .run(passwordHash, mustChange ? 1 : 0, now, userId).changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  activate(userId: string) {
+    this.db.prepare('UPDATE users SET pending=0 WHERE id=?').run(userId);
+  }
+  createPasswordUser(input: { email: string; name: string; passwordHash: string; now: number; firstAdmin?: boolean;
+    inviteHash?: string | null; policy?: RegistrationPolicy }) {
+    return this.db.transaction(() => {
+      const first = this.userCount() === 0;
+      if (input.firstAdmin && !first) throw new ApiError(409, 'SETUP_DONE');
+      // Never attach a password to an existing (or admin pre-created) account by email alone:
+      // nobody has proven they own that address. Pre-created users get a temporary password from an admin.
+      if (this.db.prepare('SELECT 1 FROM users WHERE lower(email)=lower(?)').get(input.email) ||
+          this.db.prepare('SELECT 1 FROM identities WHERE lower(email)=lower(?)').get(input.email)) throw new ApiError(409, 'EMAIL_IN_USE');
+      const invite = input.inviteHash ? this.invite(input.inviteHash, input.now) : undefined;
+      if (!input.firstAdmin) {
+        if (input.inviteHash && !invite) throw new ApiError(403, 'INVITE_INVALID');
+        const policy = input.policy ?? 'invite';
+        if (policy === 'closed') throw new ApiError(403, 'REGISTRATION_CLOSED');
+        if (policy === 'invite' && !invite) throw new ApiError(403, 'INVITATION_REQUIRED');
       }
-      this.db.prepare('INSERT INTO sessions (sessionHash,userId,expiresAt,id,createdAt,lastSeenAt,userAgent,ipSummary) VALUES (?,?,?,?,?,?,?,?)')
-        .run(sessionHash, row.id, expiresAt, randomUUID(), now, now, meta.userAgent?.slice(0, 400) ?? null, meta.ipSummary ?? null);
+      // ADMIN_EMAILS is NOT honoured here: a self-chosen password does not prove the address.
+      const admin = Boolean(input.firstAdmin);
+      const row: UserRow = { id: randomUUID(), email: input.email, name: input.name, role: admin ? 'admin' : 'user', disabled: 0, pending: 0,
+        createdAt: input.now, quotaBytes: null };
+      this.db.prepare(`INSERT INTO users (id,email,name,role,disabled,createdAt,pending,quotaBytes,passwordHash,mustChangePassword,passwordUpdatedAt)
+        VALUES (@id,@email,@name,@role,@disabled,@createdAt,@pending,@quotaBytes,@passwordHash,0,@createdAt)`).run({ ...row, passwordHash: input.passwordHash });
+      const spaceId = randomUUID();
+      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
+      this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
+      if (invite) this.spendInvite(invite, row.id, input.now);
       return toUser(row);
     }).immediate();
   }
@@ -306,7 +388,8 @@ export class SqliteRepository implements Repository {
     const row = this.db.prepare('SELECT u.*, s.expiresAt, s.id AS sessionId FROM sessions s JOIN users u ON u.id=s.userId WHERE s.sessionHash=? AND s.expiresAt>? AND u.disabled=0')
       .get(sessionHash, now) as (UserRow & { expiresAt: number; sessionId: string | null }) | undefined;
     if (!row) return undefined;
-    return { user: toUser(row), expiresAt: row.expiresAt, sessionHash, ...(row.sessionId ? { sessionId: row.sessionId } : {}) };
+    return { user: toUser(row), expiresAt: row.expiresAt, sessionHash, ...(row.sessionId ? { sessionId: row.sessionId } : {}),
+      ...(row.mustChangePassword ? { mustChangePassword: true } : {}) };
   }
   logout(sessionHash: string) { this.db.prepare('DELETE FROM sessions WHERE sessionHash=?').run(sessionHash); }
   touchSession(sessionHash: string, now: number, ipSummary: string) {
@@ -414,8 +497,10 @@ export class SqliteRepository implements Repository {
   }
   users() {
     return this.db.prepare(`SELECT u.id,u.email,u.name,u.role,u.disabled,u.createdAt,u.pending,u.quotaBytes,
-      coalesce((SELECT sum(storedBytes) FROM items WHERE userId=u.id),0) AS usedBytes
-      FROM users u ORDER BY createdAt`).all() as (User & { usedBytes: number; quotaBytes: number | null })[];
+      coalesce((SELECT sum(storedBytes) FROM items WHERE userId=u.id),0) AS usedBytes,
+      (u.passwordHash IS NOT NULL) AS hasPassword, u.mustChangePassword,
+      (SELECT group_concat(provider) FROM identities WHERE userId=u.id) AS providers
+      FROM users u ORDER BY createdAt`).all() as (User & { usedBytes: number; quotaBytes: number | null; hasPassword: number; mustChangePassword: number; providers: string | null })[];
   }
   provisionUser(input: { email: string; name: string; role: 'admin' | 'user'; quotaBytes: number | null; now: number }) {
     return this.db.transaction(() => {

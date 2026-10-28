@@ -18,6 +18,7 @@
 | 分组 | 主要路径 |
 | --- | --- |
 | 认证 | `GET /auth/providers`、`GET /auth/:provider`、`GET /auth/:provider/callback`、`POST /auth/logout`、`GET /me`、`GET /invites/:token` |
+| 密码与首次运行 | `GET/POST /setup`、`POST /auth/password/login`、`POST /auth/password/register`、`PUT /me/password`、`POST /admin/users/:id/password`、`GET/PUT /admin/registration` |
 | 个人访问令牌 | `POST/GET /tokens`、`PATCH/DELETE /tokens/:id` |
 | 设备码登录 | `POST /auth/device/authorize`、`POST /auth/device/token`、`GET /auth/device`、`POST /auth/device/approve`、`POST /auth/device/deny` |
 | 登录设备 | `GET /sessions`、`DELETE /sessions/:id`、`POST /sessions/revoke-others`（仅浏览器会话） |

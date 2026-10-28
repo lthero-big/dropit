@@ -13,9 +13,9 @@ export const providerLabel = (provider: string) => (provider === 'github' ? 'Git
 /**
  * RHEA-190 m11: 登录方式. One account can sign in with GitHub and Google. Binding
  * is explicit and only while signed in, so a matching email never merges
- * accounts silently. The last method cannot be removed.
+ * accounts silently. The last method cannot be removed (a password counts as one).
  */
-export function LoginMethods() {
+export function LoginMethods({ hasPassword = false }: { hasPassword?: boolean }) {
   const [identities, setIdentities] = useState<LinkedIdentity[] | null>(null)
   const [available, setAvailable] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -85,7 +85,7 @@ export function LoginMethods() {
                   </p>
                 </div>
                 {bound ? (
-                  identities.length <= 1 ? (
+                  identities.length <= 1 && !hasPassword ? (
                     <span className="text-xs text-fg-4">唯一的登录方式，不能解绑</span>
                   ) : pending === provider ? (
                     <div className="flex gap-2">

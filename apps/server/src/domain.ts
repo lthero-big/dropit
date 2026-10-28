@@ -88,6 +88,8 @@ export interface Session {
   user: User; sessionHash: string; expiresAt: number;
   /** Public id of a browser session (never the cookie or its hash). */
   sessionId?: string;
+  /** RHEA-190 auth step 2: a temporary password is in use; only the change-password API is open. */
+  mustChangePassword?: boolean;
   bearer?: { id: string; scopes: TokenScope[] };
 }
 

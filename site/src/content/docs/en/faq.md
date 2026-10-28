@@ -2,8 +2,17 @@
 title: FAQ
 ---
 
-**There is no sign-in button on the login page?**
-No OAuth provider is configured. Set `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` or `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` as a pair and restart.
+**The first visit goes to /setup — where is the setup code?**
+In the server's startup log: `docker logs dropit 2>&1 | grep 'setup code'`, e.g. `dropit setup code: K7QM-4XHT`. Every restart generates a new one; use the latest. Without a browser, set both `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env` and start again.
+
+**Forgot the password / admin locked out?**
+Another admin can use “Admin → Users → Edit → Reset password”. If you are the only admin, run `docker exec dropit dropit-admin reset-password you@example.com` on the server and sign in with the printed temporary password, then choose a new one.
+
+**There is no GitHub / Google button on the login page?**
+Email + password sign-in is always available. For GitHub / Google, set `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` or `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` as a pair and restart, or fill them in under “Admin → OAuth sign-in”.
+
+**Others cannot register?**
+Registration is invite-only by default. Send an invitation link, pre-create the account under “Admin → Users” (optionally with a temporary password), or switch “Admin → Registration” to open.
 
 **After signing in I'm sent back to the login page with an error?**
 The error code is in `/login?error=CODE`: `INVITATION_REQUIRED` means an invitation is required; `VERIFIED_EMAIL_REQUIRED` means the provider did not return a verified email; `OAUTH_STATE_INVALID` is usually a mismatched callback URL or `APP_ORIGIN`, or the flow timed out (10 minutes).
@@ -30,7 +39,7 @@ No. The current design is a single process; rate limits, broadcasts and presence
 Back up `DATA_DIR/dropit.sqlite` with the SQLite backup API and also back up the whole data directory; or stop the service and copy the whole volume.
 
 **Forgot who the admin is / all admins are disabled?**
-The last enabled admin cannot be disabled or demoted, so the system always keeps at least one admin. You can also add an email to `ADMIN_EMAILS` so that an account later registered with that email becomes admin.
+The last enabled admin cannot be disabled or demoted, so the system always keeps at least one admin. You can also add an email to `ADMIN_EMAILS` so that an account later registered with that email through OAuth becomes admin, or recover an existing admin's password with `dropit-admin reset-password`.
 
 **Can I use it commercially? What is the license?**
 Yes. dropit is released under [GNU AGPL-3.0-only](https://github.com/lthero-big/dropit/blob/main/LICENSE): you may use, modify, distribute and use it commercially for free; but if you distribute a modified version, or let others use a modified version as a network service, you must make the complete source code available to those users under AGPL-3.0. If you deploy it unmodified, giving users the address of this repository is enough.

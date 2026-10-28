@@ -15,6 +15,18 @@ export interface Me {
   maxFileBytes: number
   maxTextBytes: number
   retentionMs: number
+  /** RHEA-190 auth step 2: the account can sign in with email + password. */
+  hasPassword?: boolean
+  /** A temporary password is in use; everything else waits until it is changed. */
+  mustChangePassword?: boolean
+}
+
+/** GET /api/auth/providers */
+export interface AuthInfo {
+  providers: string[]
+  password?: boolean
+  registration?: 'closed' | 'invite' | 'open'
+  setupRequired?: boolean
 }
 
 export interface SpaceSummary {
@@ -80,6 +92,11 @@ export interface AdminUser extends User {
   usedBytes: number
   quotaBytes: number
   quotaOverride: number | null
+  hasPassword?: boolean
+  mustChangePassword?: boolean
+  providers?: string[]
+  /** Only in the response that created it; never shown again. */
+  temporaryPassword?: string
 }
 
 export const LIMIT_KEYS = [

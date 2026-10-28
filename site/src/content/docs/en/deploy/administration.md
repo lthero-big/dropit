@@ -6,18 +6,30 @@ The admin panel lives at `/admin` and is only accessible to enabled admins.
 
 ## Where admins come from
 
-- When the user table is empty, the first identity to sign in successfully via OAuth becomes admin (a transaction guarantees only one under concurrency).
-- Verified emails listed in `ADMIN_EMAILS` also become admin when they register later.
+- First run: while no account exists, create the first admin at `/setup` with the `dropit setup code` from the startup log, or with `ADMIN_EMAIL` / `ADMIN_PASSWORD` on an empty database.
+- When the user table is empty, the first identity to sign in successfully via OAuth also becomes admin (a transaction guarantees only one under concurrency) — only possible when OAuth is configured through the environment, and it needs no setup code.
+- Emails listed in `ADMIN_EMAILS` become admin when they later register through OAuth (provider-verified email); password sign-up is unaffected and always creates a normal user.
 - Admins can promote other users to admin; the last enabled admin cannot be disabled or demoted.
 
 ## Users
 
-- **Pre-create**: create a pending account by email (role and quota can be set); the first provider-verified OAuth sign-in with that email is bound to this account.
+- **Pre-create**: create a pending account by email (role and quota can be set); the first provider-verified OAuth sign-in with that email is bound to this account. With “Generate a temporary password” the password is shown once; signing in with it activates the account and asks for a new password right away.
+- **Reset password**: “Reset password” in the user editor shows a one-time temporary password and signs the user out everywhere; the next sign-in must change it first (until then the browser session can only change the password or sign out). The user list shows each person's sign-in methods (password / GitHub / Google).
+- **Command-line reset**: when you lost your own admin password, `docker exec dropit dropit-admin reset-password <email>` updates the database directly and prints a temporary password; `dropit-admin list-users` lists accounts.
 - **Disable / enable**: disabling immediately revokes all of the user's sessions and WebSockets.
 - **Signed-in devices**: in the user editor, view the user's signed-in devices (browser · OS · IP range · last activity) and sign out an individual device.
 - **Force sign-out (all devices)**: deletes all of the user's sessions; the account stays enabled and can sign in again.
 - **Quota**: set per-user overrides, or restore the installation defaults.
 - Emails cannot be changed; identities from different providers are not merged automatically by email.
+
+
+## Registration policy
+
+“Admin → Registration” decides who can create a new account, for both password sign-up and first OAuth sign-in:
+
+- **Invite-only** (default): needs a valid invitation link, or an account the admin pre-created for that email. Invitation links can be accepted with OAuth or by setting a password.
+- **Closed**: no new accounts; existing accounts sign in as usual.
+- **Open**: anyone can register (as a normal user) with email + password or OAuth. Password sign-up does **not** verify the email, so someone can squat an address; keep public instances invite-only.
 
 ## Invitations
 
