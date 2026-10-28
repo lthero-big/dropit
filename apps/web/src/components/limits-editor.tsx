@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
-import { Panel, StatusPill, fieldClass, selectClass } from '@/components/settings-ui.tsx'
+import { Panel, StatusPill, SubTabs, fieldClass, selectClass } from '@/components/settings-ui.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText } from '@/lib/api.ts'
 import {
@@ -72,10 +72,29 @@ export function LimitsEditor({ limits, onChange }: { limits: AdminLimits; onChan
   }
 
   const groups = LIMIT_GROUPS
+  const [active, setActive] = useState<NavTarget>(targetFromHash)
+
+  // Links such as /admin?tab=limits#limits-time keep working, also for back/forward.
+  useEffect(() => {
+    const sync = () => setActive(targetFromHash())
+    window.addEventListener('hashchange', sync)
+    return () => window.removeEventListener('hashchange', sync)
+  }, [])
+
+  function select(target: NavTarget) {
+    setActive(target)
+    const { pathname, search } = window.location
+    window.history.replaceState(window.history.state, '', `${pathname}${search}#${GROUP_ANCHOR[target]}`)
+  }
 
   return (
     <div>
-      <LimitsSubnav counts={Object.fromEntries(groups.map((group) => [group, LIMIT_SPECS.filter((spec) => spec.group === group).length]))} auditCount={entries.length} />
+      <LimitsSubtabs
+        active={active}
+        onSelect={select}
+        counts={Object.fromEntries(groups.map((group) => [group, LIMIT_SPECS.filter((spec) => spec.group === group).length]))}
+        auditCount={entries.length}
+      />
       <div className="mb-5 rounded-md border-l-2 border-l-line-3 bg-surface-2 px-3 py-2 text-sm text-fg-2">
         <p>覆盖值保存在数据库，重启后保留；只读项仍需改环境变量。</p>
         <p className="mt-1 text-xs text-muted-foreground">
@@ -83,7 +102,17 @@ export function LimitsEditor({ limits, onChange }: { limits: AdminLimits; onChan
         </p>
       </div>
       {groups.map((group) => (
-        <Panel key={group} id={GROUP_ANCHOR[group]} data-limit-group={group} className="scroll-mt-32" title={group} description={GROUP_HINT[group]} flush>
+        <Panel
+          key={group}
+          id={GROUP_ANCHOR[group]}
+          data-limit-group={group}
+          role="tabpanel"
+          aria-labelledby={`${GROUP_ANCHOR[group]}-tab`}
+          hidden={active !== group}
+          title={group}
+          description={GROUP_HINT[group]}
+          flush
+        >
           <ul>
             {LIMIT_SPECS.filter((spec) => spec.group === group).map((spec) => (
               <LimitRow
@@ -97,7 +126,15 @@ export function LimitsEditor({ limits, onChange }: { limits: AdminLimits; onChan
           </ul>
         </Panel>
       ))}
-      <Panel id={GROUP_ANCHOR.变更记录} data-limit-group="变更记录" className="scroll-mt-32" title="变更记录" description={GROUP_HINT.变更记录}>
+      <Panel
+        id={GROUP_ANCHOR.变更记录}
+        data-limit-group="变更记录"
+        role="tabpanel"
+        aria-labelledby={`${GROUP_ANCHOR.变更记录}-tab`}
+        hidden={active !== '变更记录'}
+        title="变更记录"
+        description={GROUP_HINT.变更记录}
+      >
         {auditError ? <p role="alert" className="text-sm text-destructive">{auditError}</p> : null}
         {auditLoading ? <p className="text-sm text-muted-foreground">正在加载变更记录…</p> : null}
         {!auditLoading && entries.length === 0 && !auditError ? <p className="text-sm text-muted-foreground">还没有修改记录。</p> : null}
@@ -141,78 +178,40 @@ const GROUP_HINT: Record<NavTarget, string> = {
   变更记录: '谁在何时改了什么',
 }
 
+function targetFromHash(): NavTarget {
+  const hash = typeof window === 'undefined' ? '' : decodeURIComponent(window.location.hash.slice(1))
+  return NAV_TARGETS.find((target) => GROUP_ANCHOR[target] === hash || target === hash) ?? '容量'
+}
+
 /**
- * RHEA-190 r4: the 限制 tab is long (23 rows). A paper-style secondary nav,
- * sticky under the page header, jumps straight to 容量 / 时间 / 限流 / 变更记录
- * and follows the scroll position.
+ * RHEA-190 m24: 容量 / 时间 / 限流 / 变更记录 are sub-tabs. Only the chosen block is
+ * shown (instead of one long page with jump links); the URL hash follows the tab.
  */
-function LimitsSubnav({ counts, auditCount }: { counts: Record<string, number>; auditCount: number }) {
-  const targets = NAV_TARGETS
-  const [active, setActive] = useState<NavTarget>('容量')
-  const lock = useRef(false)
-  const release = useRef<number | undefined>(undefined)
-
-  useEffect(() => {
-    if (typeof IntersectionObserver !== 'function') return
-    const sections = targets.map((target) => document.getElementById(GROUP_ANCHOR[target])).filter((el): el is HTMLElement => Boolean(el))
-    const observer = new IntersectionObserver(
-      (records) => {
-        if (lock.current) return
-        const visible = records.filter((record) => record.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0]
-        const group = visible?.target.getAttribute('data-limit-group') as NavTarget | null | undefined
-        if (group) setActive(group)
-      },
-      { rootMargin: '-120px 0px -55% 0px' },
-    )
-    for (const section of sections) observer.observe(section)
-    return () => {
-      observer.disconnect()
-      window.clearTimeout(release.current)
-    }
-  }, [targets])
-
-  function jump(target: NavTarget) {
-    setActive(target)
-    lock.current = true
-    window.clearTimeout(release.current)
-    release.current = window.setTimeout(() => {
-      lock.current = false
-    }, 800)
-    const el = document.getElementById(GROUP_ANCHOR[target])
-    const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    el?.scrollIntoView?.({ behavior: reduce ? 'auto' : 'smooth', block: 'start' })
-    if (typeof history !== 'undefined' && history.replaceState) history.replaceState(null, '', `#${GROUP_ANCHOR[target]}`)
-  }
-
+function LimitsSubtabs({
+  active,
+  onSelect,
+  counts,
+  auditCount,
+}: {
+  active: NavTarget
+  onSelect: (target: NavTarget) => void
+  counts: Record<string, number>
+  auditCount: number
+}) {
   return (
-    <nav
-      aria-label="限制分类"
+    <SubTabs
+      label="限制分类"
+      items={NAV_TARGETS.map((target) => ({
+        id: GROUP_ANCHOR[target],
+        value: target,
+        label: target,
+        hint: GROUP_HINT[target],
+        count: target === '变更记录' ? auditCount : counts[target],
+      }))}
+      active={active}
+      onSelect={onSelect}
       data-limits-subnav=""
-      className="sticky top-14 z-20 mb-4 flex gap-1 overflow-x-auto rounded-lg border border-line-1 bg-[color-mix(in_oklab,var(--bg)_92%,transparent)] p-1 backdrop-blur-md"
-    >
-      {targets.map((target) => {
-        const current = active === target
-        const count = target === '变更记录' ? auditCount : counts[target]
-        return (
-          <a
-            key={target}
-            href={`#${GROUP_ANCHOR[target]}`}
-            aria-current={current ? 'location' : undefined}
-            title={GROUP_HINT[target]}
-            className={`inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-md border px-3 text-xs font-medium no-underline transition-colors ${
-              current ? 'border-line-2 bg-surface-1 text-fg shadow-elev-1' : 'border-transparent text-fg-2 hover:border-line-1 hover:bg-surface-2 hover:text-fg'
-            }`}
-            onClick={(event) => {
-              event.preventDefault()
-              jump(target)
-            }}
-          >
-            {target}
-            <span className="text-[11px] tabular-nums text-muted-foreground">{count}</span>
-          </a>
-        )
-      })}
-    </nav>
+    />
   )
 }
 

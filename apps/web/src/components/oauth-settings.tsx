@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useId, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 import { ArrowUpRightIcon, CopyIcon } from 'lucide-react'
-import { Note, Panel, StatusPill, Switch, fieldClass, labelClass } from '@/components/settings-ui.tsx'
+import { ProviderIcon } from '@/components/brand-icons.tsx'
+import { Note, Panel, StatusPill, SubTabs, Switch, fieldClass, labelClass } from '@/components/settings-ui.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api, ApiError, errorText } from '@/lib/api.ts'
 import { copyText } from '@/lib/format.ts'
@@ -54,6 +55,17 @@ function statusOf(view: OAuthProviderView, check: CheckResult | null) {
 export function OAuthSettings() {
   const [view, setView] = useState<OAuthView | null>(null)
   const [hidden, setHidden] = useState(false)
+  // RHEA-190 m24: GitHub / Google are sub-tabs; #oauth-google links open that tab.
+  const [active, setActive] = useState(hashProvider)
+
+  useEffect(() => {
+    const sync = () => {
+      const provider = hashProvider()
+      if (provider) setActive(provider)
+    }
+    window.addEventListener('hashchange', sync)
+    return () => window.removeEventListener('hashchange', sync)
+  }, [])
 
   const load = useCallback(async () => {
     try {
@@ -70,6 +82,15 @@ export function OAuthSettings() {
   }, [load])
 
   if (hidden || !view) return null
+  const providers = view.providers
+  const current = providers.some((entry) => entry.provider === active) ? active : providers[0]?.provider ?? ''
+
+  function select(provider: string) {
+    setActive(provider)
+    const { pathname, search } = window.location
+    window.history.replaceState(window.history.state, '', `${pathname}${search}#oauth-${provider}`)
+  }
+
   return (
     <div id="oauth" role="region" aria-label="OAuth 配置" className="scroll-mt-24">
       <div className="mb-5">
@@ -77,11 +98,30 @@ export function OAuthSettings() {
           在各平台控制台创建 OAuth 应用，把下面的回调地址原样填进去，再把拿到的 Client ID / Secret 填到这里。保存后立即生效，不用重启。Secret 只保存在服务器，页面只显示末尾几位。
         </Note>
       </div>
-      {view.providers.map((provider) => (
-        <ProviderCard key={provider.provider} view={provider} onChange={setView} />
+      {providers.length > 1 ? (
+        <SubTabs
+          label="OAuth 提供方"
+          active={current}
+          onSelect={select}
+          items={providers.map((entry) => ({
+            id: `oauth-${entry.provider}`,
+            value: entry.provider,
+            label: entry.label,
+            name: entry.label,
+            icon: <ProviderIcon provider={entry.provider} className="size-4" />,
+            hint: entry.source === 'none' ? '未配置' : entry.active ? '登录页已显示' : '登录页未显示',
+          }))}
+        />
+      ) : null}
+      {providers.map((provider) => (
+        <ProviderCard key={provider.provider} view={provider} onChange={setView} tabbed={providers.length > 1} hidden={providers.length > 1 && provider.provider !== current} />
       ))}
     </div>
   )
+}
+
+function hashProvider(): string {
+  return typeof window === 'undefined' ? '' : (/^#oauth-(.+)$/.exec(window.location.hash)?.[1] ?? '')
 }
 
 function CopyRow({ label, value }: { label: string; value: string }) {
@@ -108,7 +148,7 @@ function CopyRow({ label, value }: { label: string; value: string }) {
   )
 }
 
-function ProviderCard({ view, onChange }: { view: OAuthProviderView; onChange: (view: OAuthView) => void }) {
+function ProviderCard({ view, onChange, tabbed = false, hidden = false }: { view: OAuthProviderView; onChange: (view: OAuthView) => void; tabbed?: boolean; hidden?: boolean }) {
   const [clientId, setClientId] = useState(view.clientId)
   const [secret, setSecret] = useState('')
   const [enabled, setEnabled] = useState(view.enabled || view.source === 'none')
@@ -183,7 +223,14 @@ function ProviderCard({ view, onChange }: { view: OAuthProviderView; onChange: (
     <Panel
       id={`oauth-${view.provider}`}
       data-provider={view.provider}
-      title={view.label}
+      {...(tabbed ? { role: 'tabpanel', 'aria-labelledby': `oauth-${view.provider}-tab` } : {})}
+      hidden={hidden}
+      title={
+        <span className="inline-flex items-center gap-2">
+          <ProviderIcon provider={view.provider} className="size-4" />
+          {view.label}
+        </span>
+      }
       description={
         <>
           来源：{view.source === 'database' ? '页面配置' : view.source === 'env' ? '环境变量' : '无'}

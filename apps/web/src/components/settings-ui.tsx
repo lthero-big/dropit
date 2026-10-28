@@ -1,4 +1,4 @@
-import { useId, type ComponentProps, type ReactNode } from 'react'
+import { useId, useRef, type ComponentProps, type KeyboardEvent, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { ArrowUpRightIcon } from 'lucide-react'
 import { Link } from 'react-router'
@@ -287,5 +287,91 @@ export function Facts({ items, className = '' }: { items: { label: string; value
 export function Note({ children, tone = 'info' }: { children: ReactNode; tone?: 'info' | 'warn' }) {
   return (
     <div className={`rounded-md border-l-2 px-3 py-2 text-[13px] leading-relaxed ${tone === 'warn' ? 'border-l-destructive bg-brand-soft text-fg-2' : 'border-l-line-3 bg-surface-2 text-fg-2'}`}>{children}</div>
+  )
+}
+
+export interface SubTabItem<T extends string> {
+  /** id of the controlled tabpanel; the tab itself gets `${id}-tab`. */
+  id: string
+  value: T
+  label: ReactNode
+  /** accessible name when `label` is not plain text (e.g. icon + name). */
+  name?: string
+  icon?: ReactNode
+  hint?: string
+  count?: number
+}
+
+/**
+ * RHEA-190 m24: segmented sub-tabs inside a 管理 section (限制 → 容量 / 时间 / 限流 /
+ * 变更记录, OAuth → GitHub / Google). WAI-ARIA tabs: arrow keys / Home / End move
+ * between tabs, only the selected panel is shown.
+ */
+export function SubTabs<T extends string>({
+  label,
+  items,
+  active,
+  onSelect,
+  className = '',
+  ...rest
+}: {
+  label: string
+  items: SubTabItem<T>[]
+  active: T
+  onSelect: (value: T) => void
+  className?: string
+} & Omit<ComponentProps<'div'>, 'onSelect' | 'role'>) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([])
+  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const last = items.length - 1
+    const next =
+      event.key === 'ArrowRight' ? (index === last ? 0 : index + 1)
+      : event.key === 'ArrowLeft' ? (index === 0 ? last : index - 1)
+      : event.key === 'Home' ? 0
+      : event.key === 'End' ? last
+      : null
+    if (next === null) return
+    event.preventDefault()
+    onSelect(items[next]!.value)
+    refs.current[next]?.focus()
+  }
+  return (
+    <div
+      role="tablist"
+      aria-label={label}
+      className={`mb-4 flex gap-1 overflow-x-auto rounded-lg border border-line-1 bg-surface-2 p-1 ${className}`}
+      data-subtabs=""
+      {...rest}
+    >
+      {items.map((item, index) => {
+        const selected = item.value === active
+        return (
+          <button
+            key={item.id}
+            ref={(el) => {
+              refs.current[index] = el
+            }}
+            type="button"
+            role="tab"
+            id={`${item.id}-tab`}
+            aria-controls={item.id}
+            aria-selected={selected}
+            aria-label={item.name}
+            tabIndex={selected ? 0 : -1}
+            title={item.hint}
+            data-subtab={item.value}
+            className={`inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-md border px-3 text-xs font-medium transition-colors ${
+              selected ? 'border-line-2 bg-surface-1 text-fg shadow-elev-1' : 'border-transparent text-fg-2 hover:bg-surface-1/60 hover:text-fg'
+            }`}
+            onClick={() => onSelect(item.value)}
+            onKeyDown={(event) => onKeyDown(event, index)}
+          >
+            {item.icon}
+            {item.label}
+            {item.count === undefined ? null : <span className="text-[11px] tabular-nums text-muted-foreground">{item.count}</span>}
+          </button>
+        )
+      })}
+    </div>
   )
 }

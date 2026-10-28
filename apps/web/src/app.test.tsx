@@ -165,6 +165,10 @@ describe('dropit web', () => {
     renderAt('/')
     expect(await screen.findByRole('link', { name: '使用 GitHub 继续' })).toHaveProperty('href', expect.stringContaining('/api/auth/github'))
     expect(screen.getByRole('link', { name: '使用 Google 继续' })).toBeTruthy()
+    // RHEA-190 m24: each provider button carries its brand mark.
+    expect(document.querySelector('[data-login-provider="github"] [data-brand-icon="github"]')).toBeTruthy()
+    expect(document.querySelector('[data-login-provider="google"] [data-brand-icon="google"]')).toBeTruthy()
+    expect(screen.getByRole('link', { name: '使用 Google 继续' }).getAttribute('title')).toBe('用 Google 账号登录')
     fireEvent.click(screen.getByRole('button', { name: '进入临时房间' }))
     expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
     expect(screen.getByText(/\/rooms\/room-token/)).toBeTruthy()
@@ -245,7 +249,7 @@ describe('dropit web', () => {
     const count = FakeSocket.instances.length
     expect(count).toBeGreaterThan(0)
     FakeSocket.instances.at(-1)?.close(1008)
-    expect(await screen.findByText('尚未配置 GitHub / Google。管理员可在 设置 → OAuth 配置 填写凭据（或使用环境变量），配置后刷新此页。')).toBeTruthy()
+    expect(await screen.findByText('尚未配置 GitHub / Google。管理员可在 管理 → OAuth 登录 填写凭据（或使用环境变量），配置后刷新此页。')).toBeTruthy()
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(FakeSocket.instances.length).toBe(count)
   })

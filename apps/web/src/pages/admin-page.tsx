@@ -198,7 +198,7 @@ export function AdminPage() {
 
   return (
     <Shell>
-      <PageTitle title="管理" sub="整个站点的成员、资源、登录和版本。普通用户看不到这里，也不能调用这些接口。" />
+      <PageTitle title="管理" />
       {tab === 'update' ? null : <UpdateNotice onOpen={() => selectTab('update')} />}
       <SettingsLayout nav={<SideNav label="管理分类" groups={NAV} active={tab} onSelect={selectTab} mode="tabs" />}>
         <div ref={contentRef} role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`} data-admin-panel={tab}>

@@ -108,6 +108,7 @@ function row(key: string) {
 
 afterEach(() => {
   cleanup()
+  window.history.replaceState(null, '', '/')
   calls.length = 0
   server = sample()
   failPatch = false
@@ -168,6 +169,7 @@ describe('LimitsEditor', () => {
     expect(await screen.findByText('ada@example.com')).toBeTruthy()
     expect(screen.getByText('500 B → 2.0 MB')).toBeTruthy()
     expect(document.querySelector('time')?.getAttribute('datetime')).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: /变更记录/ }))
     fireEvent.click(screen.getByRole('button', { name: '更早的记录' }))
     expect(await screen.findByText('bea@example.com')).toBeTruthy()
     expect(screen.getByText('1000 条 → 12 条')).toBeTruthy()
@@ -194,6 +196,7 @@ describe('LimitsEditor', () => {
   it('saves hours and days', async () => {
     stubFetch()
     render(<Harness />)
+    fireEvent.click(screen.getByRole('tab', { name: /时间/ }))
     fireEvent.change(within(row('retentionMs')).getByLabelText('内容保留'), { target: { value: '2' } })
     fireEvent.click(within(row('retentionMs')).getByRole('button', { name: '保存' }))
     await waitFor(() => expect(within(row('retentionMs')).getByText('当前 2 天')).toBeTruthy())
@@ -244,33 +247,46 @@ describe('LimitsEditor', () => {
   })
 })
 
-describe('limits secondary nav (RHEA-190 r4)', () => {
-  it('lists 容量 / 时间 / 限流 / 变更记录 with counts and jumps to the subsection', async () => {
+describe('limits sub-tabs (RHEA-190 m24)', () => {
+  it('switches between 容量 / 时间 / 限流 / 变更记录 and shows only the selected block', async () => {
     server = sample()
     audit = { entries: [], nextCursor: null }
     stubFetch()
-    const scrolled: string[] = []
-    const original = Element.prototype.scrollIntoView
-    Element.prototype.scrollIntoView = function (this: Element) {
-      scrolled.push(this.id)
-    }
-    try {
-      render(<Harness />)
-      const nav = screen.getByRole('navigation', { name: '限制分类' })
-      const links = within(nav).getAllByRole('link')
-      expect(links.map((link) => link.textContent)).toEqual(['容量7', '时间5', '限流11', '变更记录0'])
-      expect(within(nav).getByRole('link', { name: /容量/ }).getAttribute('aria-current')).toBe('location')
-      for (const id of ['limits-capacity', 'limits-time', 'limits-rate', 'limits-audit']) expect(document.getElementById(id)).toBeTruthy()
-      expect(document.getElementById('limits-capacity')?.querySelector('[data-limit="maxFileBytes"]')).toBeTruthy()
-      expect(document.getElementById('limits-rate')?.querySelector('[data-limit="rateChunk"]')).toBeTruthy()
-      fireEvent.click(within(nav).getByRole('link', { name: /限流/ }))
-      expect(scrolled).toEqual(['limits-rate'])
-      expect(within(nav).getByRole('link', { name: /限流/ }).getAttribute('aria-current')).toBe('location')
-      expect(within(nav).getByRole('link', { name: /容量/ }).getAttribute('aria-current')).toBeNull()
-      expect(window.location.hash).toBe('#limits-rate')
-      await waitFor(() => expect(screen.queryByText('正在加载变更记录…')).toBeNull())
-    } finally {
-      Element.prototype.scrollIntoView = original
-    }
+    render(<Harness />)
+    const tablist = screen.getByRole('tablist', { name: '限制分类' })
+    const tabs = within(tablist).getAllByRole('tab')
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['容量7', '时间5', '限流11', '变更记录0'])
+    const tab = (name: RegExp) => within(tablist).getByRole('tab', { name })
+    const panel = (id: string) => document.getElementById(id) as HTMLElement
+    expect(tab(/容量/).getAttribute('aria-selected')).toBe('true')
+    expect(panel('limits-capacity').hidden).toBe(false)
+    for (const id of ['limits-time', 'limits-rate', 'limits-audit']) expect(panel(id).hidden).toBe(true)
+    expect(panel('limits-capacity').querySelector('[data-limit="maxFileBytes"]')).toBeTruthy()
+    expect(panel('limits-rate').querySelector('[data-limit="rateChunk"]')).toBeTruthy()
+    expect(tab(/容量/).getAttribute('aria-controls')).toBe('limits-capacity')
+
+    fireEvent.click(tab(/限流/))
+    expect(tab(/限流/).getAttribute('aria-selected')).toBe('true')
+    expect(tab(/容量/).getAttribute('aria-selected')).toBe('false')
+    expect(panel('limits-rate').hidden).toBe(false)
+    expect(panel('limits-capacity').hidden).toBe(true)
+    expect(window.location.hash).toBe('#limits-rate')
+
+    // Arrow keys move between tabs (WAI-ARIA tabs).
+    fireEvent.keyDown(tab(/限流/), { key: 'ArrowRight' })
+    expect(tab(/变更记录/).getAttribute('aria-selected')).toBe('true')
+    expect(panel('limits-audit').hidden).toBe(false)
+    expect(window.location.hash).toBe('#limits-audit')
+    await waitFor(() => expect(screen.queryByText('正在加载变更记录…')).toBeNull())
+  })
+
+  it('opens the sub-tab named in the URL hash', () => {
+    window.history.replaceState(null, '', '/admin?tab=limits#limits-time')
+    stubFetch()
+    render(<Harness />)
+    expect(screen.getByRole('tab', { name: /时间/ }).getAttribute('aria-selected')).toBe('true')
+    expect((document.getElementById('limits-time') as HTMLElement).hidden).toBe(false)
+    expect((document.getElementById('limits-capacity') as HTMLElement).hidden).toBe(true)
+    expect(within(row('sessionMs')).getByRole('button', { name: '保存' })).toBeTruthy()
   })
 })
