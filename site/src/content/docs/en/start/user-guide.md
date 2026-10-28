@@ -39,7 +39,7 @@ The item's author or the space owner can create a read-only link for a single it
 - Click “Enter a temporary room” on the login page to create one — no account needed; anyone holding the room link can read, write, share and retract.
 - Every room has exactly one room code, and its link is `/r/<code>` (for example `/r/Ab3dEf`). By default it is a random 6-character code (no look-alikes such as `0 O 1 l I`, case-sensitive); the owner can change it under “Room code & PIN” on the room page to a custom 3–32 character code (letters, digits, `_`, `-`, case-sensitive) or draw a new random one. Changing the code changes the link; the old link stops working.
 - The owner can set or remove a PIN (for random and custom codes). With a PIN, both opening the link and entering the code under “Have a room code?” on the login page or at `/join` ask for it; repeated wrong entries are rate limited per IP and per code. The owner and devices that already entered are not asked again.
-- Older long `/rooms/...` links keep working and redirect to the room's `/r/<code>` (every old room received a code during the upgrade).
+- Older long `/rooms/...` links were removed for good: no redirect, no compatibility, they only show "room not found". Every old room that had not expired received a new 6-character code during the upgrade; share its `/r/<code>` link again.
 - A room lives for at most 24 hours and has lower limits than a private space (by default 5 MiB per file, 50 MiB in total).
 - The room page can show a QR code of the current address so another device can join by scanning it (the QR code only contains the room address, not the session).
 

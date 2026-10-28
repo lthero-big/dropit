@@ -10,7 +10,7 @@ import { Shell } from '@/components/shell.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText } from '@/lib/api.ts'
 import { copyText } from '@/lib/format.ts'
-import { enterRoomByCode, forgetRoom, isOwnTempRoom, isRoomAccessToken, openTempRoom, rememberRoom, roomPath, savedRoomToken } from '@/lib/temp-room.ts'
+import { enterRoomByCode, forgetRoom, isOwnTempRoom, openTempRoom, rememberRoom, roomPath, savedRoomToken } from '@/lib/temp-room.ts'
 import { useSession } from '@/lib/session.tsx'
 import type { ConnectionStatus, ScopeInfo } from '@/lib/types.ts'
 
@@ -19,8 +19,8 @@ type Resolved = { access: string; scope: ScopeInfo }
 /**
  * RHEA-190 auth step 4: /r/<code> is the room link and the code at the same time. Opening it is the same as
  * typing the code: the browser uses the access token it already has for that code (owner, or entered before),
- * otherwise it enters the code — and asks for the PIN when the room has one. Old links (/rooms/<token>, and
- * the 6-character /r/ links of step 3) still open the room and are replaced by /r/<code>.
+ * otherwise it enters the code — and asks for the PIN when the room has one. There are no other room links:
+ * the old long links (/rooms/<token>) were removed, anything that is not a live code is "room not found".
  */
 export function RoomPage() {
   const { token: param = '' } = useParams()
@@ -71,7 +71,6 @@ export function RoomPage() {
       else toast.error(errorText(error))
     }
     async function resolve() {
-      if (isRoomAccessToken(param)) return open(param, cancelled)
       const saved = savedRoomToken(param)
       if (saved) {
         try {

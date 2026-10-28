@@ -26,8 +26,8 @@ describe('temporary room per browser', () => {
         bodies.push(JSON.parse(String(init?.body)))
         expect(new Headers(init?.headers).get('Content-Type')).toBe('application/json')
         return bodies.length === 1
-          ? json({ token: 'r1', expiresAt: Date.now() + 60_000, url: '/rooms/r1', reused: false }, 201)
-          : json({ token: 'r1', expiresAt: Date.now() + 60_000, url: '/rooms/r1', reused: true })
+          ? json({ token: 'r1', expiresAt: Date.now() + 60_000, code: 'r1code', url: '/r/r1code', reused: false }, 201)
+          : json({ token: 'r1', expiresAt: Date.now() + 60_000, code: 'r1code', url: '/r/r1code', reused: true })
       }),
     )
     expect(isOwnTempRoom('r1')).toBe(false)

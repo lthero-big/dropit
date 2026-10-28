@@ -1,8 +1,8 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ApiError, randomRoomCode, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
+import { ApiError, ROOM_CODE_ALPHABET, randomRoomCode, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
 import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14, migration15, migration16 } from './migrations.js';
 import type { RegistrationPolicy } from './password.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
@@ -102,7 +102,6 @@ export interface Repository {
   quotaOverride(userId: string): number | null;
   spaces(userId: string): Space[];
   space(id: string): Space | undefined;
-  room(roomHash: string, now: number): Space | undefined;
   roomById(id: string, now: number): Space | undefined;
   /** Throws TOKEN_COLLISION (retry with another token) or CODE_TAKEN. A room's own code and pin are on the Space. */
   createRoom(space: Space, deviceHash: string | null, now: number): void;
@@ -169,6 +168,14 @@ export class SqliteRepository implements Repository {
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
     if (version > 16) throw new Error(`Unsupported schema version ${version}`);
+    // RHEA-190 auth step 4: copy the database before any migration touches it (<file>.pre-v<N>-<time>.bak, next to it).
+    if (version > 0 && version < 16 && path !== ':memory:' && existsSync(path)) {
+      const backup = `${path}.pre-v${version}-${new Date().toISOString().replace(/[:.]/g, '-')}.bak`;
+      this.db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
+      console.info(`dropit: backed up the database (schema ${version}) to ${backup} before migrating`);
+    }
+    // migration 16 rebuilds the spaces table; with foreign keys on, dropping the old table would cascade
+    if (version < 16) this.db.pragma('foreign_keys = OFF');
     if (version < 16) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
@@ -185,9 +192,14 @@ export class SqliteRepository implements Repository {
       if (version < 13) this.db.exec(migration13);
       if (version < 14) this.db.exec(migration14);
       if (version < 15) this.db.exec(migration15);
-      migrateRoomCodes(this.db);
-      this.db.exec(migration16);
+      if (version < 16) {
+        this.db.exec(migration16);
+        migrateRoomCodes(this.db);
+        if ((this.db.pragma('foreign_key_check') as unknown[]).length) throw new Error('migration 16 broke a foreign key');
+        this.db.pragma('user_version = 16');
+      }
     })();
+    this.db.pragma('foreign_keys = ON');
   }
   setting(key: string) {
     return this.db.prepare('SELECT key,value,updatedAt,updatedBy FROM app_settings WHERE key=?').get(key) as AppSetting | undefined;
@@ -331,7 +343,7 @@ export class SqliteRepository implements Repository {
         this.db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt,pending,quotaBytes) VALUES (@id,@email,@name,@role,@disabled,@createdAt,@pending,@quotaBytes)').run(row);
         this.db.prepare('INSERT INTO identities (provider,subject,userId,email,linkedAt) VALUES (?,?,?,?,?)').run(identity.provider, identity.subject, row.id, identity.email, now);
         const spaceId = randomUUID();
-        this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
+        this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt) VALUES (?,?,?,NULL)').run(spaceId, 'Private space', row.id);
         this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
         created = true;
       } else if (inviteHash && !invite) throw new ApiError(403, 'INVITE_INVALID');
@@ -405,7 +417,7 @@ export class SqliteRepository implements Repository {
       this.db.prepare(`INSERT INTO users (id,email,name,role,disabled,createdAt,pending,quotaBytes,passwordHash,mustChangePassword,passwordUpdatedAt)
         VALUES (@id,@email,@name,@role,@disabled,@createdAt,@pending,@quotaBytes,@passwordHash,0,@createdAt)`).run({ ...row, passwordHash: input.passwordHash });
       const spaceId = randomUUID();
-      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
+      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt) VALUES (?,?,?,NULL)').run(spaceId, 'Private space', row.id);
       this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
       if (invite) this.spendInvite(invite, row.id, input.now, true);
       return toUser(row);
@@ -536,7 +548,7 @@ export class SqliteRepository implements Repository {
       const row: UserRow = { id: randomUUID(), email: input.email, name: input.name, role: input.role, disabled: 0, pending: 1, createdAt: input.now, quotaBytes: input.quotaBytes };
       this.db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt,pending,quotaBytes) VALUES (@id,@email,@name,@role,@disabled,@createdAt,@pending,@quotaBytes)').run(row);
       const spaceId = randomUUID();
-      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
+      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt) VALUES (?,?,?,NULL)').run(spaceId, 'Private space', row.id);
       this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
       return toUser(row);
     }).immediate();
@@ -574,17 +586,16 @@ export class SqliteRepository implements Repository {
   }
   spaces(userId: string) { return this.db.prepare('SELECT s.* FROM spaces s JOIN members m ON m.spaceId=s.id WHERE m.userId=?').all(userId) as Space[]; }
   space(id: string) { return this.db.prepare('SELECT * FROM spaces WHERE id=?').get(id) as Space | undefined; }
-  roomById(id: string, now: number) { return this.db.prepare('SELECT * FROM spaces WHERE id=? AND roomHash IS NOT NULL AND expiresAt>?').get(id, now) as Space | undefined; }
-  room(roomHash: string, now: number) { return this.db.prepare('SELECT * FROM spaces WHERE roomHash=? AND expiresAt>?').get(roomHash, now) as Space | undefined; }
+  roomById(id: string, now: number) { return this.db.prepare('SELECT * FROM spaces WHERE id=? AND roomKey IS NOT NULL AND expiresAt>?').get(id, now) as Space | undefined; }
   createRoom(space: Space, deviceHash: string | null, now: number) {
     this.db.transaction(() => {
       // an expired room that cleanup has not removed yet gives up its browser binding and its code
       if (deviceHash) this.db.prepare('UPDATE spaces SET deviceHash=NULL WHERE deviceHash=?').run(deviceHash);
-      if (this.db.prepare('SELECT 1 FROM spaces WHERE roomHash=?').get(space.roomHash)) throw new ApiError(409, 'TOKEN_COLLISION');
+      if (this.db.prepare('SELECT 1 FROM spaces WHERE roomKey=?').get(space.roomKey)) throw new ApiError(409, 'TOKEN_COLLISION');
       if (space.roomCode) this.releaseExpiredCode(space.roomCode, now);
       if (space.roomCode && this.db.prepare('SELECT 1 FROM spaces WHERE roomCode=?').get(space.roomCode)) throw new ApiError(409, 'CODE_TAKEN');
-      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash,deviceHash,roomCode,pinHash) VALUES (?,?,?,?,?,?,?,?)')
-        .run(space.id, space.name, space.ownerId, space.expiresAt, space.roomHash, deviceHash, space.roomCode ?? null, space.pinHash ?? null);
+      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomKey,deviceHash,roomCode,pinHash) VALUES (?,?,?,?,?,?,?,?)')
+        .run(space.id, space.name, space.ownerId, space.expiresAt, space.roomKey, deviceHash, space.roomCode ?? null, space.pinHash ?? null);
     }).immediate();
   }
   private releaseExpiredCode(code: string, now: number) {
@@ -596,11 +607,11 @@ export class SqliteRepository implements Repository {
       this.releaseExpiredCode(code, now);
       const holder = this.db.prepare('SELECT id FROM spaces WHERE roomCode=?').get(code) as { id: string } | undefined;
       if (holder && holder.id !== spaceId) throw new ApiError(409, 'CODE_TAKEN');
-      if (!this.db.prepare('UPDATE spaces SET roomCode=?, pinHash=? WHERE id=? AND roomHash IS NOT NULL AND expiresAt>?').run(code, pinHash, spaceId, now).changes) throw new ApiError(404, 'NOT_FOUND');
+      if (!this.db.prepare('UPDATE spaces SET roomCode=?, pinHash=? WHERE id=? AND roomKey IS NOT NULL AND expiresAt>?').run(code, pinHash, spaceId, now).changes) throw new ApiError(404, 'NOT_FOUND');
     }).immediate();
   }
   deviceRoom(deviceHash: string, now: number) {
-    return this.db.prepare('SELECT * FROM spaces WHERE deviceHash=? AND roomHash IS NOT NULL AND expiresAt>?').get(deviceHash, now) as Space | undefined;
+    return this.db.prepare('SELECT * FROM spaces WHERE deviceHash=? AND roomKey IS NOT NULL AND expiresAt>?').get(deviceHash, now) as Space | undefined;
   }
   isMember(spaceId: string, userId: string) { return Boolean(this.db.prepare('SELECT 1 FROM members WHERE spaceId=? AND userId=?').get(spaceId, userId)); }
   invite(tokenHash: string, now: number) {
@@ -911,12 +922,17 @@ export class SqliteRepository implements Repository {
   close() { this.db.close(); }
 }
 
+/** Step 3 drew random room codes of 5 characters from the same alphabet; those are replaced, custom codes are kept. */
+const STEP_THREE_RANDOM_CODE = new RegExp(`^[${ROOM_CODE_ALPHABET}]{5}$`);
 /**
- * RHEA-190 auth step 4 (migration 16): every room without a code gets a unique random one, so that old
- * rooms open at /r/<code> too. Their old links keep working and are redirected to the code by the clients.
+ * RHEA-190 auth step 4 (migration 16): every room ends up with exactly one code, its link /r/<code>. Rooms
+ * without a code (all rooms of schema 14, i.e. production before step 3) and rooms with a random 5-character
+ * step-3 code get a fresh unique random 6-character code; a custom step-3 code is kept. A PIN stays as it was.
+ * The old long room links are gone with the roomHash column (dropped by migration16), there is no fallback.
  */
 export function migrateRoomCodes(db: Database.Database, random: () => string = randomRoomCode) {
-  const rooms = db.prepare('SELECT id FROM spaces WHERE roomHash IS NOT NULL AND roomCode IS NULL').all() as { id: string }[];
+  const rooms = (db.prepare('SELECT id, roomCode FROM spaces WHERE roomKey IS NOT NULL').all() as { id: string; roomCode: string | null }[])
+    .filter(room => room.roomCode === null || STEP_THREE_RANDOM_CODE.test(room.roomCode));
   const taken = db.prepare('SELECT 1 FROM spaces WHERE roomCode=?');
   const assign = db.prepare('UPDATE spaces SET roomCode=? WHERE id=?');
   for (const room of rooms) {

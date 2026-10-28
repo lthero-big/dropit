@@ -421,10 +421,6 @@ export class Client {
     return body.body as { token: string; expiresAt: number; code?: string; url?: string; hasPin?: boolean };
   }
 
-  async roomInfo(roomToken: string): Promise<{ id: string; name: string; expiresAt: number | null; code?: string | null; url?: string }> {
-    return (await this.send('GET', `/api/rooms/${encodeURIComponent(roomToken)}`)).body as { id: string; name: string; expiresAt: number | null; code?: string | null; url?: string };
-  }
-
   async authorize(input: { name: string; scopes?: Array<'read' | 'write'>; expiresInDays?: number | null }): Promise<AuthorizeResponse> {
     const payload: Record<string, unknown> = { name: input.name };
     if (input.scopes) payload.scopes = input.scopes;

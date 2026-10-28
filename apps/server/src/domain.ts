@@ -6,17 +6,10 @@ export class ApiError extends Error {
 }
 export const token = () => randomBytes(32).toString('base64url');
 const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
-/** RHEA-190 auth step 3: share links are 6 case-sensitive base62 characters (older 43-character links keep working). Step 3 room links used them too. */
+/** RHEA-190 auth step 3: share links are 6 case-sensitive base62 characters (older 43-character share links keep working). */
 export const SHORT_TOKEN_LENGTH = 6;
 export const shortToken = () => Array.from({ length: SHORT_TOKEN_LENGTH }, () => BASE62[randomInt(BASE62.length)]).join('');
 export const isShortToken = (value: string) => /^[A-Za-z0-9]{6}$/.test(value);
-/** Derives a 6-character base62 token from a digest (device rooms re-derive their link from the browser's secret key). */
-export const shortTokenFrom = (digest: Buffer) => {
-  let n = BigInt(`0x${digest.subarray(0, 8).toString('hex')}`);
-  let out = '';
-  for (let i = 0; i < SHORT_TOKEN_LENGTH; i++) { out += BASE62[Number(n % 62n)]; n /= 62n; }
-  return out;
-};
 /**
  * RHEA-190 auth step 4: a room has ONE code and its link is /r/<code>. Random codes are 6 case-sensitive
  * characters without the look-alikes 0 O o 1 I l; owners may pick a custom code instead (CUSTOM_CODE_PATTERN).
@@ -26,13 +19,11 @@ export const RANDOM_ROOM_CODE_LENGTH = 6;
 export const randomRoomCode = () => Array.from({ length: RANDOM_ROOM_CODE_LENGTH }, () => ROOM_CODE_ALPHABET[randomInt(ROOM_CODE_ALPHABET.length)]).join('');
 /** A code somebody typed: case-sensitive letters, digits, '-' and '_'. */
 export const CUSTOM_CODE_PATTERN = /^[A-Za-z0-9_-]{3,32}$/;
-/** Room links handed out before step 3 (and the internal room secret since step 4): 43 base64url characters. */
-export const LEGACY_ROOM_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 export const PIN_MIN = 4;
 export const PIN_MAX = 32;
 export const hash = (value: string) => createHash('sha256').update(value).digest('base64url');
 export interface User { id: string; email: string; name: string; role: 'admin' | 'user'; disabled: number; pending: number; createdAt: number }
-export interface Space { id: string; name: string; ownerId: string | null; expiresAt: number | null; roomHash: string | null; deviceHash?: string | null; roomCode?: string | null; pinHash?: string | null }
+export interface Space { id: string; name: string; ownerId: string | null; expiresAt: number | null; /** The room's internal secret (rooms only; NULL for private spaces). Never a link. */ roomKey: string | null; deviceHash?: string | null; roomCode?: string | null; pinHash?: string | null }
 export interface UploadSession {
   id: string; spaceId: string; userId: string | null; principal: string;
   filename: string; mime: string; size: number; chunkSize: number; createdAt: number; expiresAt: number;

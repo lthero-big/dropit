@@ -204,7 +204,7 @@ export const usageText = `dropit — 云剪贴板命令行
   dropit share <id|latest> --expires <1h|1d|7d|never> [--max-views <次数>]
   dropit watch [--exec [--] <命令> [参数...]]
   dropit room new [--code <房间码>] [--pin <PIN>]
-  dropit room join <链接|房间码|令牌> [--pin <PIN>]
+  dropit room join <链接|房间码> [--pin <PIN>]
   dropit room enter <房间码> [--pin <PIN>]
 
 全局选项

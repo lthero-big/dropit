@@ -49,16 +49,14 @@ function report(io: Io, json: boolean, error: unknown, secrets: readonly string[
   return cli.exitCode;
 }
 
-// A room has one code and one link /r/<code>. The code (3–32 of A-Za-z0-9_-) is not a credential: it is exchanged
-// for an access token through POST /api/rooms/enter (PIN, rate limit). Tokens are <id>.<proof> or an old 43-character
-// room token (old /rooms/<token> links).
-const ROOM_ACCESS = /^(?:[A-Za-z0-9_-]{43}|[0-9a-f-]{36}\.[A-Za-z0-9_-]{43})$/;
+// A room has one code and one link /r/<code>; there are no other room links (the old long /rooms/<token> links
+// were removed). The code (3–32 of A-Za-z0-9_-) is not a credential: it is exchanged for an access token through
+// POST /api/rooms/enter (PIN, rate limit), and the CLI keeps that token in its config.
 const ROOM_CODE = /^[A-Za-z0-9_-]{3,32}$/;
-export type RoomTarget = { kind: 'token'; token: string } | { kind: 'code'; code: string };
-export function parseRoomTarget(input: string): RoomTarget {
+/** The room code in a /r/<code> link or a bare code. */
+export function parseRoomCode(input: string): string {
   const trimmed = input.trim();
-  const classify = (value: string): RoomTarget | null =>
-    ROOM_ACCESS.test(value) ? { kind: 'token', token: value } : ROOM_CODE.test(value) ? { kind: 'code', code: value } : null;
+  const classify = (value: string) => ROOM_CODE.test(value) ? value : null;
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
     const bare = classify(trimmed);
     if (bare) return bare;
@@ -68,7 +66,7 @@ export function parseRoomTarget(input: string): RoomTarget {
   try { url = new URL(trimmed); }
   catch { throw new CliError('USAGE', '无法识别房间链接', 2); }
   const parts = url.pathname.split('/').filter(Boolean);
-  const index = Math.max(parts.lastIndexOf('rooms'), parts.lastIndexOf('r'));
+  const index = parts.lastIndexOf('r');
   let segment = '';
   try { segment = decodeURIComponent(index >= 0 ? parts[index + 1] ?? '' : ''); }
   catch { segment = ''; }
@@ -78,15 +76,10 @@ export function parseRoomTarget(input: string): RoomTarget {
 }
 
 async function roomAccess(client: Client, input: string, pin: string | undefined, secrets: string[]): Promise<{ token: string; expiresAt: number | null; code: string | null; url: string | null }> {
-  const target = parseRoomTarget(input);
-  if (target.kind === 'token') {
-    secrets.push(target.token);
-    const info = await client.roomInfo(target.token);
-    return { token: target.token, expiresAt: info.expiresAt, code: info.code ?? null, url: info.url ?? null };
-  }
-  const entry = await client.enterRoom(target.code, pin);
+  const code = parseRoomCode(input);
+  const entry = await client.enterRoom(code, pin);
   secrets.push(entry.token);
-  return { token: entry.token, expiresAt: entry.expiresAt, code: entry.code ?? target.code, url: entry.url ?? null };
+  return { token: entry.token, expiresAt: entry.expiresAt, code: entry.code ?? code, url: entry.url ?? null };
 }
 
 function preview(item: Item): string {

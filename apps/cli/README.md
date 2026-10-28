@@ -103,10 +103,10 @@ dropit watch --exec -- ./on-item.sh
 ```bash
 dropit --space <id或名称> ls
 dropit room new
-dropit room join 'http://127.0.0.1:8787/rooms/<token>'
+dropit room join 'http://127.0.0.1:8787/r/<房间码>'   # 或者 dropit room enter <房间码> [--pin PIN]
 ```
 
-`--space` 会记住这个空间，并清除已选的房间。`room new` 和 `room join` 会把之后的命令默认发到该房间。房间 URL 同样是能力凭据。
+`--space` 会记住这个空间，并清除已选的房间。`room new` 和 `room join` 会把之后的命令默认发到该房间。房间链接就是 `/r/<房间码>`；房间码不是凭据，CLI 用它（和 PIN）换取访问令牌并保存在配置里。旧版本的长链接 `/rooms/<令牌>` 已经停用，不再接受。
 
 `--space` 和 `--room` 不能同时使用。没有 TTY 时，多个空间且没有默认值会直接失败，不会交互选择。
 

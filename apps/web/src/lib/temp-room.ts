@@ -33,8 +33,8 @@ export function roomDeviceKey(): string {
   }
 }
 
-export type TempRoom = { token: string; expiresAt: number; url: string; reused?: boolean; code?: string | null; hasPin?: boolean }
-export type RoomEntry = { token: string; expiresAt: number; url?: string; code: string | null; hasPin: boolean }
+export type TempRoom = { token: string; expiresAt: number; url: string; reused?: boolean; code: string; hasPin?: boolean }
+export type RoomEntry = { token: string; expiresAt: number; url?: string; code: string; hasPin: boolean }
 
 // RHEA-190 auth step 4: a room has ONE code and its link is /r/<code>. The code is only typed / shared; the
 // room API needs an access token, which the browser gets once (creating the room, or entering the code and
@@ -76,13 +76,9 @@ export function forgetRoom(code: string) {
   delete access[code]
   writeAccess(access)
 }
-/** Old room links (/rooms/<43 characters>) and entry tokens are access tokens; anything else in /r/… is a code. */
-export function isRoomAccessToken(value: string): boolean {
-  return /^[A-Za-z0-9_-]{43}$/.test(value) || /^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/.test(value)
-}
-/** The page of a room: /r/<code>. */
-export function roomPath(room: { code?: string | null; token: string }): string {
-  return `/r/${encodeURIComponent(room.code ?? room.token)}`
+/** The page of a room: /r/<code> (the only room link there is). */
+export function roomPath(room: { code: string }): string {
+  return `/r/${encodeURIComponent(room.code)}`
 }
 
 /** Open this browser's temporary room: the live one if it has one, otherwise a new one. */
@@ -97,7 +93,7 @@ export async function openTempRoom(options: { code?: string; pin?: string } = {}
   } catch {
     // ignore
   }
-  rememberRoom(room.code ?? room.token, room.token)
+  rememberRoom(room.code, room.token)
   return room
 }
 
@@ -117,7 +113,7 @@ export async function enterRoomByCode(code: string, pin?: string): Promise<RoomE
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code, ...(pin ? { pin } : {}) }),
   })
-  rememberRoom(entry.code ?? code, entry.token)
+  rememberRoom(entry.code, entry.token)
   return entry
 }
 

@@ -274,13 +274,10 @@ PIN again** when the owner sets or changes the PIN or the code.
 | PUT | `/rooms/:room/code` | Room owner only (device key), `{deviceKey, code?, pin?}` (at least one) → `{code, hasPin, url}`. `code: "<custom>"` sets a custom code, `code: null` or `""` draws a new random code; `pin: "<pin>"` sets/replaces the PIN, `pin: null` or `""` removes it; an omitted field stays as it is. `403` for non-owners, `409 CODE_TAKEN` |
 
 Wrong codes and PINs are counted per client IP and per code with the `RATE_AUTH` budget.
-**Old links:** rooms created before this version received a code when the database was migrated (schema 16:
-every live room without a code gets a random 6-character code; rooms that already had a code keep it and its
-PIN). Their 43-character `/rooms/<token>` links (and the token itself) keep working and the web app redirects
-them to `/r/<code>`. Share links `/s/<token>` are unchanged (6 characters, older long links stay valid).
+**Old long links are gone:** the old room links (`/rooms/<43-character token>`, and the 6-character links of the previous step) were removed for good, with no redirect and no compatibility code. `/rooms/<token>` answers `404` (the web app shows "room not found") and `/api/rooms/<old token>` answers `404 NOT_FOUND`. Schema 16 migrates an existing database: it first copies the database file to `<file>.pre-v<old version>-<time>.bak` (next to it), drops the old link data (the `roomHash` column), gives every live room that has no code, and every room with a random 5-character code from the previous step, a new random 6-character code, and keeps custom codes and PINs. Share links `/s/<token>` are unchanged (6 characters, older long share links stay valid).
 
 Set `base` to `/spaces/:spaceId` or `/rooms/:room` in the following table, where `:room` is an access token
-from `POST /rooms` / `POST /rooms/enter` (or an old 43-character room token). A room code is not accepted there.
+from `POST /rooms` / `POST /rooms/enter`. A room code is not accepted there.
 Space routes require membership; room routes require the unexpired capability.
 
 | Method | Path | Body / response |

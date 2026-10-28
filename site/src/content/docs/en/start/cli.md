@@ -37,7 +37,7 @@ dropit logout
 | `dropit share <id\|latest> --expires 1d --max-views 1` | Create a share link |
 | `dropit watch [--exec -- program args...]` | Watch for new items in real time, optionally running a program |
 | `dropit room new [--code CODE] [--pin PIN]` | Create a temporary room; a random 6-character code by default, `--code` sets a custom code, `--pin` works on its own too |
-| `dropit room join <link\|code> [--pin PIN]` / `dropit room enter <CODE> [--pin PIN]` | Join a temporary room by its `/r/<code>` link, its code, or an old `/rooms/<token>` link; add `--pin` for a room with a PIN |
+| `dropit room join <link\|code> [--pin PIN]` / `dropit room enter <CODE> [--pin PIN]` | Join a temporary room by its `/r/<code>` link or its code (old `/rooms/<token>` links are no longer accepted); add `--pin` for a room with a PIN |
 | `dropit --space <id or name> ls` | Select (and remember) a space |
 
 The `watch --exec` program receives the item body on stdin, plus the environment variables `DROPIT_ITEM_ID`, `DROPIT_ITEM_KIND`, `DROPIT_ITEM_FILENAME`, `DROPIT_ITEM_MIME`, `DROPIT_ITEM_SIZE`, `DROPIT_ITEM_SPACE` and `DROPIT_ITEM_TEXT`; it is not run through a shell.

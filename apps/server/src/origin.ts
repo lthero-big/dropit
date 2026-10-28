@@ -55,3 +55,7 @@ export function requestOriginResolver(trustProxy: string[]) {
 export function sameOrigin(header: string, own: string): boolean {
   return header === own || (own.startsWith('http://') && header === `https://${own.slice('http://'.length)}`);
 }
+
+/** The web app's routes (apps/web/src/App.tsx); every other non-API, non-file path is answered with 404. */
+const APP_ROUTE = /^\/(?:(?:login|setup|change-password|join|admin|settings|device)\/?)?$|^\/(?:invite|r|s)\/[^/]+\/?$/;
+export const isAppRoute = (path: string) => APP_ROUTE.test(path);

@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router'
+import { BrowserRouter, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { Toaster } from '@/components/ui/sonner.tsx'
 import { SessionProvider, useSession } from '@/lib/session.tsx'
 import { ChangePasswordPage } from '@/pages/change-password-page.tsx'
@@ -10,6 +10,7 @@ import { HomePage } from '@/pages/home-page.tsx'
 import { InvitePage } from '@/pages/invite-page.tsx'
 import { JoinPage } from '@/pages/join-page.tsx'
 import { LoginPage } from '@/pages/login-page.tsx'
+import { NotFoundPage } from '@/pages/not-found-page.tsx'
 import { RoomPage } from '@/pages/room-page.tsx'
 import { SettingsPage } from '@/pages/settings-page.tsx'
 import { SharePage } from '@/pages/share-page.tsx'
@@ -36,13 +37,12 @@ export function App() {
           <Route path="/change-password" element={<ChangePasswordPage />} />
           <Route path="/invite/:token" element={<InvitePage />} />
           <Route path="/r/:token" element={<RoomPage />} />
-          <Route path="/rooms/:token" element={<RoomPage />} />
           <Route path="/join" element={<JoinPage />} />
           <Route path="/s/:token" element={<SharePage />} />
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/device" element={<DevicePage />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<NotFoundPage />} />
         </Routes>
         <PasswordGate />
         <Toaster position="top-center" />

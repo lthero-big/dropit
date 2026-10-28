@@ -25,7 +25,7 @@ export function EnterRoomForm({ initialCode = '' }: { initialCode?: string }) {
     setError(null)
     try {
       const entry = await enterRoomByCode(code.trim(), needPin ? pin : undefined)
-      navigate(roomPath({ code: entry.code ?? code.trim(), token: entry.token }))
+      navigate(roomPath(entry))
     } catch (caught) {
       if (caught instanceof ApiError && caught.code === 'PIN_REQUIRED') {
         setNeedPin(true)

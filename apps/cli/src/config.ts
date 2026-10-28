@@ -33,6 +33,8 @@ function pickString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+const ROOM_ACCESS_TOKEN = /^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/;
+
 export function parseConfig(raw: unknown): FileConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new CliError('CONFIG_INVALID', '配置文件不是 JSON 对象');
   const body = raw as Record<string, unknown>;
@@ -44,7 +46,8 @@ export function parseConfig(raw: unknown): FileConfig {
   if (url) config.url = url;
   if (token) config.token = token;
   if (spaceId) config.spaceId = spaceId;
-  if (roomToken) config.roomToken = roomToken;
+  // a room access token is <room id>.<proof>; anything else (an old long room token) is dropped
+  if (roomToken && ROOM_ACCESS_TOKEN.test(roomToken)) config.roomToken = roomToken;
   return config;
 }
 

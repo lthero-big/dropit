@@ -871,7 +871,7 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.get('/api/spaces', c => {
     const auth = service.requireSession(c.get('session'));
-    return c.json({ spaces: repo.spaces(auth.user.id).map(({ roomHash: _room, deviceHash: _device, ...space }) => space) });
+    return c.json({ spaces: repo.spaces(auth.user.id).map(({ roomKey: _room, deviceHash: _device, pinHash: _pin, ...space }) => space) });
   });
   // RHEA-190 auth step 3: short codes are guessable, so every wrong guess (unknown code, wrong PIN, a
   // custom code that is already taken, a share link that does not exist) is charged to the caller's IP.
@@ -940,8 +940,7 @@ export function createBackend(options: BackendOptions = {}) {
     catch (error) { if (error instanceof ApiError && error.code === 'CODE_TAKEN') guessFailed(c); throw error; }
   });
   // Enter a room by its code (and PIN when it has one) without signing in. Opening the link /r/<code> does
-  // exactly this, so a PIN protects the link too. A 6-character room link from step 3 is accepted as well
-  // (the answer carries the room's current code, which clients then show / redirect to).
+  // exactly this, so a PIN protects the link too. Only the room's current code is accepted.
   app.post('/api/rooms/enter', async c => {
     const body = await json(c, 2048);
     const code = typeof body.code === 'string' && body.code.length <= 64 ? body.code.trim() : '';
@@ -959,7 +958,8 @@ export function createBackend(options: BackendOptions = {}) {
   });
   // The browser that owns a temporary room (it proves it with its secret room key) can change the room's code and PIN.
   app.put('/api/rooms/:room/code', async c => {
-    limit(c, 'room-create', config.rateRoom);
+    // its own budget: changing the code/PIN does not use up the room-creation limit (and vice versa)
+    limit(c, 'room-code', config.rateRoom);
     const body = await json(c, 2048);
     const deviceKey = deviceKeyInput(body.deviceKey);
     const space = service.room(c.req.param('room'));
@@ -1074,24 +1074,24 @@ export function createBackend(options: BackendOptions = {}) {
     app.get(`${base}/groups`, c => c.json({ groups: service.groups(scope(c)) }));
     app.post(`${base}/groups`, async c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      limit(c, space.roomKey ? 'room-write' : 'write', space.roomKey ? config.rateRoom : config.rateUpload);
       const body = await json(c, 2048);
       return c.json({ groups: service.createGroup(space, body.name) }, 201);
     });
     app.patch(`${base}/groups/:name`, async c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      limit(c, space.roomKey ? 'room-write' : 'write', space.roomKey ? config.rateRoom : config.rateUpload);
       const body = await json(c, 2048);
       return c.json({ groups: service.renameGroup(space, c.req.param('name')!, body.name) });
     });
     app.delete(`${base}/groups/:name`, c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      limit(c, space.roomKey ? 'room-write' : 'write', space.roomKey ? config.rateRoom : config.rateUpload);
       return c.json({ groups: service.deleteGroup(space, c.req.param('name')!) });
     });
     app.post(`${base}/uploads`, async c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'upload', space.roomHash ? config.rateRoom : config.rateUpload);
+      limit(c, space.roomKey ? 'room-write' : 'upload', space.roomKey ? config.rateRoom : config.rateUpload);
       const body = await json(c, 8192);
       const mime = string(body.mime, 200).split(';')[0].trim().toLowerCase();
       if (!mime) throw new ApiError(400, 'INVALID_INPUT');
@@ -1106,7 +1106,7 @@ export function createBackend(options: BackendOptions = {}) {
     });
     app.post(`${base}/uploads/:id/complete`, async c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'upload', space.roomHash ? config.rateRoom : config.rateUpload);
+      limit(c, space.roomKey ? 'room-write' : 'upload', space.roomKey ? config.rateRoom : config.rateUpload);
       return c.json({ item: await service.uploads.complete(space, c.get('session'), c.req.param('id')!, meta(c)) }, 201);
     });
     app.delete(`${base}/uploads/:id`, async c => {
@@ -1117,21 +1117,21 @@ export function createBackend(options: BackendOptions = {}) {
       const space = scope(c);
       const session = c.get('session');
       return c.json({ id: space.id, name: space.name, expiresAt: space.expiresAt,
-        ...(space.roomHash ? { ...roomCodeInfo(space), url: roomUrl(originFor(c), space) } : {}),
-        maxFileBytes: space.roomHash ? config.roomMaxFileBytes : config.maxFileBytes,
-        quotaBytes: space.roomHash ? config.roomQuotaBytes : effectiveQuota(session!.user.id) });
+        ...(space.roomKey ? { ...roomCodeInfo(space), url: roomUrl(originFor(c), space) } : {}),
+        maxFileBytes: space.roomKey ? config.roomMaxFileBytes : config.maxFileBytes,
+        quotaBytes: space.roomKey ? config.roomQuotaBytes : effectiveQuota(session!.user.id) });
     });
     app.get(`${base}/items`, c => c.json(service.snapshot(scope(c))));
     app.post(`${base}/items/text`, async c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      limit(c, space.roomKey ? 'room-write' : 'write', space.roomKey ? config.rateRoom : config.rateUpload);
       const body = await json(c, config.maxTextBytes * 6 + 1024);
       return c.json({ item: service.text(space, c.get('session'), string(body.text, Infinity), meta(c, body.group)) }, 201);
     });
     app.post(`${base}/items/file`, async c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'upload', space.roomHash ? config.rateRoom : config.rateUpload);
-      const max = space.roomHash ? config.roomMaxFileBytes : config.maxFileBytes;
+      limit(c, space.roomKey ? 'room-write' : 'upload', space.roomKey ? config.rateRoom : config.rateUpload);
+      const max = space.roomKey ? config.roomMaxFileBytes : config.maxFileBytes;
       const rawLength = c.req.header('content-length');
       const length = rawLength == null || rawLength === '' ? NaN : Number(rawLength);
       if (Number.isFinite(length) && length > max) throw new ApiError(413, 'FILE_TOO_LARGE');
@@ -1147,7 +1147,7 @@ export function createBackend(options: BackendOptions = {}) {
     });
     app.patch(`${base}/items/:id/labels`, async c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      limit(c, space.roomKey ? 'room-write' : 'write', space.roomKey ? config.rateRoom : config.rateUpload);
       const body = await json(c, 4096);
       const patch: { pinned?: boolean; tags?: unknown; group?: unknown } = {};
       if ('pinned' in body) {
@@ -1163,13 +1163,13 @@ export function createBackend(options: BackendOptions = {}) {
     });
     app.patch(`${base}/items/:id`, async c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      limit(c, space.roomKey ? 'room-write' : 'write', space.roomKey ? config.rateRoom : config.rateUpload);
       const body = await json(c, config.maxTextBytes * 6 + 1024);
       return c.json({ item: service.editText(space, c.get('session'), c.req.param('id')!, string(body.text, Infinity)) });
     });
     app.post(`${base}/items/:id/shares`, async c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      limit(c, space.roomKey ? 'room-write' : 'write', space.roomKey ? config.rateRoom : config.rateUpload);
       const body = await json(c, 2048);
       const maxViews = body.maxViews === undefined || body.maxViews === null ? null : integer(body.maxViews, 1, 100);
       return c.json(service.createShare(space, c.get('session'), c.req.param('id')!, string(body.expiresIn, 8), maxViews, originFor(c)), 201);
@@ -1180,13 +1180,13 @@ export function createBackend(options: BackendOptions = {}) {
     });
     app.delete(`${base}/shares/:shareId`, c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      limit(c, space.roomKey ? 'room-write' : 'write', space.roomKey ? config.rateRoom : config.rateUpload);
       service.revokeShare(space, c.get('session'), c.req.param('shareId')!);
       return c.body(null, 204);
     });
     app.delete(`${base}/items/:id`, async c => {
       const space = scope(c);
-      limit(c, space.roomHash ? 'room-write' : 'write', space.roomHash ? config.rateRoom : config.rateUpload);
+      limit(c, space.roomKey ? 'room-write' : 'write', space.roomKey ? config.rateRoom : config.rateUpload);
       await service.retract(space, c.req.param('id')!, c.get('session'));
       return c.body(null, 204);
     });
@@ -1233,7 +1233,7 @@ export function createBackend(options: BackendOptions = {}) {
       if ((socketsByIp.get(ip) ?? 0) >= 8 || (socketsByUser.get(userKey) ?? 0) >= 8 || wss.clients.size >= 256) throw new ApiError(429, 'SOCKET_LIMIT');
       const authorized = () => {
         if (bearerHash && !repo.tokenSession(bearerHash, now(), false)) return false;
-        if (space.roomHash) return Boolean(repo.room(space.roomHash, now()));
+        if (space.roomKey) return repo.roomById(space.id, now())?.roomKey === space.roomKey;
         return Boolean(auth && (bearerHash || repo.session(auth.sessionHash, now())) && repo.isMember(space.id, auth.user.id));
       };
       const peer = parseDevice(c.req.query('device'), c.req.query('name'), c.req.query('kind'), false);

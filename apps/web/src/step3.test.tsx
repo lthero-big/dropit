@@ -184,16 +184,22 @@ describe('room codes', () => {
     expect(calls.some((call) => call.url === '/api/rooms/enter')).toBe(false)
   })
 
-  it('old /rooms/<token> links still open the room and are replaced by /r/<code>', async () => {
+  it('old long room links are gone: /rooms/<token> is an unknown page and /r/<token> is not a room', async () => {
     stubFetch((url) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
+      // even if a server still answered for the old token, the app never uses it as a room credential
       if (url.startsWith(`/api/rooms/${LEGACY}`)) return json(roomInfo())
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
     renderAt(`/rooms/${LEGACY}`)
-    expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
-    await waitFor(() => expect(window.location.pathname).toBe('/r/k7Rm2x'))
-    expect(calls.some((call) => call.url === '/api/rooms/enter')).toBe(false)
+    expect(await screen.findByRole('heading', { name: '页面不存在' })).toBeTruthy()
+    expect(window.location.pathname).toBe(`/rooms/${LEGACY}`)
+    expect(calls.some((call) => call.url.startsWith('/api/rooms'))).toBe(false)
+    cleanup()
+    calls.length = 0
+    renderAt(`/r/${LEGACY}`)
+    expect(await screen.findByRole('heading', { name: '房间不存在或已过期' })).toBeTruthy()
+    expect(calls.some((call) => call.url.startsWith(`/api/rooms/${LEGACY}`))).toBe(false)
   })
 
   it('an unknown code shows the not-found page', async () => {

@@ -207,9 +207,19 @@ ALTER TABLE invites ADD COLUMN createdAt INTEGER;
 PRAGMA user_version=15;
 `;
 
-// RHEA-190 auth step 4: the room code IS the room link (/r/<code>). Every room that has no code yet
-// (rooms created before step 3) is given a unique random one by migrateRoomCodes in the repository;
-// step-3 rooms keep the code they already had (random 5 characters or custom) and their PIN.
+// RHEA-190 auth step 4: the room code IS the room link (/r/<code>) and the old long room links are removed
+// for good (01a18243). The spaces table is rebuilt without roomHash (the hash of the old 43-character link,
+// and of the 6-character step-3 link); rooms get a fresh internal secret, roomKey, that only derives access
+// tokens. migrateRoomCodes (repository) then gives rooms their 6-character codes and the repository sets
+// user_version=16. Runs with foreign keys off (the repository turns them off around the migration).
 export const migration16 = `
-PRAGMA user_version=16;
+CREATE TABLE spaces_v16 (id TEXT PRIMARY KEY, name TEXT NOT NULL, ownerId TEXT REFERENCES users(id), expiresAt INTEGER,
+ roomKey TEXT UNIQUE, deviceHash TEXT, roomCode TEXT, pinHash TEXT);
+INSERT INTO spaces_v16 (id,name,ownerId,expiresAt,roomKey,deviceHash,roomCode,pinHash)
+ SELECT id,name,ownerId,expiresAt,CASE WHEN roomHash IS NULL THEN NULL ELSE lower(hex(randomblob(32))) END,deviceHash,roomCode,pinHash FROM spaces;
+DROP TABLE spaces;
+ALTER TABLE spaces_v16 RENAME TO spaces;
+CREATE UNIQUE INDEX personal_space ON spaces(ownerId) WHERE ownerId IS NOT NULL;
+CREATE UNIQUE INDEX room_device ON spaces(deviceHash) WHERE deviceHash IS NOT NULL;
+CREATE UNIQUE INDEX room_code ON spaces(roomCode) WHERE roomCode IS NOT NULL;
 `;

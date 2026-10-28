@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { Config } from './config.js';
-import { ApiError, LEGACY_ROOM_TOKEN, MAX_GROUPS, cleanFilename, cleanGroupName, hash, isShortToken, publicItem, publicShareItem, randomRoomCode, shortToken, shortTokenFrom, token, type Invite, type Item, type ItemMeta, type Session, type SharePublic, type Space } from './domain.js';
+import { ApiError, MAX_GROUPS, cleanFilename, cleanGroupName, hash, isShortToken, publicItem, publicShareItem, randomRoomCode, shortToken, token, type Invite, type Item, type ItemMeta, type Session, type SharePublic, type Space } from './domain.js';
 import type { FileStorage } from './files.js';
 import type { Broadcaster } from './events.js';
 import type { Repository } from './repository.js';
@@ -28,27 +28,26 @@ export class ClipboardService {
   space(id: string, session: Session | undefined) {
     const auth = this.requireSession(session);
     const space = this.repo.space(id);
-    if (!space || space.roomHash || !this.repo.isMember(id, auth.user.id)) throw new ApiError(404, 'NOT_FOUND');
+    if (!space || space.roomKey || !this.repo.isMember(id, auth.user.id)) throw new ApiError(404, 'NOT_FOUND');
     return space;
   }
   /**
    * RHEA-190 auth step 4: the room API takes a room access token, never the code itself (the code is typed
    * and guessable, so it only works through POST /api/rooms/enter, which checks the PIN and is rate limited).
-   * Access tokens are the entry token `<space id>.<proof>` handed out by create / enter, or a 43-character room
-   * link from before step 3.
+   * The only access token is the entry token `<space id>.<proof>` handed out by create / enter. The long
+   * room links of earlier versions (/rooms/<43 characters>) were removed for good (RHEA-190, 01a18243).
    */
   room(roomToken: string) {
     const entry = entryParts(roomToken);
-    if (!entry && !LEGACY_ROOM_TOKEN.test(roomToken)) throw new ApiError(404, 'NOT_FOUND');
-    const space = entry ? this.repo.roomById(entry.spaceId, this.now()) : this.repo.room(hash(roomToken), this.now());
-    if (!space || (entry && !space.roomHash)) throw new ApiError(404, 'NOT_FOUND');
-    if (entry && entryToken(space) !== roomToken) throw new ApiError(404, 'NOT_FOUND');
+    if (!entry) throw new ApiError(404, 'NOT_FOUND');
+    const space = this.repo.roomById(entry.spaceId, this.now());
+    if (!space || !space.roomKey || entryToken(space) !== roomToken) throw new ApiError(404, 'NOT_FOUND');
     return space;
   }
   /**
    * What a client gets for a room it may use: the access token for the room API, and the room code, which is
-   * also the link (/r/<code>). The server only stores the hash of the room's secret, so the access token is
-   * derived from it: `<space id>.<proof>`. It keeps working when the code or the PIN is changed later, so
+   * also the link (/r/<code>). The access token is derived from the room's internal secret (roomKey, never
+   * shown): `<space id>.<proof>`. It keeps working when the code or the PIN is changed later, so
    * whoever is already in the room (the owner, anyone who entered before) is not asked again.
    */
   roomView(space: Space, origin = this.config.origin) {
@@ -57,14 +56,12 @@ export class ClipboardService {
   /** Entering by code (and PIN, checked by the caller). */
   enterRoomByCode(space: Space, origin = this.config.origin) { return this.roomView(space, origin); }
   /**
-   * RHEA-190 step 7: the live temporary room already bound to this browser's
-   * secret room key. Its secret is re-derived from the key (the server still
-   * stores only hashes), so only that browser can re-enter it this way.
+   * RHEA-190 step 7: the live temporary room already bound to this browser's secret room key (the server
+   * stores only the key's hash), so only that browser can re-enter it this way.
    */
   deviceRoom(deviceKey: string, origin = this.config.origin) {
     const space = this.repo.deviceRoom(deviceRoomHash(deviceKey), this.now());
     if (!space) return null;
-    if (!deviceRoomTokens(deviceKey, space.id).some(candidate => space.roomHash === hash(candidate))) return null;
     return { ...this.roomView(space, origin), reused: true };
   }
   /**
@@ -75,10 +72,9 @@ export class ClipboardService {
   createRoom(deviceKey?: string, origin = this.config.origin, options: { code?: string; pinHash?: string | null } = {}) {
     const id = randomUUID();
     for (let attempt = 0; attempt < 12; attempt++) {
-      // the room's secret: never shown (clients get the derived access token), only its hash is stored
-      const secret = deviceKey ? legacyDeviceRoomToken(deviceKey, id, attempt) : token();
+      // the room's internal secret: never shown (clients get the access token derived from it)
       const space: Space = { id, name: 'Temporary room', ownerId: null,
-        expiresAt: this.now() + this.config.roomRetentionMs, roomHash: hash(secret),
+        expiresAt: this.now() + this.config.roomRetentionMs, roomKey: token(),
         roomCode: options.code ?? randomRoomCode(), pinHash: options.pinHash ?? null };
       try {
         this.repo.createRoom(space, deviceKey ? deviceRoomHash(deviceKey) : null, this.now());
@@ -110,12 +106,12 @@ export class ClipboardService {
     }
     throw new ApiError(503, 'UNAVAILABLE');
   }
-  /** The room behind a code, or behind a 6-character room link from step 3 (those links now redirect to the code). */
+  /** The live room behind a code. A room has exactly one code; there are no other room links. */
   roomByCode(code: string) {
-    return this.repo.roomByCode(code, this.now()) ?? (isShortToken(code) ? this.repo.room(hash(code), this.now()) : undefined);
+    return this.repo.roomByCode(code, this.now());
   }
   private canManage(space: Space, authorId: string | null, session: Session | undefined) {
-    if (space.roomHash) return;
+    if (space.roomKey) return;
     if (!session) throw new ApiError(401, 'UNAUTHENTICATED');
     if (authorId !== session.user.id && space.ownerId !== session.user.id) throw new ApiError(403, 'FORBIDDEN');
   }
@@ -255,7 +251,7 @@ export class ClipboardService {
   }
   private baseItem(space: Space, session: Session | undefined, meta: ItemMeta = {}): Item {
     const now = this.now();
-    return { group: this.resolveGroup(space, meta.group), device: meta.device ?? null, id: randomUUID(), spaceId: space.id, userId: space.roomHash ? null : session!.user.id,
+    return { group: this.resolveGroup(space, meta.group), device: meta.device ?? null, id: randomUUID(), spaceId: space.id, userId: space.roomKey ? null : session!.user.id,
       kind: 'text', text: null, filename: null, mime: null, size: 0, storedBytes: 0,
       fileKey: null, thumbnailKey: null, createdAt: now, updatedAt: now, pinned: 0, tags: [],
       expiresAt: Math.min(now + this.config.retentionMs, space.expiresAt ?? Infinity) };
@@ -270,17 +266,17 @@ export class ClipboardService {
     const size = Buffer.byteLength(text);
     if (!text.trim()) throw new ApiError(400, 'EMPTY_TEXT');
     if (size > this.config.maxTextBytes) throw new ApiError(413, 'TEXT_TOO_LARGE');
-    return this.commit({ ...this.baseItem(space, session, meta), text, size, storedBytes: size }, Boolean(space.roomHash));
+    return this.commit({ ...this.baseItem(space, session, meta), text, size, storedBytes: size }, Boolean(space.roomKey));
   }
   editText(space: Space, session: Session | undefined, id: string, text: string) {
     const current = this.item(space, id);
     if (current.kind !== 'text') throw new ApiError(400, 'INVALID_INPUT');
     // Rooms: any capability holder. Spaces: the author only, so an owner cannot rewrite someone else.
-    if (!space.roomHash && current.userId !== session?.user.id) throw new ApiError(403, 'FORBIDDEN');
+    if (!space.roomKey && current.userId !== session?.user.id) throw new ApiError(403, 'FORBIDDEN');
     const size = Buffer.byteLength(text);
     if (!text.trim()) throw new ApiError(400, 'EMPTY_TEXT');
     if (size > this.config.maxTextBytes) throw new ApiError(413, 'TEXT_TOO_LARGE');
-    const quota = space.roomHash ? this.config.roomQuotaBytes : (this.repo.quotaOverride(current.userId!) ?? this.config.userQuotaBytes);
+    const quota = space.roomKey ? this.config.roomQuotaBytes : (this.repo.quotaOverride(current.userId!) ?? this.config.userQuotaBytes);
     const updated = this.repo.replaceText(id, text, size, quota, this.now());
     const item = publicItem(updated);
     this.events.publish(space.id, { type: 'item.updated', item });
@@ -340,7 +336,7 @@ export class ClipboardService {
     let fileKey: string | undefined;
     let thumbnailKey: string | undefined;
     try {
-      const limit = space.roomHash ? this.config.roomMaxFileBytes : this.config.maxFileBytes;
+      const limit = space.roomKey ? this.config.roomMaxFileBytes : this.config.maxFileBytes;
       const saved = await this.files.write(body, limit, { signal });
       fileKey = saved.key;
       if (expectedSize != null && saved.size !== expectedSize) throw new ApiError(400, 'UPLOAD_INCOMPLETE');
@@ -358,7 +354,7 @@ export class ClipboardService {
       }
       const item = this.commit({ ...this.baseItem(space, session, meta), kind: 'file', fileKey,
         thumbnailKey: thumbnailKey ?? null, filename: cleanFilename(filename), mime,
-        size: saved.size, storedBytes: saved.size + thumbnailSize }, Boolean(space.roomHash), uploadId);
+        size: saved.size, storedBytes: saved.size + thumbnailSize }, Boolean(space.roomKey), uploadId);
       this.files.commit(fileKey);
       if (thumbnailKey) this.files.commit(thumbnailKey);
       return item;
@@ -374,7 +370,7 @@ export class ClipboardService {
   }
   async retract(space: Space, id: string, session: Session | undefined) {
     const item = this.item(space, id);
-    if (!space.roomHash && item.userId !== session?.user.id && space.ownerId !== session?.user.id) throw new ApiError(403, 'FORBIDDEN');
+    if (!space.roomKey && item.userId !== session?.user.id && space.ownerId !== session?.user.id) throw new ApiError(403, 'FORBIDDEN');
     this.repo.deleteItem(id);
     this.events.publish(space.id, { type: 'item.deleted', id });
     await this.flushGarbage();
@@ -400,16 +396,7 @@ export class ClipboardService {
 
 /** A browser's secret room key (random, kept in its localStorage) → the binding stored on its room. */
 export const deviceRoomHash = (deviceKey: string) => hash(`room-device:${deviceKey}`);
-/** Rooms created before step 3 used the full 43-character digest as their link. */
-const legacyDeviceRoomToken = (deviceKey: string, spaceId: string, attempt = 0) =>
-  createHash('sha256').update(`room-token:${deviceKey}:${spaceId}${attempt ? `:${attempt}` : ''}`).digest('base64url');
-/** Step 3 derived a 6-character room link from the browser's key; attempt > 0 only when an earlier derivation collided. */
-const stepThreeDeviceRoomToken = (deviceKey: string, spaceId: string, attempt = 0) =>
-  shortTokenFrom(createHash('sha256').update(`room-token:${deviceKey}:${spaceId}${attempt ? `:${attempt}` : ''}`).digest());
-const deviceRoomTokens = (deviceKey: string, spaceId: string) =>
-  [...Array.from({ length: 12 }, (_, attempt) => legacyDeviceRoomToken(deviceKey, spaceId, attempt)),
-    ...Array.from({ length: 12 }, (_, attempt) => stepThreeDeviceRoomToken(deviceKey, spaceId, attempt))];
-const entryProof = (space: Space) => createHash('sha256').update(`room-entry:${space.id}:${space.roomHash}`).digest('base64url');
+const entryProof = (space: Space) => createHash('sha256').update(`room-entry:${space.id}:${space.roomKey}`).digest('base64url');
 const entryToken = (space: Space) => `${space.id}.${entryProof(space)}`;
 const entryParts = (raw: string) => {
   const match = /^([0-9a-f-]{36})\.[A-Za-z0-9_-]{43}$/.exec(raw);

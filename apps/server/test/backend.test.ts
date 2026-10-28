@@ -1453,9 +1453,9 @@ test('RHEA-190 step 7: migration 10 adds the per-browser room binding to old dat
   db.close();
   const repo = new SqliteRepository(path);
   t.after(() => repo.close());
-  assert.equal(repo.room('rh', 1)?.id, 's1');
+  assert.equal(repo.roomById('s1', 1)?.id, 's1');
   assert.equal(repo.deviceRoom('dh', 1), undefined);
-  repo.createRoom({ id: 's2', name: 'Temporary room', ownerId: null, expiresAt: 9999999999999, roomHash: 'rh2' }, "dh", 1);
+  repo.createRoom({ id: 's2', name: 'Temporary room', ownerId: null, expiresAt: 9999999999999, roomKey: 'rk2' }, "dh", 1);
   assert.equal(repo.deviceRoom('dh', 1)?.id, 's2');
   assert.equal(repo.deviceRoom('dh', 9999999999999), undefined);
   const check = new Database(path, { readonly: true });

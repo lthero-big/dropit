@@ -12,7 +12,7 @@ import { runItemCommand } from '../src/exec.js';
 import { latestItem, pickSpace, type Item } from '../src/items.js';
 import { deviceLogin, interpretPoll } from '../src/login.js';
 import { destination, downloadPlan, saveStream } from '../src/paths.js';
-import { main, parseRoomTarget } from '../src/run.js';
+import { main, parseRoomCode } from '../src/run.js';
 import { applyWatch, createWatchState, nextDelay } from '../src/watch.js';
 
 function item(id: string, createdAt: number, extra: Partial<Item> = {}): Item {
@@ -207,23 +207,29 @@ test('RHEA-190 step 5: the CLI identifies itself as a stable, URL-safe cli devic
   assert.equal([...decodeURIComponent(cliDevice('x'.repeat(80))['x-dropit-device-name'])].length, 40);
 });
 
-test('room targets: /r/<code> links and bare codes are codes; tokens and old /rooms/ links are tokens', () => {
-  const code = (value: string) => ({ kind: 'code', code: value });
-  const tok = (value: string) => ({ kind: 'token', token: value });
-  assert.deepEqual(parseRoomTarget('Ab3dEf'), code('Ab3dEf'));
-  assert.deepEqual(parseRoomTarget('team-red'), code('team-red'));
-  assert.deepEqual(parseRoomTarget('https://drop.example/r/Ab3dEf'), code('Ab3dEf'));
-  assert.deepEqual(parseRoomTarget('https://drop.example/r/team_red'), code('team_red'));
+test('room targets: only /r/<code> links and bare codes; old long tokens and /rooms/ links are rejected', () => {
+  assert.equal(parseRoomCode('Ab3dEf'), 'Ab3dEf');
+  assert.equal(parseRoomCode('team-red'), 'team-red');
+  assert.equal(parseRoomCode('https://drop.example/r/Ab3dEf'), 'Ab3dEf');
+  assert.equal(parseRoomCode('https://drop.example/r/team_red'), 'team_red');
   const long = 'A'.repeat(43);
-  assert.deepEqual(parseRoomTarget(long), tok(long));
-  assert.deepEqual(parseRoomTarget(`https://drop.example/rooms/${long}`), tok(long));
-  assert.deepEqual(parseRoomTarget(`https://drop.example/r/${long}`), tok(long));
+  assert.throws(() => parseRoomCode(long), CliError);
+  assert.throws(() => parseRoomCode(`https://drop.example/rooms/${long}`), CliError);
+  assert.throws(() => parseRoomCode(`https://drop.example/rooms/Ab3dEf`), CliError);
+  assert.throws(() => parseRoomCode(`https://drop.example/r/${long}`), CliError);
   const entry = `${'0'.repeat(8)}-0000-4000-8000-${'0'.repeat(12)}.${'B'.repeat(43)}`;
-  assert.deepEqual(parseRoomTarget(entry), tok(entry));
-  assert.throws(() => parseRoomTarget('ab'), CliError);
-  assert.throws(() => parseRoomTarget('has space'), CliError);
-  assert.throws(() => parseRoomTarget('https://drop.example/r/ab'), CliError);
-  assert.throws(() => parseRoomTarget('https://drop.example/s/Ab3dEf'), CliError);
+  assert.throws(() => parseRoomCode(entry), CliError);
+  assert.throws(() => parseRoomCode('ab'), CliError);
+  assert.throws(() => parseRoomCode('has space'), CliError);
+  assert.throws(() => parseRoomCode('https://drop.example/r/ab'), CliError);
+  assert.throws(() => parseRoomCode('https://drop.example/s/Ab3dEf'), CliError);
+});
+
+test('an old long room token in the config file is dropped', async () => {
+  const { parseConfig } = await import('../src/config.js');
+  const entry = `${'0'.repeat(8)}-0000-4000-8000-${'0'.repeat(12)}.${'B'.repeat(43)}`;
+  assert.equal(parseConfig({ roomToken: 'A'.repeat(43) }).roomToken, undefined);
+  assert.equal(parseConfig({ roomToken: entry }).roomToken, entry);
 });
 
 test('room new / enter flags are validated', () => {

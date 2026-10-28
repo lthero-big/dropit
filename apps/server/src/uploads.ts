@@ -23,25 +23,25 @@ export class UploadService {
   }
   private quota(space: Space, session: Session | undefined) {
     const { repo, config } = this.service;
-    return space.roomHash ? config.roomQuotaBytes : repo.quotaOverride(session!.user.id) ?? config.userQuotaBytes;
+    return space.roomKey ? config.roomQuotaBytes : repo.quotaOverride(session!.user.id) ?? config.userQuotaBytes;
   }
   create(space: Space, session: Session | undefined, filename: string, size: number, mime: string) {
     const { config, repo, now } = this.service;
-    if (size > (space.roomHash ? config.roomMaxFileBytes : config.maxFileBytes)) throw new ApiError(413, 'FILE_TOO_LARGE');
+    if (size > (space.roomKey ? config.roomMaxFileBytes : config.maxFileBytes)) throw new ApiError(413, 'FILE_TOO_LARGE');
     const createdAt = now();
     const upload: UploadSession = {
-      id: randomUUID(), spaceId: space.id, userId: space.roomHash ? null : session!.user.id,
+      id: randomUUID(), spaceId: space.id, userId: space.roomKey ? null : session!.user.id,
       principal: this.principal(space, session), filename: cleanFilename(filename), mime, size,
       chunkSize: config.uploadChunkBytes, createdAt,
       expiresAt: Math.min(createdAt + 86400000, space.expiresAt ?? Infinity),
     };
-    repo.createUpload(upload, this.quota(space, session), space.roomHash ? Math.min(100, config.maxItems) : config.maxItems,
+    repo.createUpload(upload, this.quota(space, session), space.roomKey ? Math.min(100, config.maxItems) : config.maxItems,
       config.uploadSessionsPerUser, config.uploadSessionsGlobal);
     return { uploadId: upload.id, chunkSize: upload.chunkSize, expiresAt: upload.expiresAt, received: [] };
   }
   private authorized(space: Space, session: Session | undefined, id: string) {
     const upload = this.service.repo.upload(id, this.service.now());
-    if (!upload || upload.spaceId !== space.id || (!space.roomHash && upload.userId !== session?.user.id)) throw new ApiError(404, 'NOT_FOUND');
+    if (!upload || upload.spaceId !== space.id || (!space.roomKey && upload.userId !== session?.user.id)) throw new ApiError(404, 'NOT_FOUND');
     return upload;
   }
   get(space: Space, session: Session | undefined, id: string) {

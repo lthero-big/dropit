@@ -4,7 +4,9 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Server } from 'node:http';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { createBackend } from './backend.js';
+import { isAppRoute } from './origin.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 if (process.env.NODE_ENV !== 'production' && existsSync(resolve(root, '.env'))) process.loadEnvFile(resolve(root, '.env'));
@@ -13,7 +15,11 @@ const staticDir = process.env.STATIC_DIR?.trim() || resolve(root, 'apps/web/dist
 // API misses remain JSON 404s and never fall through to the SPA.
 backend.app.all('/api/*', c => c.json({ error: { code: 'NOT_FOUND' } }, 404));
 backend.app.use('*', serveStatic({ root: staticDir }));
-backend.app.get('*', serveStatic({ path: resolve(staticDir, 'index.html') }));
+// Only the web app's own routes get the app with 200; any other path (for example the removed long room
+// links /rooms/<token>) is a 404 that still carries the app, which shows its "page not found" view.
+const indexHtml = resolve(staticDir, 'index.html');
+backend.app.get('*', async (c, next) => isAppRoute(c.req.path) ? next() : c.html(await readFile(indexHtml, 'utf8').catch(() => 'Not found'), 404));
+backend.app.get('*', serveStatic({ path: indexHtml }));
 
 await backend.startMaintenance();
 const server = serve({ fetch: backend.app.fetch, port: backend.config.port, hostname: process.env.HOST ?? '0.0.0.0', websocket: backend.websocket }) as Server;

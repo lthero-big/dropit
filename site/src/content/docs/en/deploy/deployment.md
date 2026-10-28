@@ -85,7 +85,7 @@ Bind only to the internal address — do not publish on `0.0.0.0` and do not set
 
 ## Upgrading
 
-Database migrations run automatically and atomically at startup, based on `user_version`. Back up before upgrading.
+Database migrations run automatically and atomically at startup, based on `user_version`. Back up before upgrading. Upgrading to schema 16 (the room code is the link; old long room links removed) first copies the database to `<database file>.pre-v<old version>-<time>.bak` in the same directory, then migrates.
 
 | Install method | Upgrade command |
 | --- | --- |

@@ -158,7 +158,7 @@ describe('dropit web', () => {
     stubFetch((url, init) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
       if (url === '/api/auth/providers') return json({ providers: ['github', 'google'] })
-      if (url === '/api/rooms' && init?.method === 'POST') return json({ token: 'room-token-00000000000000000000000000000000', expiresAt: Date.now() + 1000, url: '/rooms/room-token-00000000000000000000000000000000' }, 201)
+      if (url === '/api/rooms' && init?.method === 'POST') return json({ token: 'room-token-00000000000000000000000000000000', expiresAt: Date.now() + 1000, code: 'Rm4kQ2', url: '/r/Rm4kQ2' }, 201)
       if (url.startsWith('/api/rooms/room-token-00000000000000000000000000000000')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
@@ -171,7 +171,7 @@ describe('dropit web', () => {
     expect(screen.getByRole('link', { name: '使用 Google 继续' }).getAttribute('title')).toBe('用 Google 账号登录')
     fireEvent.click(screen.getByRole('button', { name: '进入临时房间' }))
     expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
-    expect(screen.getByText(/\/r\/room-token-00000000000000000000000000000000/)).toBeTruthy()
+    expect(screen.getByText(/\/r\/Rm4kQ2/)).toBeTruthy()
   })
 
   it('keeps invitation text out of HTML and joins through the invite token', async () => {
@@ -421,10 +421,11 @@ describe('dropit web', () => {
   it('lets a room capability holder edit text', async () => {
     stubFetch((url) => {
       if (url === '/api/me') return json({ error: { code: 'UNAUTHENTICATED' } }, 401)
+      if (url === '/api/rooms/enter') return json({ token: 'room-token-00000000000000000000000000000000', expiresAt: Date.now() + 60_000, code: 'Rm4kQ2', hasPin: false })
       if (url.startsWith('/api/rooms/room-token-00000000000000000000000000000000')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
-    renderAt('/rooms/room-token-00000000000000000000000000000000')
+    renderAt('/r/Rm4kQ2')
     await screen.findByRole('heading', { name: '临时房间' })
     FakeSocket.instances.at(-1)?.emit({
       type: 'snapshot',
@@ -595,7 +596,7 @@ describe('dropit web', () => {
       if (url === '/api/rooms' && init?.method === 'POST') {
         keys.push((JSON.parse(String(init.body)) as { deviceKey: string }).deviceKey)
         rooms += 1
-        return json({ token: `room-${rooms}`, expiresAt: Date.now() + 60_000, url: `/rooms/room-${rooms}` }, 201)
+        return json({ token: `room-${rooms}`, expiresAt: Date.now() + 60_000, code: `room-${rooms}`, url: `/r/room-${rooms}` }, 201)
       }
       // step 4: /r/<code> enters the code first, then uses the access token it got
       if (url === '/api/rooms/enter') return json({ token: 'existing-access-00000000000000000000000000', expiresAt: Date.now() + 60_000, code: 'existing', hasPin: false })
@@ -746,6 +747,7 @@ describe('dropit web', () => {
           access: 'ticket',
         })
       }
+      if (url === '/api/rooms/enter') return json({ token: 'room-token-00000000000000000000000000000000', expiresAt: Date.now() + 60_000, code: 'Rm4kQ2', hasPin: false })
       if (url.startsWith('/api/rooms/room-token-00000000000000000000000000000000')) return json({ id: 'room', name: 'Temporary room', expiresAt: Date.now() + 60_000, maxFileBytes: 100, quotaBytes: 200 })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
@@ -768,7 +770,7 @@ describe('dropit web', () => {
     expect((screen.getByLabelText('编辑文本') as HTMLTextAreaElement).value).toBe(source)
 
     cleanup()
-    renderAt('/rooms/room-token-00000000000000000000000000000000')
+    renderAt('/r/Rm4kQ2')
     await screen.findByRole('heading', { name: '临时房间' })
     FakeSocket.instances.at(-1)?.emit({
       type: 'snapshot',
@@ -793,7 +795,11 @@ describe('dropit web', () => {
     })
     renderAt('/invite/missing')
     expect(await screen.findByRole('heading', { name: '邀请无效' })).toBeTruthy()
-    renderAt('/rooms/missing')
+    renderAt('/r/missing')
     expect(await screen.findByRole('heading', { name: '房间不存在或已过期' })).toBeTruthy()
+    // RHEA-190 (01a18243): the old long room links are gone, they are an unknown page like any other
+    cleanup()
+    renderAt(`/rooms/${'L'.repeat(43)}`)
+    expect(await screen.findByRole('heading', { name: '页面不存在' })).toBeTruthy()
   })
 })

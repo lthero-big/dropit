@@ -44,7 +44,7 @@ A pnpm workspace manages the three packages; `pnpm lint / typecheck / test / bui
 
 ## Frontend
 
-- Routes: `/` (clipboard), `/login`, `/invite/:token`, `/r/:code` (the room code is the link; the old `/rooms/:token` redirects to `/r/<code>`), `/join`, `/s/:token` (share page), `/admin`, `/settings`, `/device`.
+- Routes: `/` (clipboard), `/login`, `/invite/:token`, `/r/:code` (the room code is the link; the old long `/rooms/:token` links were removed and answer 404), `/join`, `/s/:token` (share page), `/admin`, `/settings`, `/device`.
 - Receives a snapshot and incremental events over WebSocket, reconnecting with exponential backoff.
 - Large files are uploaded in chunks and interrupted uploads can be resumed.
 
