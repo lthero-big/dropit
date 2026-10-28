@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { ProviderIcon } from '@/components/brand-icons.tsx'
 import { toast } from 'sonner'
 import { Panel, StatusPill } from '@/components/settings-ui.tsx'
 import { Button } from '@/components/ui/button.tsx'
@@ -71,6 +72,7 @@ export function LoginMethods() {
               <li key={provider} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-line-1 bg-surface-0 px-4 py-3" data-provider={provider}>
                 <div className="min-w-0">
                   <h3 className="flex items-center gap-2 text-sm font-semibold text-fg">
+                    <ProviderIcon provider={provider} className="size-4" />
                     {providerLabel(provider)}
                     <StatusPill tone={bound ? 'good' : 'neutral'}>{bound ? '已连接' : '未连接'}</StatusPill>
                   </h3>

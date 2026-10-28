@@ -7,6 +7,9 @@ import { openTempRoom } from '@/lib/temp-room.ts'
 import { takeReturn } from '@/lib/machine.ts'
 import { useSession } from '@/lib/session.tsx'
 import { Logo } from '@/components/logo.tsx'
+import { ProviderIcon } from '@/components/brand-icons.tsx'
+
+const PROVIDER_NAME: Record<string, string> = { github: 'GitHub', google: 'Google' }
 
 export function LoginPage({ invite }: { invite?: string }) {
   const { status } = useSession()
@@ -67,14 +70,31 @@ export function LoginPage({ invite }: { invite?: string }) {
         {providers === null ? <p className="text-sm text-muted-foreground">正在读取登录方式…</p> : null}
         {providers?.length === 0 ? (
           <p className="rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">
-            尚未配置 GitHub / Google。管理员可在 设置 → OAuth 配置 填写凭据（或使用环境变量），配置后刷新此页。
+            尚未配置 GitHub / Google。管理员可在 管理 → OAuth 登录 填写凭据（或使用环境变量），配置后刷新此页。
           </p>
         ) : null}
-        {providers?.map((provider) => (
-          <Button key={provider} type="button" variant="outline" className="justify-start" asChild>
-            <a href={`/api/auth/${provider}${query}`}>{provider === 'github' ? '使用 GitHub 继续' : provider === 'google' ? '使用 Google 继续' : provider}</a>
-          </Button>
-        ))}
+        {providers && providers.length > 0 ? (
+          <div className="flex flex-col gap-2.5" role="group" aria-label="登录方式" data-login-providers="">
+            {providers.map((provider) => {
+              const name = PROVIDER_NAME[provider] ?? provider
+              const label = `使用 ${name} 继续`
+              return (
+                <Button
+                  key={provider}
+                  type="button"
+                  variant="outline"
+                  className="relative h-11 min-h-11 w-full justify-center gap-3 px-4 text-sm font-medium normal-case tracking-normal"
+                  asChild
+                >
+                  <a href={`/api/auth/${provider}${query}`} aria-label={label} title={`用 ${name} 账号登录`} data-login-provider={provider}>
+                    <ProviderIcon provider={provider} className="absolute left-4 size-5" />
+                    <span>{label}</span>
+                  </a>
+                </Button>
+              )
+            })}
+          </div>
+        ) : null}
         {invite ? null : (
           <Button type="button" onClick={() => void enterRoom()} disabled={busy}>
             进入临时房间

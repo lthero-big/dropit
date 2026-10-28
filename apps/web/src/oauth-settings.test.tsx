@@ -172,15 +172,26 @@ describe('admin: OAuth configuration', () => {
     renderAt('/admin?tab=oauth')
     const section = await screen.findByRole('region', { name: 'OAuth 配置' })
     const card = () => section.querySelector('[data-provider="google"]') as HTMLElement
+    // RHEA-190 m24: GitHub / Google are sub-tabs; only the selected card is shown.
+    const providerTabs = within(section).getByRole('tablist', { name: 'OAuth 提供方' })
+    expect(within(providerTabs).getAllByRole('tab').map((tab) => tab.getAttribute('aria-label'))).toEqual(['GitHub', 'Google'])
+    expect(within(providerTabs).getByRole('tab', { name: 'GitHub' }).getAttribute('aria-selected')).toBe('true')
+    expect(card().hidden).toBe(true)
+    fireEvent.click(within(providerTabs).getByRole('tab', { name: 'Google' }))
+    expect(card().hidden).toBe(false)
+    expect((section.querySelector('[data-provider="github"]') as HTMLElement).hidden).toBe(true)
+    expect(window.location.hash).toBe('#oauth-google')
     expect(within(card()).getByRole('status').textContent).toBe('未配置')
     const callback = within(card()).getByLabelText('回调地址（Callback / Redirect URI）') as HTMLInputElement
     expect(callback.value).toBe('https://dropit.example/api/auth/google/callback')
     fireEvent.click(within(card()).getAllByRole('button', { name: '复制' })[0]!)
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('https://dropit.example/api/auth/google/callback'))
     // GitHub from the environment shows a masked secret only.
+    fireEvent.click(within(providerTabs).getByRole('tab', { name: 'GitHub' }))
     const githubCard = section.querySelector('[data-provider="github"]') as HTMLElement
     expect((within(githubCard).getByLabelText('Client Secret') as HTMLInputElement).placeholder).toContain('••••••••cdef')
     expect(within(githubCard).getByRole('status').textContent).toContain('环境变量')
+    fireEvent.click(within(providerTabs).getByRole('tab', { name: 'Google' }))
 
     fireEvent.change(within(card()).getByLabelText('Client ID'), { target: { value: 'g-id.apps.googleusercontent.com' } })
     fireEvent.change(within(card()).getByLabelText('Client Secret'), { target: { value: 'GOCSPX-secret-123456' } })

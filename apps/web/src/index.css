@@ -337,3 +337,35 @@
     opacity: 0.5;
     }
 }
+
+/*
+ * RHEA-190 m24: menus open with a soft fade + slight scale from the trigger side
+ * instead of a slide, and close with a quicker fade. Reduced motion: no animation.
+ */
+[data-slot="dropdown-menu-content"],
+[data-slot="dropdown-menu-sub-content"] {
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin);
+  will-change: opacity, transform;
+}
+[data-slot="dropdown-menu-content"][data-state="open"],
+[data-slot="dropdown-menu-sub-content"][data-state="open"] {
+  animation: dd-menu-in 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+[data-slot="dropdown-menu-content"][data-state="closed"],
+[data-slot="dropdown-menu-sub-content"][data-state="closed"] {
+  animation: dd-menu-out 100ms ease-in forwards;
+}
+@keyframes dd-menu-in {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes dd-menu-out {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.97); }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="dropdown-menu-content"],
+  [data-slot="dropdown-menu-sub-content"] {
+    animation: none !important;
+  }
+}
