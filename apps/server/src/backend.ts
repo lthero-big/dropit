@@ -14,7 +14,7 @@ import { DiskFileStorage, jsonFileStore, readJsonFile, type FileStorage } from '
 import { MemoryBroadcaster, type Broadcaster } from './events.js';
 import { checkOAuthCredentials, createOAuthProvider, envOAuthApps, isSupportedProvider, providerInfo, supportedProviders, type OAuthProvider } from './oauth.js';
 import { ClipboardService, deviceRoomHash, inviteStatus, roomCodeInfo, roomUrl } from './service.js';
-import { clientIpResolver, RateLimiter } from './rate-limit.js';
+import { clientIpResolver, PinLockout, RateLimiter } from './rate-limit.js';
 import { limitRanges, RuntimeLimits } from './limits.js';
 import { describeAgent } from './agent.js';
 import { loadUpdateSettings, UpdateChecker } from './update-check.js';
@@ -168,6 +168,7 @@ export function createBackend(options: BackendOptions = {}) {
   const app = new Hono<Env>();
   const limiter = new RateLimiter(config.rateWindowMs);
   const resolveIp = clientIpResolver(config);
+  const pinLockout = new PinLockout(config.pinLockFailures, config.pinLockMs);
   // RHEA-190 auth step 1 — site address (APP_ORIGIN): 管理 → 站点地址 > APP_ORIGIN env >
   // each request's own origin. Without a configured address the Origin check compares the
   // browser's Origin with the request's own scheme + Host, so a fresh docker deploy works on
@@ -951,8 +952,17 @@ export function createBackend(options: BackendOptions = {}) {
     const space = service.roomByCode(code);
     if (!space) { guessFailed(c); throw new ApiError(404, 'NOT_FOUND'); }
     if (space.pinHash) {
+      // Total wrong PINs per room (any IP): once over the threshold the room answers 429 until the lock ends.
+      const locked = pinLockout.locked(space.id, now());
+      if (locked) { c.header('Retry-After', String(locked)); throw new ApiError(429, 'RATE_LIMITED'); }
       if (!pin) throw new ApiError(401, 'PIN_REQUIRED');
-      if (!await verifyPassword(pin, space.pinHash)) { guessFailed(c, codeKey); throw new ApiError(403, 'PIN_INVALID'); }
+      if (!await verifyPassword(pin, space.pinHash)) {
+        guessFailed(c, codeKey);
+        const lockedNow = pinLockout.fail(space.id, now());
+        if (lockedNow) { c.header('Retry-After', String(lockedNow)); throw new ApiError(429, 'RATE_LIMITED'); }
+        throw new ApiError(403, 'PIN_INVALID');
+      }
+      pinLockout.clear(space.id);
     }
     return c.json(service.enterRoomByCode(space, originFor(c)));
   });
@@ -966,7 +976,7 @@ export function createBackend(options: BackendOptions = {}) {
     if (!space.deviceHash || space.deviceHash !== deviceRoomHash(deviceKey)) throw new ApiError(403, 'FORBIDDEN');
     guessBlocked(c);
     const options = await roomCodeChange(body);
-    try { return c.json(service.setRoomCode(space, options, originFor(c))); }
+    try { const changed = service.setRoomCode(space, options, originFor(c)); pinLockout.clear(space.id); return c.json(changed); }
     catch (error) { if (error instanceof ApiError && error.code === 'CODE_TAKEN') guessFailed(c); throw error; }
   });
   const shareLimit = (c: Ctx, raw: string) => {

@@ -21,6 +21,8 @@ export interface Config {
   uploadChunkBytes: number; uploadChunkTimeoutMs: number; rateChunk: number;
   uploadChunksPerSession: number; uploadChunksPerUser: number; uploadChunksGlobal: number;
   uploadSessionsPerUser: number; uploadSessionsGlobal: number;
+  /** RHEA-190: wrong PINs one room code may collect (from any IP) before it is locked, and how long the lock lasts. */
+  pinLockFailures: number; pinLockMs: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -66,7 +68,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     uploadChunksGlobal: number('UPLOAD_CHUNKS_GLOBAL', 16),
     uploadSessionsPerUser: number('UPLOAD_SESSIONS_PER_USER', 8),
     uploadSessionsGlobal: number('UPLOAD_SESSIONS_GLOBAL', 128),
+    pinLockFailures: number('PIN_LOCK_FAILURES', 10), pinLockMs: number('PIN_LOCK_MINUTES', 15) * 60000,
   };
+  if (config.pinLockFailures > 1000000 || config.pinLockMs > 7 * 86400000) throw new Error('Invalid PIN_LOCK_FAILURES / PIN_LOCK_MINUTES');
   validateLimits(config);
   return config;
 }

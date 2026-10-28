@@ -72,6 +72,8 @@ Email + password sign-in is always available and needs no configuration. While n
 | `RATE_WINDOW_MS` | 60000 | Fixed window length |
 | `RATE_GENERAL` | 240 | Ordinary requests per IP / account / window |
 | `RATE_AUTH` | 20 | Auth requests (also the number of wrong room codes/PINs allowed per IP and per code); must be smaller than `RATE_GENERAL` |
+| `PIN_LOCK_FAILURES` | 10 | Wrong PINs one room code may collect in total (from any IP) before it is locked |
+| `PIN_LOCK_MINUTES` | 15 | How long a locked room code answers `429` to every PIN attempt (also the window in which the failures are counted); max 10080 |
 | `RATE_INVITE` | 10 | Invitation requests; must be smaller than `RATE_GENERAL` |
 | `RATE_UPLOAD` | 30 | Upload / write requests; also the room access limit |
 | `RATE_ROOM` | 10 | Room creation / write requests; must be smaller than `RATE_UPLOAD` |

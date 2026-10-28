@@ -20,7 +20,7 @@ title: Security model
 | Personal access token | 256-bit | SHA-256 | `read` / `write` scopes, optional expiry, returned only once at creation |
 | Invitation | Random | SHA-256 | Limited uses, time-limited, revocable |
 | Room access token | 256-bit | Hash | `<id>.<proof>`, held by the owner and devices that entered; grants read/write; survives code and PIN changes (the old 43-character room links were removed and no longer work) |
-| Room code = room link `/r/<code>` | 6 random (or 3–32 custom) | Plain (unique index) | Case-sensitive; not an API credential — only exchanged for an access token via `POST /rooms/enter`; optional PIN (scrypt); wrong guesses limited per IP and per code (`RATE_AUTH`, 429 + `Retry-After`) |
+| Room code = room link `/r/<code>` | 6 random (or 3–32 custom) | Plain (unique index) | Case-sensitive; not an API credential — only exchanged for an access token via `POST /rooms/enter`; optional PIN (scrypt); wrong guesses limited per IP and per code (`RATE_AUTH`, 429 + `Retry-After`); in addition every PIN-protected code counts its wrong PINs in total (any IP) and is locked for `PIN_LOCK_MINUTES` (default 15) after `PIN_LOCK_FAILURES` (default 10) of them, answering 429 to every PIN meanwhile; a right PIN or the owner changing the code/PIN resets it; people who already hold an access token are not affected |
 | Share link | 6 random characters (older links 256-bit) | SHA-256 | Read-only, time- and view-limited, revocable; every invalid case returns a uniform `404` |
 | Device code | 256-bit | SHA-256 | Expires after 10 minutes, must be approved in a browser |
 

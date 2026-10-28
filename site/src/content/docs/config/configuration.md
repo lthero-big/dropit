@@ -72,6 +72,8 @@ title: 配置
 | `RATE_WINDOW_MS` | 60000 | 固定窗口长度 |
 | `RATE_GENERAL` | 240 | 每 IP / 账号 / 窗口的普通请求 |
 | `RATE_AUTH` | 20 | 认证请求（也是每个 IP / 每个房间码可猜错房间码或 PIN 的次数），须小于 `RATE_GENERAL` |
+| `PIN_LOCK_FAILURES` | 10 | 每个房间码累计（不分 IP）猜错多少次 PIN 后被锁定 |
+| `PIN_LOCK_MINUTES` | 15 | 房间码被锁定后多久内对任何 PIN 尝试都返回 `429`（也是统计猜错次数的时间窗口），最大 10080 |
 | `RATE_INVITE` | 10 | 邀请请求，须小于 `RATE_GENERAL` |
 | `RATE_UPLOAD` | 30 | 上传 / 写请求，也是房间访问限制 |
 | `RATE_ROOM` | 10 | 房间创建 / 写请求，须小于 `RATE_UPLOAD` |
