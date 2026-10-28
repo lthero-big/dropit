@@ -67,7 +67,7 @@ export function LoginPage({ invite }: { invite?: string }) {
         {providers === null ? <p className="text-sm text-muted-foreground">正在读取登录方式…</p> : null}
         {providers?.length === 0 ? (
           <p className="rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">
-            尚未配置 GitHub / Google。凭据通过环境变量提供，配置后刷新此页。
+            尚未配置 GitHub / Google。管理员可在 设置 → OAuth 配置 填写凭据（或使用环境变量），配置后刷新此页。
           </p>
         ) : null}
         {providers?.map((provider) => (

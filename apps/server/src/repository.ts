@@ -2,8 +2,8 @@ import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ApiError, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11 } from './migrations.js';
+import { ApiError, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12 } from './migrations.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
 type UserRow = User & { quotaBytes: number | null };
@@ -40,6 +40,15 @@ export interface Repository {
   limitAudit(limit: number, cursor?: number): LimitAudit[];
   saveFlow(flow: Flow): void;
   consumeFlow(stateHash: string, browserHash: string, provider: string, now: number): Flow | undefined;
+  oauthApps(): OAuthApp[];
+  /** clientSecret null keeps the stored secret. */
+  saveOAuthApp(input: { provider: string; clientId: string; clientSecret: string | null; enabled: boolean; now: number; actor: string }): void;
+  deleteOAuthApp(provider: string): void;
+  recordOAuthCheck(provider: string, ok: boolean, code: string, now: number): void;
+  identities(userId: string): LinkedIdentity[];
+  /** Binds a provider identity to a signed-in account. Returns false when it was already bound to it. */
+  linkIdentity(userId: string, identity: Identity, now: number): boolean;
+  unlinkIdentity(userId: string, provider: string): void;
   login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number, meta?: SessionMeta): User;
   session(sessionHash: string, now: number): Session | undefined;
   logout(sessionHash: string): void;
@@ -118,8 +127,8 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 11) throw new Error(`Unsupported schema version ${version}`);
-    if (version < 11) this.db.transaction(() => {
+    if (version > 12) throw new Error(`Unsupported schema version ${version}`);
+    if (version < 12) this.db.transaction(() => {
       if (version < 1) this.db.exec(migration1);
       if (version < 2) this.db.exec(migration2);
       if (version < 3) this.db.exec(migration3);
@@ -130,7 +139,8 @@ export class SqliteRepository implements Repository {
       if (version < 8) this.db.exec(migration8);
       if (version < 9) this.db.exec(migration9);
       if (version < 10) this.db.exec(migration10);
-      this.db.exec(migration11);
+      if (version < 11) this.db.exec(migration11);
+      this.db.exec(migration12);
     })();
   }
   limitOverrides(): LimitOverrides {
@@ -154,7 +164,65 @@ export class SqliteRepository implements Repository {
       .all(cursor ?? Number.MAX_SAFE_INTEGER, limit) as LimitAudit[];
   }
   saveFlow(flow: Flow) {
-    this.db.prepare('INSERT INTO flows VALUES (@stateHash,@browserHash,@provider,@verifier,@inviteHash,@expiresAt)').run(flow);
+    this.db.prepare('INSERT INTO flows (stateHash,browserHash,provider,verifier,inviteHash,expiresAt,linkUserId) VALUES (@stateHash,@browserHash,@provider,@verifier,@inviteHash,@expiresAt,@linkUserId)')
+      .run({ linkUserId: null, ...flow });
+  }
+  oauthApps() {
+    return this.db.prepare('SELECT * FROM oauth_apps ORDER BY provider').all() as OAuthApp[];
+  }
+  saveOAuthApp(input: { provider: string; clientId: string; clientSecret: string | null; enabled: boolean; now: number; actor: string }) {
+    this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT * FROM oauth_apps WHERE provider=?').get(input.provider) as OAuthApp | undefined;
+      const secret = input.clientSecret ?? existing?.clientSecret;
+      if (!secret) throw new ApiError(400, 'OAUTH_SECRET_REQUIRED');
+      // Any credential change invalidates the previous verification result.
+      const changed = !existing || existing.clientId !== input.clientId || existing.clientSecret !== secret;
+      this.db.prepare(`INSERT INTO oauth_apps (provider,clientId,clientSecret,enabled,updatedAt,updatedBy,checkedAt,checkOk,checkCode)
+        VALUES (@provider,@clientId,@secret,@enabled,@now,@actor,NULL,NULL,NULL)
+        ON CONFLICT(provider) DO UPDATE SET clientId=excluded.clientId, clientSecret=excluded.clientSecret, enabled=excluded.enabled,
+          updatedAt=excluded.updatedAt, updatedBy=excluded.updatedBy,
+          checkedAt=CASE WHEN @changed THEN NULL ELSE checkedAt END, checkOk=CASE WHEN @changed THEN NULL ELSE checkOk END,
+          checkCode=CASE WHEN @changed THEN NULL ELSE checkCode END`)
+        .run({ provider: input.provider, clientId: input.clientId, secret, enabled: input.enabled ? 1 : 0, now: input.now, actor: input.actor, changed: changed ? 1 : 0 });
+    }).immediate();
+  }
+  deleteOAuthApp(provider: string) {
+    this.db.prepare('DELETE FROM oauth_apps WHERE provider=?').run(provider);
+  }
+  recordOAuthCheck(provider: string, ok: boolean, code: string, now: number) {
+    this.db.prepare('UPDATE oauth_apps SET checkedAt=?, checkOk=?, checkCode=? WHERE provider=?').run(now, ok ? 1 : 0, code, provider);
+  }
+  identities(userId: string) {
+    return this.db.prepare('SELECT provider,email,linkedAt FROM identities WHERE userId=? ORDER BY linkedAt IS NULL, linkedAt, provider')
+      .all(userId) as LinkedIdentity[];
+  }
+  linkIdentity(userId: string, identity: Identity, now: number) {
+    return this.db.transaction(() => {
+      const owner = this.db.prepare('SELECT userId FROM identities WHERE provider=? AND subject=?').get(identity.provider, identity.subject) as { userId: string } | undefined;
+      if (owner?.userId === userId) {
+        this.db.prepare('UPDATE identities SET email=? WHERE provider=? AND subject=?').run(identity.email, identity.provider, identity.subject);
+        return false;
+      }
+      // Never move an identity away from another account: that would be a silent takeover.
+      if (owner) throw new ApiError(409, 'IDENTITY_IN_USE');
+      const user = this.db.prepare('SELECT disabled FROM users WHERE id=?').get(userId) as { disabled: number } | undefined;
+      if (!user) throw new ApiError(401, 'UNAUTHENTICATED');
+      if (user.disabled) throw new ApiError(403, 'USER_DISABLED');
+      // One account per provider keeps unbinding unambiguous.
+      if (this.db.prepare('SELECT 1 FROM identities WHERE userId=? AND provider=?').get(userId, identity.provider)) throw new ApiError(409, 'PROVIDER_ALREADY_LINKED');
+      this.db.prepare('INSERT INTO identities (provider,subject,userId,email,linkedAt) VALUES (?,?,?,?,?)')
+        .run(identity.provider, identity.subject, userId, identity.email, now);
+      return true;
+    }).immediate();
+  }
+  unlinkIdentity(userId: string, provider: string) {
+    this.db.transaction(() => {
+      const rows = this.db.prepare('SELECT provider FROM identities WHERE userId=?').all(userId) as { provider: string }[];
+      if (!rows.some(row => row.provider === provider)) throw new ApiError(404, 'NOT_FOUND');
+      // The last login method cannot be removed, or the account could never sign in again.
+      if (rows.length <= 1) throw new ApiError(409, 'LAST_IDENTITY');
+      this.db.prepare('DELETE FROM identities WHERE userId=? AND provider=?').run(userId, provider);
+    }).immediate();
   }
   consumeFlow(stateHash: string, browserHash: string, provider: string, now: number) {
     return this.db.transaction(() => {
@@ -169,6 +237,7 @@ export class SqliteRepository implements Repository {
       let row = this.db.prepare('SELECT u.* FROM users u JOIN identities i ON i.userId=u.id WHERE i.provider=? AND i.subject=?')
         .get(identity.provider, identity.subject) as UserRow | undefined;
       if (row?.disabled) throw new ApiError(403, 'USER_DISABLED');
+      if (row) this.db.prepare('UPDATE identities SET email=? WHERE provider=? AND subject=?').run(identity.email, identity.provider, identity.subject);
       const invite = inviteHash ? this.invite(inviteHash, now) : undefined;
       if (!row) {
         const pending = this.db.prepare('SELECT * FROM users WHERE pending=1 AND lower(email)=lower(?)').get(identity.email) as UserRow | undefined;
@@ -176,9 +245,19 @@ export class SqliteRepository implements Repository {
         if (pending?.disabled) throw new ApiError(403, 'USER_DISABLED');
         if (pending) {
           this.db.prepare('UPDATE users SET pending=0 WHERE id=?').run(pending.id);
-          this.db.prepare('INSERT INTO identities (provider,subject,userId) VALUES (?,?,?)').run(identity.provider, identity.subject, pending.id);
+          this.db.prepare('INSERT INTO identities (provider,subject,userId,email,linkedAt) VALUES (?,?,?,?,?)').run(identity.provider, identity.subject, pending.id, identity.email, now);
           row = { ...pending, pending: 0 };
         }
+      }
+      if (!row) {
+        // RHEA-190 m11: an unknown identity whose verified email already belongs to an
+        // account is NOT merged silently and NOT turned into a duplicate account. The
+        // owner signs in the usual way and binds the new provider in 设置 → 登录方式.
+        const existing = this.db.prepare(`SELECT u.disabled FROM users u WHERE u.pending=0 AND (lower(u.email)=lower(?)
+          OR EXISTS (SELECT 1 FROM identities i WHERE i.userId=u.id AND lower(i.email)=lower(?))) LIMIT 1`)
+          .get(identity.email, identity.email) as { disabled: number } | undefined;
+        if (existing?.disabled) throw new ApiError(403, 'USER_DISABLED');
+        if (existing) throw new ApiError(409, 'ACCOUNT_EXISTS');
       }
       if (!row) {
         // BEGIN IMMEDIATE holds the reserved lock across this count and the insert,
@@ -191,7 +270,7 @@ export class SqliteRepository implements Repository {
         const admin = first || listed;
         row = { id: randomUUID(), email: identity.email, name: identity.name, role: admin ? 'admin' : 'user', disabled: 0, pending: 0, createdAt: now, quotaBytes: null };
         this.db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt,pending,quotaBytes) VALUES (@id,@email,@name,@role,@disabled,@createdAt,@pending,@quotaBytes)').run(row);
-        this.db.prepare('INSERT INTO identities (provider,subject,userId) VALUES (?,?,?)').run(identity.provider, identity.subject, row.id);
+        this.db.prepare('INSERT INTO identities (provider,subject,userId,email,linkedAt) VALUES (?,?,?,?,?)').run(identity.provider, identity.subject, row.id, identity.email, now);
         const spaceId = randomUUID();
         this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomHash) VALUES (?,?,?,NULL,NULL)').run(spaceId, 'Private space', row.id);
         this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);

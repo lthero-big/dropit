@@ -3,6 +3,8 @@ import { Link } from 'react-router'
 import { toast } from 'sonner'
 import { DeviceConfirm } from '@/components/device-confirm.tsx'
 import { DeviceSessions } from '@/components/device-sessions.tsx'
+import { LoginMethods } from '@/components/login-methods.tsx'
+import { OAuthSettings } from '@/components/oauth-settings.tsx'
 import { PageTitle, Shell } from '@/components/shell.tsx'
 import { UpdateNotice } from '@/components/update-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
@@ -64,8 +66,9 @@ export function SettingsPage() {
   }, [load, me])
 
   useEffect(() => {
-    if (!me || window.location.hash !== '#devices') return
-    const id = window.setTimeout(() => document.getElementById('devices')?.scrollIntoView?.({ block: 'start' }), 50)
+    const anchor = window.location.hash.slice(1)
+    if (!me || !['devices', 'login-methods', 'oauth'].includes(anchor)) return
+    const id = window.setTimeout(() => document.getElementById(anchor)?.scrollIntoView?.({ block: 'start' }), 50)
     return () => window.clearTimeout(id)
   }, [me])
 
@@ -185,8 +188,10 @@ export function SettingsPage() {
 
   return (
     <Shell>
-      <PageTitle title="设置" sub="管理登录设备，确认设备码，或手动创建个人访问令牌。明文只显示一次。" />
+      <PageTitle title="设置" sub="管理登录方式和登录设备，确认设备码，或手动创建个人访问令牌。明文只显示一次。" />
       {me.user.role === 'admin' ? <UpdateNotice /> : null}
+      <LoginMethods />
+      {me.user.role === 'admin' ? <OAuthSettings /> : null}
       <section id="devices" className="mb-8 scroll-mt-20">
         <h2 className="mb-3 text-xs font-medium">登录设备</h2>
         <DeviceSessions onSelfSignedOut={() => void refresh().then(() => window.location.assign('/login'))} />

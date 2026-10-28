@@ -63,6 +63,13 @@ const labels: Record<string, string> = {
   CHECKSUM_MISMATCH: '分片校验失败',
   SOCKET_LIMIT: '连接数已达上限',
   INTERNAL_ERROR: '服务暂时不可用',
+  ACCOUNT_EXISTS: '这个邮箱已有账号。请先用原来的方式登录，再到 设置 → 登录方式 绑定',
+  IDENTITY_IN_USE: '这个第三方账号已绑定到另一个 dropit 账号',
+  PROVIDER_ALREADY_LINKED: '已绑定过这个登录方式，请先解绑再换账号',
+  LAST_IDENTITY: '至少保留一种登录方式',
+  OAUTH_SECRET_REQUIRED: '请填写 Client Secret',
+  INVALID_CLIENT_ID: 'Client ID 格式无效',
+  PROVIDER_UNSUPPORTED: '不支持的登录方式',
 }
 
 const oauthLoginErrors = new Set([
@@ -75,7 +82,17 @@ const oauthLoginErrors = new Set([
   'VERIFIED_EMAIL_REQUIRED',
   'RATE_LIMITED',
   'INTERNAL_ERROR',
+  'ACCOUNT_EXISTS',
+  'UNAUTHENTICATED',
 ])
+
+const linkErrors = new Set([...oauthLoginErrors, 'IDENTITY_IN_USE', 'PROVIDER_ALREADY_LINKED'])
+
+/** Error text for a failed bind (/settings?link_error=...); unknown codes are ignored. */
+export function linkErrorText(code: string | null): string | null {
+  if (!code || !linkErrors.has(code)) return null
+  return labels[code] ?? null
+}
 
 export function loginErrorText(code: string | null): string | null {
   if (!code || !oauthLoginErrors.has(code)) return null

@@ -63,8 +63,15 @@ export interface SharePublic {
   id: string; itemId: string; expiresAt: number | null; maxViews: number | null;
   views: number; revoked: number; createdAt: number;
 }
-export interface Flow { stateHash: string; browserHash: string; provider: string; verifier: string; inviteHash: string | null; expiresAt: number }
+export interface Flow { stateHash: string; browserHash: string; provider: string; verifier: string; inviteHash: string | null; expiresAt: number; linkUserId?: string | null }
 export interface Identity { provider: string; subject: string; email: string; name: string }
+/** A login method bound to an account, as shown in 设置 → 登录方式. */
+export interface LinkedIdentity { provider: string; email: string | null; linkedAt: number | null }
+/** OAuth app credentials stored in the database (settings UI). */
+export interface OAuthApp {
+  provider: string; clientId: string; clientSecret: string; enabled: number; updatedAt: number; updatedBy: string | null;
+  checkedAt: number | null; checkOk: number | null; checkCode: string | null;
+}
 export type TokenScope = 'read' | 'write';
 export interface AccessToken {
   id: string; userId: string; name: string; scopes: TokenScope[]; createdAt: number;

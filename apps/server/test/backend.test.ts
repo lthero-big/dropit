@@ -553,7 +553,8 @@ test('admin pre-provisions a user that the first verified login binds', async t 
   assert.equal(spaces.spaces.length, 1);
   assert.equal(f.repo.users().length, 3);
   const other = await f.login('other', undefined, 'guest@example.com');
-  assert.equal(oauthError(other.response), 'INVITATION_REQUIRED');
+  // RHEA-190 m11: a second identity for a claimed email is told to bind it, never a duplicate account.
+  assert.equal(oauthError(other.response), 'ACCOUNT_EXISTS');
   assert.equal(f.repo.users().length, 3);
 
   const base = `/api/spaces/${spaces.spaces[0].id}`;
@@ -1459,5 +1460,5 @@ test('RHEA-190 step 7: migration 10 adds the per-browser room binding to old dat
   assert.equal(repo.deviceRoom('dh', 9999999999999), undefined);
   const check = new Database(path, { readonly: true });
   t.after(() => check.close());
-  assert.equal(check.pragma('user_version', { simple: true }), 11);
+  assert.equal(check.pragma('user_version', { simple: true }), 12);
 });
