@@ -1,0 +1,202 @@
+/*
+ * Optional interface skins (RHEA-190 m21), ported from the early demos/ui-three-variants
+ * branch (A Bento / B Swiss / D Terminal). The default 纸感 look in index.css sets no
+ * data-skin and is untouched. Each skin only re-points the raw paper tokens (and radius /
+ * font) so every component keeps working; demo-only layout tricks were not ported.
+ * Selectors are html[data-skin=..] (+ .dark) so they beat :root / .dark in index.css, and
+ * they stay unlayered so they also beat the @layer components radius set on .dd-board.
+ */
+
+/* ---------- A · Bento: soft pastel cards, large radii, blue accent ---------- */
+html[data-skin="bento"] {
+  --radius: 14px;
+  --bg: #eceef2;
+  --surface-0: #f6f7f9;
+  --surface-1: #ffffff;
+  --surface-2: #f3f4f7;
+  --surface-sunken: #e4e7ec;
+  --line-1: #e6e9ef;
+  --line-2: #dde1e8;
+  --line-3: #c3c9d4;
+  --fg: #14161c;
+  --fg-2: #3a3f4b;
+  --fg-3: #5a6070;
+  --fg-4: #8b91a0;
+  --brand: #3048d8;
+  --brand-fg: #ffffff;
+  --ok: #16a34a;
+  --code-bg: #f3f4f7;
+  --destructive: #dc2626;
+  --elev-1: 0 1px 2px rgb(20 22 28 / 0.06), 0 8px 24px -16px rgb(20 22 28 / 0.22);
+  --elev-2: 0 1px 2px rgb(20 22 28 / 0.06), 0 12px 32px -18px rgb(20 22 28 / 0.3);
+  --elev-3: 0 24px 56px -20px rgb(20 22 28 / 0.35), 0 8px 18px -8px rgb(20 22 28 / 0.14);
+}
+html[data-skin="bento"].dark {
+  --bg: #0e1016;
+  --surface-0: #12141b;
+  --surface-1: #171a23;
+  --surface-2: #1f2330;
+  --surface-sunken: #0a0c11;
+  --line-1: #22262f;
+  --line-2: #262b38;
+  --line-3: #3a4152;
+  --fg: #eef0f6;
+  --fg-2: #c5c9d6;
+  --fg-3: #9097a8;
+  --fg-4: #646b7c;
+  --brand: #7b8cff;
+  --brand-fg: #0b0e24;
+  --ok: #4ade80;
+  --code-bg: #12141b;
+  --destructive: #f87171;
+  --elev-1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --elev-2: 0 10px 28px -14px rgb(0 0 0 / 0.6);
+  --elev-3: 0 24px 56px -18px rgb(0 0 0 / 0.75);
+}
+html[data-skin="bento"] :is(.dd, .dd-board) {
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+}
+html[data-skin="bento"] .clip-board > [data-clip-card] {
+  border-color: transparent;
+  box-shadow: var(--elev-1);
+}
+
+/* ---------- B · Swiss: hairline grid, no shadows, square corners, one red accent ---------- */
+html[data-skin="swiss"] {
+  --radius: 0px;
+  --bg: #f3f3ef;
+  --surface-0: #f8f8f5;
+  --surface-1: #ffffff;
+  --surface-2: #ecece6;
+  --surface-sunken: #e4e4dd;
+  --line-1: #cfcfc8;
+  --line-2: #111111;
+  --line-3: #111111;
+  --fg: #111111;
+  --fg-2: #2b2b2b;
+  --fg-3: #4d4d4d;
+  --fg-4: #808080;
+  --brand: #d0021b;
+  --brand-fg: #ffffff;
+  --ok: #0a7a3d;
+  --code-bg: #f3f3ef;
+  --elev-1: none;
+  --elev-2: none;
+  --elev-3: 0 0 0 2px #111111;
+}
+html[data-skin="swiss"].dark {
+  --bg: #0a0a0a;
+  --surface-0: #0f0f0f;
+  --surface-1: #0a0a0a;
+  --surface-2: #1a1a1a;
+  --surface-sunken: #050505;
+  --line-1: #3a3a3a;
+  --line-2: #f5f5f5;
+  --line-3: #f5f5f5;
+  --fg: #f5f5f5;
+  --fg-2: #d4d4d4;
+  --fg-3: #9a9a9a;
+  --fg-4: #6b6b6b;
+  --brand: #ff3b47;
+  --brand-fg: #0a0a0a;
+  --ok: #4ade80;
+  --code-bg: #111111;
+  --elev-3: 0 0 0 2px #f5f5f5;
+}
+html[data-skin="swiss"],
+html[data-skin="swiss"] :is(.font-sans, .dd-display) {
+  font-family: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Noto Sans SC Variable", sans-serif;
+}
+html[data-skin="swiss"] :is(.dd, .dd-board) {
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+}
+html[data-skin="swiss"] header {
+  border-bottom: 2px solid var(--line-2);
+}
+html[data-skin="swiss"] .clip-board > [data-clip-card]:hover {
+  box-shadow: inset 0 0 0 2px var(--brand);
+}
+html[data-skin="swiss"] h1 {
+  font-weight: 900;
+  letter-spacing: -0.04em;
+}
+
+/* ---------- D · Terminal: mono type, phosphor green, dashed rules ---------- */
+html[data-skin="terminal"] {
+  --radius: 2px;
+  --bg: #f1efe6;
+  --surface-0: #f5f3eb;
+  --surface-1: #f8f6ee;
+  --surface-2: #e3e1d4;
+  --surface-sunken: #e8e6da;
+  --line-1: rgb(16 19 15 / 0.2);
+  --line-2: rgb(16 19 15 / 0.4);
+  --line-3: rgb(16 19 15 / 0.6);
+  --fg: #10130f;
+  --fg-2: #2e352b;
+  --fg-3: #5d6458;
+  --fg-4: #8a9185;
+  --brand: #0b7a3a;
+  --brand-fg: #f1efe6;
+  --ok: #0b7a3a;
+  --code-bg: #ebe9de;
+  --destructive: #b3261e;
+  --elev-1: none;
+  --elev-2: none;
+  --elev-3: 0 0 0 1px var(--brand);
+}
+html[data-skin="terminal"].dark {
+  --bg: #070b08;
+  --surface-0: #0a100b;
+  --surface-1: #0b120d;
+  --surface-2: #0f1a13;
+  --surface-sunken: #050806;
+  --line-1: rgb(61 255 139 / 0.15);
+  --line-2: rgb(61 255 139 / 0.27);
+  --line-3: rgb(61 255 139 / 0.45);
+  --fg: #d6ffe4;
+  --fg-2: #a9dcbc;
+  --fg-3: #6f9a80;
+  --fg-4: #4c6b58;
+  --brand: #3dff8b;
+  --brand-fg: #04120a;
+  --ok: #3dff8b;
+  --code-bg: #0a100b;
+  --destructive: #ff5c6c;
+}
+html[data-skin="terminal"],
+html[data-skin="terminal"] :is(.font-sans, .dd-display) {
+  font-family: "Geist Mono Variable", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, "Noto Sans SC Variable", "PingFang SC", monospace;
+}
+html[data-skin="terminal"] :is(.dd, .dd-board) {
+  --radius-xs: 0px;
+  --radius-sm: 2px;
+  --radius-md: 2px;
+  --radius-lg: 2px;
+}
+html[data-skin="terminal"] header {
+  border-bottom-style: dashed;
+}
+html[data-skin="terminal"] .clip-board > [data-clip-card] {
+  border-style: dashed;
+}
+html[data-skin="terminal"] .clip-board > [data-clip-card]:hover {
+  border-style: solid;
+  border-color: var(--brand);
+}
+/* faint CRT scanlines in dark mode only; never intercepts input */
+html[data-skin="terminal"].dark body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 60;
+  background: repeating-linear-gradient(0deg, rgb(0 0 0 / 0.18) 0 1px, transparent 1px 3px);
+  opacity: 0.35;
+}

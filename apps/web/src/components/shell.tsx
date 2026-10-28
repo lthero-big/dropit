@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router'
-import { CheckIcon, ChevronDownIcon, LogOutIcon, MoonIcon, SettingsIcon, ShieldIcon, SunIcon } from 'lucide-react'
+import { CheckIcon, ChevronDownIcon, LogOutIcon, MoonIcon, PaletteIcon, SettingsIcon, ShieldIcon, SunIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button.tsx'
 import {
@@ -19,7 +19,7 @@ import { useSession } from '@/lib/session.tsx'
 import type { SpaceSummary } from '@/lib/types.ts'
 import { PRESENCE_SLOT } from '@/lib/device.ts'
 import { Logo } from './logo.tsx'
-import { useTheme } from './theme-provider.tsx'
+import { SKINS, useTheme } from './theme-provider.tsx'
 
 const themeIconClass = 'inline-flex size-10 shrink-0 items-center justify-center rounded-md border border-line-2 bg-background text-foreground hover:bg-surface-2 hover:text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary'
 const menuItemClass = 'min-h-10 min-w-10 rounded-none px-3 text-sm font-bold tracking-normal normal-case'
@@ -38,7 +38,7 @@ export function Shell({
   children: ReactNode
 }) {
   const { me, logout } = useSession()
-  const { theme, setTheme } = useTheme()
+  const { theme, setTheme, skin, setSkin } = useTheme()
   const navigate = useNavigate()
   const location = useLocation()
   const current = spaces.find((space) => space.id === spaceId)
@@ -150,6 +150,29 @@ export function Shell({
             </button>
           </nav>
           <div className="ml-auto flex shrink-0 items-center gap-2">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button type="button" className={themeIconClass} style={hitTarget} aria-label="界面风格" title="界面风格" data-skin-picker="">
+                  <PaletteIcon className="size-4" aria-hidden="true" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-48">
+                <DropdownMenuLabel className="px-3 pt-2 pb-1 text-[11px] font-medium text-muted-foreground normal-case">界面风格</DropdownMenuLabel>
+                {SKINS.map((option) => (
+                  <DropdownMenuItem
+                    key={option.id}
+                    className="gap-2 normal-case tracking-normal"
+                    data-skin-option={option.id}
+                    aria-checked={skin === option.id}
+                    onSelect={() => setSkin(option.id)}
+                  >
+                    <CheckIcon className={`size-3.5 shrink-0 ${skin === option.id ? '' : 'invisible'}`} aria-hidden="true" />
+                    <span className="min-w-0 flex-1">{option.label}</span>
+                    <span className="text-[11px] text-muted-foreground">{option.hint}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
             <button type="button" className={themeIconClass} style={hitTarget} aria-label="切换主题" title={theme === 'dark' ? '当前深色，点击切换到浅色' : theme === 'light' ? '当前浅色，点击切换到深色' : '跟随系统，点击切换'} onClick={cycleTheme}>
               {theme === 'dark' ? <SunIcon className="size-4" aria-hidden="true" /> : <MoonIcon className="size-4" aria-hidden="true" />}
             </button>
