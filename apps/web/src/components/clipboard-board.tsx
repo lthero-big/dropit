@@ -1,94 +1,36 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion } from 'motion/react'
-import { ArrowUpIcon, CalendarDaysIcon, ClipboardPasteIcon, FolderIcon, LayoutGridIcon, ListIcon, PaperclipIcon, SearchIcon, TabletSmartphoneIcon } from 'lucide-react'
+import { ArrowUpIcon, ClipboardPasteIcon, PaperclipIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { BoardCard, itemVisual, type Arrival, type DragPhase } from '@/components/board-card.tsx'
 import { BoardEmpty, BoardSkeletons, MagnetDropZone, PinBarShell, TimelineSection } from '@/components/board-chrome.tsx'
+import { BoardHeader, BoardToolbar } from '@/components/board-toolbar.tsx'
 import { GroupBar, GroupTarget, type GroupFilter } from '@/components/board-groups.tsx'
-import { GroupEmpty, GroupedSections, PinChip, PresencePill, Segmented } from '@/components/board-parts.tsx'
+import { GroupEmpty, GroupedSections, PinChip, PresencePill } from '@/components/board-parts.tsx'
 import { DeviceGlyph } from '@/components/device-glyph.tsx'
-import { onlineDeviceCount, presenceDots, useDockedComposer, useScrollCollapse } from '@/lib/board-hooks.ts'
+import { onlineDeviceCount, presenceDots, useCoarsePointer, useDockedComposer, useScrollCollapse } from '@/lib/board-hooks.ts'
 import { CommandPalette } from '@/components/command-palette.tsx'
 import { MediaViewer, type ViewerMedia } from '@/components/clip-media.tsx'
-import { UploadCard, type UploadCardActions } from '@/components/upload-card.tsx'
-import { uploadPreviewKind } from '@/lib/upload-preview.ts'
+import { UploadCard } from '@/components/upload-card.tsx'
 import { TrashBin } from '@/components/trash-bin.tsx'
 import { ApiError, api, errorText, uploadFile } from '@/lib/api.ts'
-import { adoptResume, browserResumeStore, browserTransport, discardSession, discardUpload, matchResumeFile, receivedRatio, uploadMaybeChunked, type ChunkTransport, type ResumeRecord, type ResumeStore } from '@/lib/chunked-upload.ts'
+import type { ChunkTransport, ResumeStore } from '@/lib/chunked-upload.ts'
+import { byDevice, layoutKey, readLayout, timeline, touchTarget, type BoardLayout } from '@/lib/board-layout.ts'
 import { useChannel } from '@/lib/channel.ts'
+import { filesFromList, useBoardUploads } from '@/lib/use-board-uploads.ts'
+import { useBoardFilter } from '@/lib/use-board-filter.ts'
 import { PRESENCE_SLOT, deviceColor, itemHeaders, localDevice, setUploadGroup } from '@/lib/device.ts'
 import { chipAtSticky, groupName, layoutBox, type Box } from '@/lib/groups.ts'
-import { CLAIMS_KEY, claimUpload, heartbeatUploads, ownsUpload, releaseUploads, tabId } from '@/lib/upload-claims.ts'
-import { createUploadQueue, type UploadQueue, type UploadRow } from '@/lib/upload-queue.ts'
-import { copyText, formatBytes, formatRemain, quotaTone, useClock, utf8Size } from '@/lib/format.ts'
+import { copyText, formatBytes, quotaTone, useClock, utf8Size } from '@/lib/format.ts'
 import { clipKind, codeSource } from '@/lib/clip-kind.ts'
-import { dayLabel } from '@/lib/day-label.ts'
 import { dur, easeIn, easeOut, springBounce, springSettle } from '@/lib/motion.ts'
 import { trashAnchorFor, type TrashAnchor, type TrashHandle } from '@/lib/trash-anchor.ts'
 import type { ConnectionStatus, Item } from '@/lib/types.ts'
 
-function filesFromList(list: FileList | File[] | null | undefined): File[] {
-  return Array.from(list ?? [])
-}
-
 const COPIED_MS = 1400
 
-/** Phones / tablets: a coarse primary pointer or no hover. They get swipe gestures, never pin-drag or drag-to-group. */
-const TOUCH_QUERY = '(pointer: coarse), (hover: none)'
-
-function useCoarsePointer(): boolean {
-  const [coarse, setCoarse] = useState(() => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia(TOUCH_QUERY).matches)
-  useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return
-    const query = window.matchMedia(TOUCH_QUERY)
-    const onChange = () => setCoarse(query.matches)
-    query.addEventListener?.('change', onChange)
-    return () => query.removeEventListener?.('change', onChange)
-  }, [])
-  return coarse
-}
-const touchTarget = { minWidth: 40, minHeight: 40 }
 const RETRACT_MS = 3000
-
-const EXPIRED = '会话已过期，请重新上传'
-
-const layoutKey = 'dropit-layout'
-type BoardLayout = 'grid' | 'list' | 'group' | 'timeline' | 'device'
-const LAYOUTS: BoardLayout[] = ['grid', 'list', 'group', 'timeline', 'device']
-
-function readLayout(): BoardLayout {
-  try {
-    const saved = localStorage.getItem(layoutKey)
-    return LAYOUTS.includes(saved as BoardLayout) ? (saved as BoardLayout) : 'grid'
-  } catch {
-    return 'grid'
-  }
-}
-
-/** Day sections for the timeline layout, newest day first (items keep board order). */
-function timeline(items: Item[], now: number): Array<[string, Item[]]> {
-  const days = new Map<string, Item[]>()
-  for (const item of items) {
-    const key = dayLabel(item.createdAt, now)
-    const list = days.get(key)
-    if (list) list.push(item)
-    else days.set(key, [item])
-  }
-  return [...days.entries()]
-}
-
-/** 按设备 sections, most recent sender first; clips without a device fall under their sender label. */
-function byDevice(items: Item[], sender: (item: Item) => string): Array<{ key: string; name: string; kind: NonNullable<Item['device']>['kind'] | null; list: Item[] }> {
-  const map = new Map<string, { key: string; name: string; kind: NonNullable<Item['device']>['kind'] | null; list: Item[] }>()
-  for (const item of items) {
-    const key = item.device?.id ?? `sender:${sender(item)}`
-    const entry = map.get(key)
-    if (entry) entry.list.push(item)
-    else map.set(key, { key, name: item.device?.name ?? `${sender(item)} · 未识别设备`, kind: item.device?.kind ?? null, list: [item] })
-  }
-  return [...map.values()]
-}
 
 function deviceOnlyHeaders(): Record<string, string> {
   return Object.fromEntries(Object.entries(itemHeaders()).filter(([key]) => key !== 'X-Dropit-Group'))
@@ -143,15 +85,14 @@ export function ClipboardBoard({
   const channel = useChannel(base)
   const now = useClock(channel.offset)
   const [draft, setDraft] = useState('')
-  const [query, setQuery] = useState('')
   const [pending, setPending] = useState<string | null>(null)
   const pendingRef = useRef<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
   const [editDraft, setEditDraft] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
   const [shareFor, setShareFor] = useState<string | null>(null)
-  const [rows, setRows] = useState<UploadRow[]>([])
-  const [dragOver, setDragOver] = useState(false)
+  const uploads = useBoardUploads({ base, channel, maxFileBytes, upload, chunkBytes, resumeStore, transport, onActivity, onAuthLost, onBusyChange, onBindCancel })
+  const { rows, dragOver, uploadBusy, localIds, uploadedIds, resumeRef, sendFiles, pasteShot, onResumePicked, cancelAll, previewFor, uploadActions } = uploads
   const [sending, setSending] = useState(false)
   const [openId, setOpenId] = useState<string | null>(null)
   const [layout, setLayout] = useState<BoardLayout>(readLayout)
@@ -170,7 +111,6 @@ export function ClipboardBoard({
   const [arrivals, setArrivals] = useState<Record<string, Arrival>>({})
   const [ripples, setRipples] = useState<Record<string, number>>({})
   const dotRefs = useRef(new Map<string, HTMLElement>())
-  const [groupFilter, setGroupFilter] = useState<GroupFilter>(null)
   const [target, setTarget] = useState('')
   const [groupPulse, setGroupPulse] = useState<Record<string, number>>({})
   // RHEA-190 step 7: drag a card straight onto a group chip (desktop pin-drag)
@@ -187,37 +127,12 @@ export function ClipboardBoard({
   const [slot, setSlot] = useState<HTMLElement | null>(null)
   const selfId = localDevice().id
   const seenIds = useRef<Set<string> | null>(null)
-  const localIds = useRef(new Set<string>())
-  // items that finished uploading from this tab: their translucent placeholder hands over to the real card
-  const uploadedIds = useRef(new Set<string>())
-  // object URLs for the picked files (image / video uploads preview before the server has them)
-  const previewUrls = useRef(new Map<string, string>())
   const boardRef = useRef<HTMLDivElement | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
-  const resumeRef = useRef<HTMLInputElement>(null)
-  const resumeTarget = useRef<string | null>(null)
-  const ownerRef = useRef(tabId())
-  const storeRef = useRef<ResumeStore>(resumeStore ?? browserResumeStore())
-  const transportRef = useRef<ChunkTransport>(transport ?? browserTransport())
   const seenAuth = useRef(0)
-  const sendFilesRef = useRef<(files: File[]) => void>(() => {})
-  const queueRef = useRef<UploadQueue | null>(null)
-  const baseRef = useRef(base)
-  const maxFileRef = useRef(maxFileBytes)
-  const channelRef = useRef(channel)
-  const onActivityRef = useRef(onActivity)
-  const onAuthLostRef = useRef(onAuthLost)
-  const uploadRef = useRef(upload)
-  const chunkBytesRef = useRef(chunkBytes)
   const visible = channel.items.filter((item) => item.expiresAt > now)
   const groups = channel.groups
-  const needle = query.trim().toLowerCase()
-  const shown = visible.filter((item) => {
-    if (!needle) return true
-    // RHEA-190 step 8: tags are no longer shown or edited, so they don't match searches either (the data stays on the server)
-    const haystack = `${item.text ?? ''}\n${item.filename ?? ''}`
-    return haystack.toLowerCase().includes(needle)
-  })
+  const { query, setQuery, groupFilter, setGroupFilter, shown, pinnedShown, looseAll, looseShown, groupCounts } = useBoardFilter(visible)
   const slides = base
     ? shown.flatMap((item) =>
         item.hasThumbnail
@@ -260,252 +175,6 @@ export function ClipboardBoard({
     }
   }, [channel.authLost, onAuthLost])
 
-  useEffect(() => {
-    let depth = 0
-    const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files')
-    const onDrag = (event: DragEvent) => {
-      if (!hasFiles(event)) return
-      event.preventDefault()
-    }
-    const onEnter = (event: DragEvent) => {
-      if (!hasFiles(event)) return
-      event.preventDefault()
-      depth += 1
-      setDragOver(true)
-    }
-    const onLeave = () => {
-      depth = Math.max(0, depth - 1)
-      if (depth === 0) setDragOver(false)
-    }
-    const onDrop = (event: DragEvent) => {
-      if (!hasFiles(event)) return
-      event.preventDefault()
-      depth = 0
-      setDragOver(false)
-      const files = filesFromList(event.dataTransfer?.files)
-      if (files.length) void sendFilesRef.current(files)
-    }
-    const onPaste = (event: ClipboardEvent) => {
-      const files: File[] = []
-      for (const item of event.clipboardData?.items ?? []) {
-        if (item.kind !== 'file') continue
-        const file = item.getAsFile()
-        if (file) files.push(file)
-      }
-      if (!files.length) return
-      event.preventDefault()
-      void sendFilesRef.current(files)
-    }
-    window.addEventListener('dragover', onDrag)
-    window.addEventListener('dragenter', onEnter)
-    window.addEventListener('dragleave', onLeave)
-    window.addEventListener('drop', onDrop)
-    window.addEventListener('paste', onPaste)
-    return () => {
-      window.removeEventListener('dragover', onDrag)
-      window.removeEventListener('dragenter', onEnter)
-      window.removeEventListener('dragleave', onLeave)
-      window.removeEventListener('drop', onDrop)
-      window.removeEventListener('paste', onPaste)
-    }
-  }, [])
-
-  /** The demo's 粘贴截图: read an image straight off the system clipboard. */
-  async function pasteShot() {
-    const read = navigator.clipboard?.read?.bind(navigator.clipboard)
-    if (!read) {
-      toast('按 ⌘V / Ctrl+V 直接粘贴截图')
-      return
-    }
-    try {
-      const files: File[] = []
-      for (const entry of await read()) {
-        const type = entry.types.find((kind) => kind.startsWith('image/'))
-        if (!type) continue
-        const blob = await entry.getType(type)
-        files.push(new File([blob], `截图-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${type.split('/')[1] || 'png'}`, { type }))
-      }
-      if (files.length) sendFiles(files)
-      else toast('剪贴板里没有图片')
-    } catch {
-      toast('读不到剪贴板，按 ⌘V / Ctrl+V 直接粘贴')
-    }
-  }
-
-  function sendFiles(files: File[]) {
-    if (!baseRef.current) return
-    queueRef.current?.enqueue(files, maxFileRef.current)
-  }
-
-  useEffect(() => {
-    baseRef.current = base
-    maxFileRef.current = maxFileBytes
-    channelRef.current = channel
-    onActivityRef.current = onActivity
-    onAuthLostRef.current = onAuthLost
-    uploadRef.current = upload
-    chunkBytesRef.current = chunkBytes
-    sendFilesRef.current = sendFiles
-    if (resumeStore) storeRef.current = resumeStore
-    if (transport) transportRef.current = transport
-  })
-
-  useEffect(() => {
-    const queue = createUploadQueue({
-      upload: (file, onProgress, signal) => uploadMaybeChunked({
-        base: baseRef.current ?? '',
-        file,
-        onProgress,
-        signal,
-        chunkBytes: chunkBytesRef.current,
-        store: storeRef.current,
-        transport: transportRef.current,
-        single: (next, progress, nextSignal) => uploadRef.current(baseRef.current ?? '', next, progress, nextSignal),
-      }),
-      discard: (file) => discardUpload(baseRef.current ?? '', file, storeRef.current, transportRef.current),
-      discardKept: (session) => {
-        const current = baseRef.current ?? ''
-        discardSession(current, { ...session, base: current }, storeRef.current, transportRef.current)
-        releaseUploads([session.uploadId], ownerRef.current)
-      },
-      onItem: (item) => {
-        localIds.current.add(item.id)
-        uploadedIds.current.add(item.id)
-        channelRef.current.upsert(item)
-        onActivityRef.current?.()
-      },
-      onAuthLost: () => onAuthLostRef.current?.(),
-      onChange: setRows,
-      onOversize: (name) => toast.error(`${name}超过大小上限（${formatBytes(maxFileRef.current)}）`),
-      onFailed: (message) => toast.error(message),
-    })
-    queueRef.current = queue
-    return () => {
-      queue.dispose()
-      if (queueRef.current === queue) queueRef.current = null
-    }
-  }, [])
-
-  useEffect(() => {
-    const owner = ownerRef.current
-    const timer = window.setInterval(() => {
-      heartbeatUploads(queueRef.current?.claimedIds() ?? [], owner)
-    }, 5_000)
-    const onStorage = (event: StorageEvent) => {
-      if (event.key !== CLAIMS_KEY) return
-      for (const id of queueRef.current?.claimedIds() ?? []) {
-        if (!ownsUpload(id, owner)) queueRef.current?.dropForeign(id)
-      }
-    }
-    const release = () => releaseUploads(queueRef.current?.claimedIds() ?? [], owner)
-    window.addEventListener('storage', onStorage)
-    window.addEventListener('beforeunload', release)
-    return () => {
-      window.clearInterval(timer)
-      window.removeEventListener('storage', onStorage)
-      window.removeEventListener('beforeunload', release)
-      release()
-    }
-  }, [])
-
-  useEffect(() => {
-    const current = base
-    if (!current) return
-    let cancelled = false
-    queueRef.current?.dropRestored()
-    const owner = ownerRef.current
-    const records = storeRef.current.list().filter((record) => record.base === current)
-    void (async () => {
-      for (const record of records) {
-        if (cancelled) return
-        if (record.expiresAt <= Date.now()) {
-          discardSession(current, record, storeRef.current, transportRef.current)
-          toast.error(EXPIRED)
-          continue
-        }
-        if (!claimUpload(record.uploadId, owner)) continue
-        try {
-          const session = await transportRef.current.get(current, record.uploadId, new AbortController().signal)
-          if (cancelled) {
-            releaseUploads([record.uploadId], owner)
-            return
-          }
-          if (session.expiresAt <= Date.now()) {
-            discardSession(current, record, storeRef.current, transportRef.current)
-            releaseUploads([record.uploadId], owner)
-            toast.error(EXPIRED)
-            continue
-          }
-          queueRef.current?.restore({
-            uploadId: record.uploadId,
-            name: record.name,
-            size: record.size,
-            ratio: receivedRatio(record.size, session.chunkSize || record.chunkSize, session.received ?? []),
-            sessionKey: record.key,
-          })
-        } catch (error) {
-          if (cancelled) {
-            releaseUploads([record.uploadId], owner)
-            return
-          }
-          if (error instanceof ApiError && error.status === 404) {
-            discardSession(current, record, storeRef.current, transportRef.current)
-            releaseUploads([record.uploadId], owner)
-            toast.error(EXPIRED)
-            continue
-          }
-          queueRef.current?.restore({
-            uploadId: record.uploadId,
-            name: record.name,
-            size: record.size,
-            ratio: 0,
-            sessionKey: record.key,
-          })
-        }
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [base])
-
-  const uploadBusy = rows.some((row) => row.status === 'queued' || row.status === 'uploading' || row.status === 'processing' || row.status === 'paused')
-
-  // Drop the local previews of uploads that have left the queue.
-  useEffect(() => {
-    const live = new Set(rows.map((row) => row.id))
-    for (const [id, url] of previewUrls.current) {
-      if (live.has(id)) continue
-      URL.revokeObjectURL?.(url)
-      previewUrls.current.delete(id)
-    }
-  }, [rows])
-  useEffect(() => {
-    const urls = previewUrls.current
-    return () => {
-      for (const url of urls.values()) URL.revokeObjectURL?.(url)
-      urls.clear()
-    }
-  }, [])
-
-  useEffect(() => {
-    onBusyChange?.(uploadBusy)
-  }, [onBusyChange, uploadBusy])
-
-  useEffect(() => {
-    onBindCancel?.(() => queueRef.current?.cancelAll())
-  }, [onBindCancel])
-
-  useEffect(() => {
-    if (!uploadBusy) return
-    const onLeave = (event: BeforeUnloadEvent) => {
-      event.preventDefault()
-      event.returnValue = ''
-    }
-    window.addEventListener('beforeunload', onLeave)
-    return () => window.removeEventListener('beforeunload', onLeave)
-  }, [uploadBusy])
-
   async function sendText() {
     const text = draft.trim()
     if (!base || !text || sending) return
@@ -521,7 +190,7 @@ export function ClipboardBoard({
         headers: { 'Content-Type': 'application/json', ...deviceOnlyHeaders() },
         body: JSON.stringify(target ? { text, group: target } : { text }),
       })
-      localIds.current.add(result.item.id)
+      localIds.add(result.item.id)
       channel.upsert(result.item)
       setDraft('')
       onActivity?.()
@@ -593,7 +262,7 @@ export function ClipboardBoard({
     if (channel.status !== 'live') return
     if (groupFilter && !groups.includes(groupFilter)) setGroupFilter(null)
     if (target && !groups.includes(target)) setTarget('')
-  }, [channel.status, groups, groupFilter, target])
+  }, [channel.status, groups, groupFilter, setGroupFilter, target])
 
   function groupFailed(error: unknown) {
     toast.error(errorText(error))
@@ -748,7 +417,7 @@ export function ClipboardBoard({
       for (const item of fresh) {
         if (!item.pinned && latest.groupFilter !== null && (item.group ?? '') !== latest.groupFilter) {
           latest.pulseGroup(item.group)
-          if (!localIds.current.has(item.id)) toast(`新内容进了「${groupName(item.group)}」`)
+          if (!localIds.has(item.id)) toast(`新内容进了「${groupName(item.group)}」`)
         }
       }
     }
@@ -756,21 +425,21 @@ export function ClipboardBoard({
     const next: Record<string, Arrival> = {}
     let remote = false
     for (const item of fresh) {
-      const mine = localIds.current.has(item.id)
-      next[item.id] = mine ? (uploadedIds.current.has(item.id) ? 'uploaded' : 'landed') : 'arrived'
+      const mine = localIds.has(item.id)
+      next[item.id] = mine ? (uploadedIds.has(item.id) ? 'uploaded' : 'landed') : 'arrived'
       remote ||= !mine
     }
     setArrivals((current) => ({ ...current, ...next }))
     if (remote) {
       const bumped: Record<string, number> = {}
-      for (const item of fresh) if (!localIds.current.has(item.id)) bumped[latest ? latest.sourceKey(item) : item.id] = 1
+      for (const item of fresh) if (!localIds.has(item.id)) bumped[latest ? latest.sourceKey(item) : item.id] = 1
       setRipples((current) => {
         const out = { ...current }
         for (const key of Object.keys(bumped)) out[key] = (out[key] ?? 0) + 1
         return out
       })
     }
-  }, [channel.items, channel.status, channel.devices, reduced])
+  }, [channel.items, channel.status, channel.devices, reduced, localIds, uploadedIds])
 
   useEffect(() => {
     if (!openCard) return
@@ -882,90 +551,10 @@ export function ClipboardBoard({
     }
   }
 
-  function recordFor(session: { key: string; uploadId: string }): ResumeRecord | null {
-    return storeRef.current.get(session.key) ?? storeRef.current.list().find((entry) => entry.uploadId === session.uploadId) ?? null
-  }
-
-  function continueRow(row: UploadRow) {
-    const queue = queueRef.current
-    if (!queue) return
-    if (queue.needsFile(row.id)) {
-      resumeTarget.current = row.id
-      resumeRef.current?.click()
-      return
-    }
-    queue.resume(row.id)
-  }
-
-  function onResumePicked(event: ChangeEvent<HTMLInputElement>) {
-    const file = filesFromList(event.target.files)[0]
-    event.target.value = ''
-    const id = resumeTarget.current
-    resumeTarget.current = null
-    const queue = queueRef.current
-    if (!file || !id || !queue) return
-    const session = queue.sessionOf(id)
-    if (!session) return
-    const record = recordFor(session)
-    if (!record) {
-      toast.error(EXPIRED)
-      releaseUploads([session.uploadId], ownerRef.current)
-      queue.dropUpload(session.uploadId)
-      return
-    }
-    const match = matchResumeFile(record, file)
-    if (match.kind === 'match') {
-      queue.bindFile(id, file)
-      return
-    }
-    if (match.kind === 'mtime') {
-      queue.armMtime(id, file)
-      return
-    }
-    queue.holdFile(id, file, `${match.fields.join('、')}不一致`)
-  }
-
-  function acceptMtime(row: UploadRow) {
-    const queue = queueRef.current
-    const file = queue?.confirmMtime(row.id)
-    const session = queue?.sessionOf(row.id)
-    const current = baseRef.current
-    if (!queue || !file || !session || !current) return
-    const record = recordFor(session)
-    if (!record) {
-      toast.error(EXPIRED)
-      releaseUploads([session.uploadId], ownerRef.current)
-      queue.dropUpload(session.uploadId)
-      return
-    }
-    const next = adoptResume(storeRef.current, record, file)
-    queue.bindFile(row.id, file, next.key)
-  }
-
-  function abandonResume(row: UploadRow) {
-    const queue = queueRef.current
-    if (!queue) return
-    const session = queue.sessionOf(row.id)
-    const file = queue.takeHeld(row.id)
-    const current = baseRef.current
-    if (session && current) {
-      const record = recordFor(session)
-      if (record) discardSession(current, record, storeRef.current, transportRef.current)
-      releaseUploads([session.uploadId], ownerRef.current)
-      queue.dropUpload(session.uploadId)
-    }
-    if (file) queue.enqueue([file], maxFileRef.current)
-  }
-
-  const pinnedShown = shown.filter((item) => item.pinned)
-  const looseAll = shown.filter((item) => !item.pinned)
-  const looseShown = groupFilter === null ? looseAll : looseAll.filter((item) => (item.group ?? '') === groupFilter)
   const showPinBar = pinnedShown.length > 0 || (gesture === 'pin-drag' && visible.some((item) => canShare(item)))
   const live = channel.status === 'live'
   const dots = presenceDots(channel.devices, channel.peers, visible, selfId, channel.others)
   const onlineCount = onlineDeviceCount(channel.devices, channel.peers, dots)
-  const groupCounts = new Map<string, number>()
-  for (const item of looseAll) groupCounts.set(item.group ?? '', (groupCounts.get(item.group ?? '') ?? 0) + 1)
 
   /** which presence dot a remote clip flies from: its sender's own dot when we know it */
   function sourceKey(item: Item): string {
@@ -1076,25 +665,6 @@ export function ClipboardBoard({
 
   // RHEA-190 step 6: uploads live on the board as translucent cards (finished ones hand over to the real clip).
   const uploadsPending = rows.filter((row) => row.status !== 'done')
-  const previewFor = (row: UploadRow) => {
-    const known = previewUrls.current.get(row.id)
-    if (known) return known
-    if (!uploadPreviewKind(row) || typeof URL.createObjectURL !== 'function') return null
-    const file = queueRef.current?.fileOf(row.id)
-    if (!file) return null
-    const url = URL.createObjectURL(file)
-    previewUrls.current.set(row.id, url)
-    return url
-  }
-  const uploadActions = (row: UploadRow): UploadCardActions => ({
-    onCancel: () => queueRef.current?.cancel(row.id),
-    onPause: () => queueRef.current?.pause(row.id),
-    onContinue: () => continueRow(row),
-    onRetry: () => queueRef.current?.retry(row.id),
-    onRemove: () => queueRef.current?.dismiss(row.id),
-    onAcceptMtime: () => acceptMtime(row),
-    onAbandon: () => abandonResume(row),
-  })
   const uploadCards = (variant: 'grid' | 'row') =>
     uploadsPending.map((row) => <UploadCard key={`upload-${row.id}`} row={row} preview={previewFor(row)} variant={variant} reduced={reduced} actions={uploadActions(row)} />)
   const uploadsInline = (layout === 'grid' || layout === 'list') && !(looseAll.length > 0 && looseShown.length === 0 && groupFilter !== null)
@@ -1239,24 +809,7 @@ export function ClipboardBoard({
   return (
     <section className={`dd-noselect ${docked ? 'pb-[calc(76px+env(safe-area-inset-bottom))]' : ''}`} data-board-root="">
       <div className="flex flex-col gap-4">
-        <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <h1 className="dd-display text-[19px] font-semibold tracking-tight text-fg">{title}</h1>
-          {subtitle ? <p className="text-[12px] text-[var(--fg-3)]">{subtitle}</p> : null}
-          {deadline ? (
-            <p className="text-[12px] text-[var(--fg-2)]">
-              剩余 <b>{formatRemain(deadline - now)}</b> 后自动销毁
-            </p>
-          ) : null}
-          {usedBytes === null ? (
-            <p className="flex max-w-xs items-center gap-2 text-[11px] text-[var(--fg-3)]">
-              <span className="shrink-0">房间配额 {formatBytes(roomUsed)} / {formatBytes(quotaBytes)}</span>
-              <span className="h-1 min-w-16 flex-1 overflow-hidden rounded-full bg-surface-2" role="progressbar" aria-label="房间配额" aria-valuemin={0} aria-valuemax={100} aria-valuenow={ratio} data-quota-tone={tone}>
-                <span className={`block h-full rounded-full ${quotaBar}`} style={{ width: `${ratio}%` }} />
-              </span>
-            </p>
-          ) : null}
-          {slot ? null : <span className="ml-auto">{presence}</span>}
-        </header>
+        <BoardHeader title={title} subtitle={subtitle} deadlineLeft={deadline ? deadline - now : null} usedBytes={usedBytes} roomUsed={roomUsed} quotaBytes={quotaBytes} ratio={ratio} tone={tone} quotaBar={quotaBar} trailing={slot ? null : presence} />
         {slot ? createPortal(presence, slot) : null}
         {docked ? null : composer}
         <MotionConfig reducedMotion="user">
@@ -1289,42 +842,16 @@ export function ClipboardBoard({
                   onDelete={deleteGroup}
                 />
               ) : null}
-              <div className="flex flex-wrap items-center gap-2">
-                <Segmented
-                  id="layout"
-                  label="布局"
-                  value={layout}
-                  onChange={chooseLayout}
-                  options={[
-                    { value: 'grid', label: '网格', icon: <LayoutGridIcon className="size-3.5" /> },
-                    { value: 'list', label: '列表', icon: <ListIcon className="size-3.5" /> },
-                    { value: 'group', label: '按分组', icon: <FolderIcon className="size-3.5" /> },
-                    { value: 'timeline', label: '时间线', icon: <CalendarDaysIcon className="size-3.5" /> },
-                    { value: 'device', label: '按设备', icon: <TabletSmartphoneIcon className="size-3.5" /> },
-                  ]}
-                />
-                <span className="dd-mono text-[11px] text-[var(--fg-3)]">{looseShown.length} 条</span>
-                {uploadBusy ? (
-                  <span className="flex items-center gap-1 text-[11px] text-[var(--fg-3)]" data-upload-summary="">
-                    <span className="dd-mono">上传 {uploadsPending.filter((row) => row.status !== 'failed' && row.status !== 'cancelled').length}</span>
-                    <button type="button" className="inline-flex min-h-10 items-center rounded-[var(--radius-sm)] px-2 font-medium text-[var(--fg-2)] transition-colors duration-(--dur-fast) hover:bg-[var(--surface-2)] hover:text-[var(--fg)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" style={touchTarget} onClick={() => queueRef.current?.cancelAll()}>
-                      全部取消
-                    </button>
-                  </span>
-                ) : null}
-                <label className="relative flex min-h-10 w-full items-center rounded-[var(--radius-md)] border border-[var(--line-1)] bg-[var(--surface-1)] transition-colors duration-(--dur-fast) focus-within:border-[var(--line-3)] sm:ml-auto sm:w-60">
-                  <SearchIcon className="pointer-events-none absolute left-2.5 size-3.5 text-[var(--fg-4)]" aria-hidden="true" />
-                  <span className="sr-only">搜索</span>
-                  <input
-                    type="search"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    placeholder="搜索文本或文件名"
-                    aria-label="搜索"
-                    className="w-full bg-transparent py-2 pr-3 pl-8 text-[13px] text-fg outline-none placeholder:text-fg-4"
-                  />
-                </label>
-              </div>
+              <BoardToolbar
+                layout={layout}
+                onLayout={chooseLayout}
+                count={looseShown.length}
+                uploadBusy={uploadBusy}
+                uploadCount={uploadsPending.filter((row) => row.status !== 'failed' && row.status !== 'cancelled').length}
+                onCancelAll={cancelAll}
+                query={query}
+                onQuery={setQuery}
+              />
               {channel.status === 'connecting' || channel.status === 'reconnecting' ? (
                 <p className="text-sm text-fg-3" role="status">
                   {channel.status === 'reconnecting' ? '连接中断，正在重连并补拉…' : '正在同步…'}
