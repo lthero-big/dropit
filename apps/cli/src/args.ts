@@ -20,7 +20,8 @@ export type Command =
   | { kind: 'rm'; id: string }
   | { kind: 'share'; id: string; expires: '1h' | '1d' | '7d' | 'never'; maxViews: number | null }
   | { kind: 'watch'; exec?: string[] }
-  | { kind: 'room-new' }
+  | { kind: 'room-new'; code?: string; pin?: string }
+  | { kind: 'room-enter'; code: string; pin?: string }
   | { kind: 'room-join'; target: string };
 
 export interface Parsed {
@@ -75,6 +76,7 @@ export function parseArgs(argv: string[]): Parsed {
     if (arg === '--keep') { flags.set('keep', '1'); continue; }
     if (arg === '--jobs') { flags.set('jobs', take('--jobs', ++i)); continue; }
     if (arg === '-o' || arg === '--output') { flags.set('output', take(arg, ++i)); continue; }
+    if (arg === '--code' || arg === '--pin') { flags.set(arg.slice(2), take(arg, ++i)); continue; }
     if (arg === '--name' || arg === '--scopes' || arg === '--expires-in-days' || arg === '--expires' || arg === '--max-views') {
       flags.set(arg.slice(2), take(arg, ++i));
       continue;
@@ -163,11 +165,18 @@ export function parseArgs(argv: string[]): Parsed {
       if (positionals.length > 1) throw new CliError('USAGE', 'watch 的参数请放在 --exec 后面', 2);
       return { globals, command: { kind: 'watch', exec } };
     case 'room': {
-      extra([]);
       const action = positionals[1];
+      extra(action === 'new' ? ['code', 'pin'] : action === 'enter' ? ['pin'] : []);
       if (action === 'new') {
         if (positionals.length > 2) throw new CliError('USAGE', 'room new 不接受其他参数', 2);
-        return { globals, command: { kind: 'room-new' } };
+        if (flags.has('pin') && !flags.has('code')) throw new CliError('USAGE', '--pin 需要和 --code 一起使用', 2);
+        return { globals, command: { kind: 'room-new', code: flags.get('code'), pin: flags.get('pin') } };
+      }
+      if (action === 'enter') {
+        const code = positionals[2];
+        if (!code) throw new CliError('USAGE', '缺少房间码', 2);
+        if (positionals.length > 3) throw new CliError('USAGE', 'room enter 只接受一个房间码', 2);
+        return { globals, command: { kind: 'room-enter', code, pin: flags.get('pin') } };
       }
       if (action === 'join') {
         const target = positionals[2];
@@ -175,7 +184,7 @@ export function parseArgs(argv: string[]): Parsed {
         if (positionals.length > 3) throw new CliError('USAGE', 'room join 只接受一个链接', 2);
         return { globals, command: { kind: 'room-join', target } };
       }
-      throw new CliError('USAGE', 'room 的子命令是 new 或 join', 2);
+      throw new CliError('USAGE', 'room 的子命令是 new、join 或 enter', 2);
     }
     default:
       throw new CliError('USAGE', `未知命令 ${name}`, 2);
@@ -195,8 +204,9 @@ export const usageText = `dropit — 云剪贴板命令行
   dropit rm <id|latest>
   dropit share <id|latest> --expires <1h|1d|7d|never> [--max-views <次数>]
   dropit watch [--exec [--] <命令> [参数...]]
-  dropit room new
+  dropit room new [--code <房间码> [--pin <PIN>]]
   dropit room join <链接或令牌>
+  dropit room enter <房间码> [--pin <PIN>]
 
 全局选项
   --url <url>            服务地址，优先于 DROPIT_URL 与配置文件

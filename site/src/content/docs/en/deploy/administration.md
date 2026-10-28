@@ -36,6 +36,12 @@ The admin panel lives at `/admin` and is only accessible to enabled admins.
 - Choose the target space, number of uses (1–100) and validity (1–720 hours) to generate an invitation link `/invite/<token>`.
 - The token is returned only once at creation; the database stores only its SHA-256. Invitations can be revoked at any time.
 
+## User invitations
+
+- The “User invitations” switch under Admin → Registration controls whether normal users can create personal invitations (default on) and sets the default limit (default 5).
+- In the user editor you can change the “invite limit” per user (empty = use the default; admins are not limited).
+- The invitations list shows every invitation (personal ones with creator and status); admins can revoke unused ones. Personal invitations cannot register anyone while the policy is “closed”.
+
 ## Personal access tokens
 
 - Admins can view and revoke every user's tokens; users manage their own on `/settings`.

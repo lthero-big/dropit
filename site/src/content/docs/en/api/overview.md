@@ -24,7 +24,7 @@ This page is an overview; the authoritative contract is [docs/api.md](../referen
 | Device-code login | `POST /auth/device/authorize`, `POST /auth/device/token`, `GET /auth/device`, `POST /auth/device/approve`, `POST /auth/device/deny` |
 | Signed-in devices | `GET /sessions`, `DELETE /sessions/:id`, `POST /sessions/revoke-others` (browser sessions only) |
 | Admin | `/admin/users`, `/admin/users/:id/logout`, `GET /admin/users/:id/sessions`, `DELETE /admin/sessions/:id`, `/admin/invites`, `/admin/tokens`, `/admin/limits`, `/admin/limits/audit`, `GET /admin/update`, `POST /admin/update/check` |
-| Spaces and rooms | `GET /spaces`, `POST /rooms` |
+| Spaces and rooms | `GET /spaces`, `POST /rooms` (optional `code`/`pin`), `POST /rooms/enter`, `PUT /rooms/:room/code`; personal invitations `GET/POST /me/invites`, `DELETE /me/invites/:id` |
 | Items (`base` = `/spaces/:id` or `/rooms/:token`) | `GET base`, `GET base/items`, `POST base/items/text`, `POST base/items/file`, `PATCH base/items/:id`, `PATCH base/items/:id/labels`, `DELETE base/items/:id`, `GET base/items/:id/{download,thumbnail,preview,media}` |
 | Groups | `GET/POST base/groups`, `PATCH/DELETE base/groups/:name` |
 | Chunked uploads | `POST base/uploads`, `GET base/uploads/:id`, `PUT base/uploads/:id/chunks/:index`, `POST base/uploads/:id/complete`, `DELETE base/uploads/:id` |

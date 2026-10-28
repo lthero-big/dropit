@@ -28,7 +28,7 @@ Missing/expired/revoked session returns `401 UNAUTHENTICATED`.
 | GET | `/auth/:provider/callback` | OAuth-only callback; state, browser cookie and PKCE required; sets session and redirects to `{APP_ORIGIN}/`. Browser-visible failures redirect to `{APP_ORIGIN}/login?error=CODE`. The code is one of `OAUTH_STATE_INVALID`, `OAUTH_DENIED`, `OAUTH_PROVIDER_ERROR`, `INVITE_INVALID`, `INVITATION_REQUIRED`, `REGISTRATION_CLOSED`, `USER_DISABLED`, `VERIFIED_EMAIL_REQUIRED`, `RATE_LIMITED`, `INTERNAL_ERROR`. Provider error text is not copied into the URL. |
 | POST | `/auth/logout` | 204; immediately revokes this session, closes its sockets and clears cookie |
 | GET | `/me` | `{user, hasPassword, mustChangePassword, usedBytes, reservedBytes, quotaBytes, maxFileBytes, maxTextBytes, retentionMs}` |
-| GET | `/invites/:token` | `{spaceName, expiresAt, remainingUses}`; invalid/revoked/used/expired: 404 |
+| GET | `/invites/:token` | `{personal, spaceName \| null, inviterName?, expiresAt, remainingUses}`; `personal: true` is a user-created invitation that only opens registration (no space is joined). Invalid/revoked/used/expired: 404 |
 
 `User = {id, email, name, role: 'admin'|'user', disabled: 0|1, pending: 0|1, createdAt}`.
 `pending` is 1 until the first verified OAuth identity is bound or the first password sign-in. The invite page does
@@ -50,7 +50,7 @@ Starting a new flow replaces the browser's previous flow cookie.
 | POST | `/auth/password/register` | `{email, password, name?, invite?}` → 201 `{user}` and a session. Subject to the registration policy: `closed` → `403 REGISTRATION_CLOSED`; `invite` (default) needs a valid invite (`403 INVITATION_REQUIRED` / `INVITE_INVALID`); `open` accepts anyone. Always a normal user (never admin, `ADMIN_EMAILS` does not apply because the email is not verified). An email already used by any account `409 EMAIL_IN_USE`. Before `/setup` `409 SETUP_REQUIRED` |
 | PUT | `/me/password` | Browser session only. `{currentPassword?, newPassword}` → `{hasPassword:true, mustChangePassword:false, revokedSessions}`. `currentPassword` is required when the account already has a password (`400 CURRENT_PASSWORD_INVALID`, `PASSWORD_UNCHANGED`); an OAuth-only account can add one without it. Other sessions of the account are revoked |
 | POST | `/admin/users/:id/password` | Admin browser session. → `{temporaryPassword, mustChangePassword:true}`. Shown once. Revokes that user's sessions; the next sign-in must change it |
-| GET / PUT | `/admin/registration` | `{policy:'closed'|'invite'|'open', default:'invite', updatedAt, updatedBy}`; PUT `{policy}` |
+| GET / PUT | `/admin/registration` | `{policy:'closed'|'invite'|'open', default:'invite', userInvites:{enabled, defaultLimit}, updatedAt, updatedBy}`; PUT `{policy?, userInvites?: {enabled?: boolean, defaultLimit?: 0–1000}}` (at least one). `userInvites` controls whether normal users may create personal invitations (default on, 5 each). |
 
 `GET /auth/providers` also returns `password: true`, `registration` (the policy) and
 `setupRequired`. `GET /me` adds `hasPassword` and `mustChangePassword`; `GET /admin/users`
@@ -167,7 +167,7 @@ All paths here require an enabled admin, otherwise 401/403.
 | --- | --- | --- |
 | GET | `/admin/users` | `{users: [User & {usedBytes, quotaBytes, quotaOverride}]}`. `quotaBytes` is the effective quota. `quotaOverride` is the stored override, or `null` when the installation default applies. |
 | POST | `/admin/users` | `{email, name?: string, role?: 'admin' or 'user', quotaBytes?: number}` → 201, `User & {usedBytes, quotaBytes, quotaOverride}`. Pre-creates a pending account and its private space. No password and no invite token. The first later OAuth login whose **verified** email matches (case-insensitive) binds that identity, clears `pending`, and does not create a second user or space. A different provider subject with the same email is not linked and still needs an invite or admin bootstrap. Email must not already belong to any user (`409 EMAIL_IN_USE`). `ADMIN_EMAILS` matches are stored as `admin`. `quotaBytes` when omitted is the installation default (`quotaOverride: null`); when set, 1 byte through 100 GiB. |
-| PATCH | `/admin/users/:id` | At least one of `{disabled?: boolean, role?: 'admin'\|'user', name?: string, quotaBytes?: number\|null}` → 204. `quotaBytes: null` clears the override. Disabling immediately revokes every session/socket. Enabling requires a new login. Role and quota apply to the next request on existing sessions. The last enabled admin cannot be disabled or demoted (`409 LAST_ADMIN`). Email cannot be changed. |
+| PATCH | `/admin/users/:id` | At least one of `{disabled?: boolean, role?: 'admin'\|'user', name?: string, quotaBytes?: number\|null, inviteLimit?: number\|null}` → 204. `quotaBytes: null` clears the override. `inviteLimit` (integer 0–1000) is this user's personal-invite limit; `null` falls back to the site default. Disabling immediately revokes every session/socket. Enabling requires a new login. Role and quota apply to the next request on existing sessions. The last enabled admin cannot be disabled or demoted (`409 LAST_ADMIN`). Email cannot be changed. |
 | POST | `/admin/users/:id/logout` | 204. Deletes every session for that user and closes their sockets. The account stays enabled; they can sign in again. Unknown id: `404`. |
 | GET | `/admin/limits` | `{key: {value, default, overridden, min, max}}` for each of the 23 runtime limits below. `default` is the environment-derived value at process startup; `overridden` means a SQLite override exists (even if equal to the default). |
 | PATCH | `/admin/limits` | Partial `{key: positiveInteger \| null}` → 200, same description map as GET. `null` removes that override. Requires an admin and browser Origin or a Bearer with `write` scope. The entire candidate is validated and all overrides/audit rows commit atomically. Empty objects, unknown/read-only keys, invalid types, ranges or cross-field policy → `400 INVALID_LIMITS`; no partial writes. |
@@ -175,11 +175,24 @@ All paths here require an enabled admin, otherwise 401/403.
 | GET | `/site` | Public. `{origin: string \| null, source: 'admin' \| 'env' \| 'request', requestOrigin}`: the pinned site address (APP_ORIGIN) if any and this request's own origin; the login page uses it to explain mismatches. |
 | GET | `/admin/site` | Admin browser session. Site address view: `origin`, `source`, `adminOrigin`, `envOrigin`, `requestOrigin`, `effectiveOrigin`, `production`, `secureCookies`, `trustProxy`, `updatedAt`, `updatedBy`, `callbacks: [{provider, label, url}]`. |
 | PUT | `/admin/site` | `{origin: string \| null, confirm?: boolean}`; `null`/`""` clears the admin value (falls back to env `APP_ORIGIN`, then the request origin). Admin browser session + Origin required. Not a bare origin → `400 INVALID_ORIGIN`; differs from the caller's Origin without `confirm: true` → `409 ORIGIN_CONFIRM_REQUIRED {origin, current}`. Applies immediately. `ORIGIN_REJECTED` errors carry `{expected, received, source}` next to `code`. |
-| GET | `/admin/invites` | `{invites: [Invite]}` (no secret token) |
+| GET | `/admin/invites` | `{invites: [Invite]}` (no secret token); every invitation, including personal ones, with `status` (`active`/`used`/`expired`/`revoked`), `createdByEmail`, `joinSpace` |
 | POST | `/admin/invites` | `{spaceId, maxUses?: 1, expiresInHours?: 24}` → 201, `Invite & {token,url}`. Uses: 1–100; expiry: 1–720 hours. Admin must belong to target space. |
 | DELETE | `/admin/invites/:id` | 204; immediate revocation |
 
-`Invite = {id, spaceId, maxUses, uses, expiresAt, revoked: 0|1, createdBy}`.
+`Invite = {id, spaceId, maxUses, uses, expiresAt, revoked: 0|1, createdBy, joinSpace: 0|1, createdAt}`.
+`joinSpace: 0` is a **personal invitation**: single use, only opens registration (the new account gets its
+own private space and does not join the inviter's). It is spent only when it creates a new account, and a used
+invitation can no longer be revoked (`409 INVITE_USED`). `registration: 'closed'` blocks personal invitations too.
+
+### Personal invitations (any signed-in user)
+
+| Method | Path | Response / request |
+| --- | --- | --- |
+| GET | `/me/invites` | `{enabled, limit, used, remaining, registration, invites: [{id, status, expiresAt, createdAt, ...}]}`; own invitations only. `limit` = per-user override or the site default (admins are not limited) |
+| POST | `/me/invites` | `{expiresInHours?: 168}` (1–720) → 201 `{id, token, url, expiresAt}`. The token is shown once. `403 INVITES_DISABLED` when the admin switched it off; `409 INVITE_LIMIT_REACHED` at the limit. Browser session + Origin or a `write` Bearer |
+| DELETE | `/me/invites/:id` | 204; revokes an unused invitation (frees one slot). Own invitations only; `404` otherwise, `409 INVITE_USED` when spent |
+
+An invitation counts against the limit while it is used, or while it is neither revoked nor expired.
 The invitation token is returned only at creation; share the returned URL securely.
 Only its SHA-256 digest is stored. Expired/revoked invitation records may be removed
 by maintenance. There is no arbitrary member-join endpoint.
@@ -239,13 +252,29 @@ Rate counts remain per-process and reset on process restart.
 `GET /spaces` → `{spaces: [{id,name,ownerId,expiresAt:null}]}`. Includes the
 user's automatically created private space and spaces joined by invitation.
 
-`POST /rooms` (no body or account required) → 201,
-`{token, expiresAt, url}`. The token has 256 random bits and acts as the room's
-read/write capability. Share the URL only with participants. There is no room list,
-search or enumeration endpoint. Unknown and expired capabilities both return 404.
+`POST /rooms` (no account required; body optional `{deviceKey?, code?, pin?}`) → 201,
+`{token, expiresAt, url, reused, code, hasPin}`. The token is **6 random characters**
+(`A–Z a–z 0–9`, case-sensitive) and `url` is `/r/<token>`; it acts as the room's read/write
+capability. Older 43-character tokens and `/rooms/<token>` links keep working. Share the URL only with
+participants. There is no room list, search or enumeration endpoint. Unknown and expired capabilities
+both return 404. Because 6 characters are short, wrong guesses are rate limited per IP (see below).
 Authenticated users accessing a room still use the **room** quota, not user quota.
 
-Set `base` to `/spaces/:spaceId` or `/rooms/:roomToken` in the following table.
+**Room codes.** Every new room also gets a short room code, case-sensitive: a random 5-character code
+(no look-alike characters such as `0 O 1 l I`), or a custom code (`A–Z a–z 0–9 _ -`, 3–32 characters) given in
+`code`. A custom code may carry a `pin` (4–32 characters, stored as a scrypt hash; needs `code`). A taken custom
+code returns `409 CODE_TAKEN`; invalid values return `400 INVALID_CODE` / `INVALID_PIN` / `PIN_NEEDS_CODE`.
+
+| Method | Path | Body / response |
+| --- | --- | --- |
+| POST | `/rooms/enter` | `{code, pin?}` → `{token, expiresAt, code, hasPin}`. `token` is an *entry token* (`<id>.<proof>`) accepted anywhere a room token is. `404 NOT_FOUND` for unknown/expired codes, `401 PIN_REQUIRED`, `403 PIN_INVALID`, `429` with `Retry-After` after too many misses |
+| PUT | `/rooms/:room/code` | Room owner only (device key), `{deviceKey, code?, pin?}` → `{code, hasPin}`. Omit `code` for a new random one; `pin: null` removes the PIN. `403` for non-owners, `409 CODE_TAKEN` |
+
+Wrong codes and PINs are counted per client IP and per code with the `RATE_AUTH` budget; the room link itself
+does not need the PIN. Entry tokens stay valid when the code or PIN changes. Share-link tokens are also
+6 characters now (older long links stay valid).
+
+Set `base` to `/spaces/:spaceId` or `/rooms/:roomToken` (6-character tokens and entry tokens work too) in the following table.
 Space routes require membership; room routes require the unexpired capability.
 
 | Method | Path | Body / response |

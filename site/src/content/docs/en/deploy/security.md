@@ -19,8 +19,9 @@ title: Security model
 | Session | Random | SHA-256 | Browser cookie |
 | Personal access token | 256-bit | SHA-256 | `read` / `write` scopes, optional expiry, returned only once at creation |
 | Invitation | Random | SHA-256 | Limited uses, time-limited, revocable |
-| Temporary room | 256-bit | Hash | The link itself grants read/write |
-| Share link | 256-bit | SHA-256 | Read-only, time- and view-limited, revocable; every invalid case returns a uniform `404` |
+| Temporary room | 6 random characters (older rooms 256-bit) | Hash | The link itself grants read/write; 6 characters rely on rate limiting (wrong guesses counted per IP) |
+| Room code | 5 random (or 3–32 custom) | Hash | Case-sensitive; a custom code may have a PIN (scrypt); wrong guesses limited per IP and per code |
+| Share link | 6 random characters (older links 256-bit) | SHA-256 | Read-only, time- and view-limited, revocable; every invalid case returns a uniform `404` |
 | Device code | 256-bit | SHA-256 | Expires after 10 minutes, must be approved in a browser |
 
 There is no token enumeration endpoint. Tokens may not be passed in URL query parameters (share / room / invitation links are themselves capabilities).

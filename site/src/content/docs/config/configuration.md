@@ -71,7 +71,7 @@ title: 配置
 | --- | --- | --- |
 | `RATE_WINDOW_MS` | 60000 | 固定窗口长度 |
 | `RATE_GENERAL` | 240 | 每 IP / 账号 / 窗口的普通请求 |
-| `RATE_AUTH` | 20 | 认证请求，须小于 `RATE_GENERAL` |
+| `RATE_AUTH` | 20 | 认证请求（也是每个 IP / 每个房间码可猜错房间码或 PIN 的次数），须小于 `RATE_GENERAL` |
 | `RATE_INVITE` | 10 | 邀请请求，须小于 `RATE_GENERAL` |
 | `RATE_UPLOAD` | 30 | 上传 / 写请求，也是房间访问限制 |
 | `RATE_ROOM` | 10 | 房间创建 / 写请求，须小于 `RATE_UPLOAD` |

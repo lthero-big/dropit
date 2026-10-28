@@ -416,6 +416,37 @@ test('room new and join isolate items from the saved space', async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+test('room new --code/--pin and room enter use the short code, PIN and 6-character link', async () => {
+  const dir = await home();
+  const env = cliEnv(dir, { DROPIT_TOKEN: token });
+  const code = `cli-${Date.now().toString(36)}`;
+  const created = await run(['room', 'new', '--code', code, '--pin', '4821', '--json'], env);
+  assert.equal(created.code, 0, redact(created.stderr));
+  const room = JSON.parse(created.stdout) as { url?: string; code?: string; hasPin?: boolean };
+  assert.equal(room.code, code);
+  assert.equal(room.hasPin, true);
+  assert.match(new URL(room.url ?? '').pathname, /^\/r\/[A-Za-z0-9]{6}$/);
+  assert.equal(created.stdout.includes('4821'), false);
+  const taken = await run(['room', 'new', '--code', code], env);
+  assert.notEqual(taken.code, 0);
+  assert.equal((await run(['room', 'new', '--pin', '1234'], env)).code, 2);
+  const noPin = await run(['room', 'enter', code], env);
+  assert.notEqual(noPin.code, 0);
+  const wrong = await run(['room', 'enter', code, '--pin', '0000'], env);
+  assert.notEqual(wrong.code, 0);
+  const entered = await run(['room', 'enter', code, '--pin', '4821', '--json'], env);
+  assert.equal(entered.code, 0, redact(entered.stderr));
+  assert.equal(entered.stdout.includes('4821'), false);
+  const marker = `code-room-${Date.now()}`;
+  assert.equal((await run(['send', marker], env)).code, 0);
+  assert.equal((await run(['ls', '--json'], env)).stdout.includes(marker), true);
+  // the 6-character link opens the same room
+  const joined = await run(['room', 'join', room.url ?? '', '--json'], env);
+  assert.equal(joined.code, 0, redact(joined.stderr));
+  assert.equal((await run(['ls', '--json'], env)).stdout.includes(marker), true);
+  await rm(dir, { recursive: true, force: true });
+});
+
 test('watch reports a new item and exits 130 on SIGINT', { timeout: 15_000 }, async () => {
   const dir = await home();
   const child = spawn(process.execPath, ['--import', 'tsx', cli, 'watch'], {

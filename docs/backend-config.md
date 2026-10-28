@@ -37,7 +37,7 @@ Secure and HSTS is sent. Production on an http site address only logs a warning.
 | `MAX_ITEMS` | 1000 | Entries per space; rooms cap at min(100, MAX_ITEMS) |
 | `RATE_WINDOW_MS` | 60000 | Fixed rate window |
 | `RATE_GENERAL` | 240 | Requests/IP and account/window |
-| `RATE_AUTH` | 20 | Auth requests/IP/window; smaller than RATE_GENERAL |
+| `RATE_AUTH` | 20 | Auth requests/IP/window, also the budget of wrong room codes/PINs per IP and per code; smaller than RATE_GENERAL |
 | `RATE_INVITE` | 10 | Invite requests/IP and account/window; smaller than RATE_GENERAL |
 | `RATE_UPLOAD` | 30 | Upload/write requests/IP and account/window; also room access limit |
 | `RATE_ROOM` | 10 | Room creation/write requests/IP and account/window; smaller than RATE_UPLOAD |

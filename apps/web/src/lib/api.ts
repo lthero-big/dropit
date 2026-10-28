@@ -84,6 +84,15 @@ const labels: Record<string, string> = {
   PASSWORD_CHANGE_REQUIRED: '请先修改临时密码',
   CURRENT_PASSWORD_INVALID: '当前密码不对',
   PASSWORD_UNCHANGED: '新密码不能和当前密码相同',
+  INVALID_CODE: '房间码只能用字母、数字、- 和 _，3–32 位',
+  INVALID_PIN: 'PIN 需要 4–32 位，不能含控制字符',
+  PIN_NEEDS_CODE: 'PIN 需要配合自定义房间码使用',
+  PIN_REQUIRED: '这个房间需要 PIN',
+  PIN_INVALID: 'PIN 不对',
+  CODE_TAKEN: '这个房间码已被占用，换一个试试',
+  INVITE_LIMIT_REACHED: '邀请名额已用完',
+  INVITES_DISABLED: '管理员暂时关闭了邀请功能',
+  INVITE_USED: '这个邀请已被使用，不能撤销',
 }
 
 const oauthLoginErrors = new Set([

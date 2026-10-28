@@ -33,14 +33,15 @@ export function roomDeviceKey(): string {
   }
 }
 
-export type TempRoom = { token: string; expiresAt: number; url: string; reused?: boolean }
+export type TempRoom = { token: string; expiresAt: number; url: string; reused?: boolean; code?: string | null; hasPin?: boolean }
+export type RoomEntry = { token: string; expiresAt: number; code: string | null; hasPin: boolean }
 
 /** Open this browser's temporary room: the live one if it has one, otherwise a new one. */
-export async function openTempRoom(): Promise<TempRoom> {
+export async function openTempRoom(options: { code?: string; pin?: string } = {}): Promise<TempRoom> {
   const room = await api<TempRoom>('/api/rooms', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ deviceKey: roomDeviceKey() }),
+    body: JSON.stringify({ deviceKey: roomDeviceKey(), ...options }),
   })
   try {
     localStorage.setItem(OWN, room.token)
@@ -57,4 +58,22 @@ export function isOwnTempRoom(token: string): boolean {
   } catch {
     return false
   }
+}
+
+/** Enter a room by its code (and PIN). The returned token works wherever a room link token does. */
+export function enterRoomByCode(code: string, pin?: string): Promise<RoomEntry> {
+  return api<RoomEntry>('/api/rooms/enter', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, ...(pin ? { pin } : {}) }),
+  })
+}
+
+/** Owner only: change the room's code (blank = a fresh random one) and PIN. */
+export function setRoomCode(token: string, code?: string, pin?: string): Promise<{ code: string; hasPin: boolean }> {
+  return api(`/api/rooms/${encodeURIComponent(token)}/code`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceKey: roomDeviceKey(), ...(code ? { code } : {}), ...(pin ? { pin } : {}) }),
+  })
 }

@@ -171,7 +171,7 @@ describe('dropit web', () => {
     expect(screen.getByRole('link', { name: '使用 Google 继续' }).getAttribute('title')).toBe('用 Google 账号登录')
     fireEvent.click(screen.getByRole('button', { name: '进入临时房间' }))
     expect(await screen.findByRole('heading', { name: '临时房间' })).toBeTruthy()
-    expect(screen.getByText(/\/rooms\/room-token/)).toBeTruthy()
+    expect(screen.getByText(/\/r\/room-token/)).toBeTruthy()
   })
 
   it('keeps invitation text out of HTML and joins through the invite token', async () => {
@@ -335,7 +335,7 @@ describe('dropit web', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
     await waitFor(() => expect(calls.some((call) => call.url === '/api/admin/users/u2' && call.init?.method === 'PATCH')).toBe(true))
     const saved = calls.find((call) => call.url === '/api/admin/users/u2' && call.init?.method === 'PATCH')
-    expect(saved?.init?.body).toBe(JSON.stringify({ name: 'Bea', role: 'admin', disabled: false, quotaBytes: 5 * 1024 * 1024 }))
+    expect(saved?.init?.body).toBe(JSON.stringify({ name: 'Bea', role: 'admin', disabled: false, quotaBytes: 5 * 1024 * 1024, inviteLimit: null }))
   })
 
   it('labels invite state and shows read-only limits', async () => {
@@ -614,12 +614,12 @@ describe('dropit web', () => {
     fireEvent.click(within(popover).getByRole('button', { name: '放大' }))
     expect(screen.getByRole('img', { name: '房间二维码' }).getAttribute('width')).toBe('192')
     fireEvent.click(within(popover).getByRole('button', { name: '复制链接' }))
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringMatching(/\/rooms\/existing$/)))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringMatching(/\/r\/existing$/)))
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('dialog', { name: '房间二维码' })).toBeNull()
     expect(screen.queryByRole('button', { name: '新建房间' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '我的临时房间' }))
-    expect(await screen.findByText(/\/rooms\/room-1/)).toBeTruthy()
+    expect(await screen.findByText(/\/r\/room-1/)).toBeTruthy()
     expect(keys).toHaveLength(1)
     expect(keys[0]).toMatch(/^[A-Za-z0-9_-]{43}$/)
     // inside its own room the browser no longer offers to open it

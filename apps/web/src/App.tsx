@@ -8,6 +8,7 @@ import { AdminPage } from '@/pages/admin-page.tsx'
 import { DevicePage } from '@/pages/device-page.tsx'
 import { HomePage } from '@/pages/home-page.tsx'
 import { InvitePage } from '@/pages/invite-page.tsx'
+import { JoinPage } from '@/pages/join-page.tsx'
 import { LoginPage } from '@/pages/login-page.tsx'
 import { RoomPage } from '@/pages/room-page.tsx'
 import { SettingsPage } from '@/pages/settings-page.tsx'
@@ -34,7 +35,9 @@ export function App() {
           <Route path="/setup" element={<SetupPage />} />
           <Route path="/change-password" element={<ChangePasswordPage />} />
           <Route path="/invite/:token" element={<InvitePage />} />
+          <Route path="/r/:token" element={<RoomPage />} />
           <Route path="/rooms/:token" element={<RoomPage />} />
+          <Route path="/join" element={<JoinPage />} />
           <Route path="/s/:token" element={<SharePage />} />
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/settings" element={<SettingsPage />} />

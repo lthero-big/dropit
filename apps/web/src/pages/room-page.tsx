@@ -3,6 +3,8 @@ import { toDataURL } from 'qrcode'
 import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { ClipboardBoard } from '@/components/clipboard-board.tsx'
+import { EnterRoomForm } from '@/components/enter-room.tsx'
+import { RoomCodeBar } from '@/components/room-code.tsx'
 import { Shell } from '@/components/shell.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText } from '@/lib/api.ts'
@@ -22,7 +24,9 @@ export function RoomPage() {
   const [qrOpen, setQrOpen] = useState(false)
   const [qrLarge, setQrLarge] = useState(false)
   const qrRootRef = useRef<HTMLDivElement>(null)
-  const shareUrl = `${window.location.origin}/rooms/${token}`
+  // A token with a dot came from entering the room code: it is not the room link, so share the code instead.
+  const entered = token.includes('.')
+  const shareUrl = entered ? `${window.location.origin}/join${scope?.code ? `?code=${encodeURIComponent(scope.code)}` : ''}` : `${window.location.origin}/r/${token}`
 
   useEffect(() => {
     let cancelled = false
@@ -86,7 +90,7 @@ export function RoomPage() {
   async function openMine() {
     try {
       const room = await openTempRoom()
-      navigate(`/rooms/${room.token}`)
+      navigate(`/r/${room.token}`)
     } catch (error) {
       toast.error(errorText(error))
     }
@@ -105,6 +109,10 @@ export function RoomPage() {
             <Link to="/">返回</Link>
           </Button>
         </div>
+        <section className="mt-8 max-w-sm border-t border-line-1 pt-5">
+          <h2 className="mb-3 text-sm font-medium">有房间码？</h2>
+          <EnterRoomForm />
+        </section>
       </Shell>
     )
   }
@@ -176,6 +184,13 @@ export function RoomPage() {
               </div>
             ) : null}
           </div>
+          <RoomCodeBar
+            token={token}
+            code={scope.code ?? null}
+            hasPin={Boolean(scope.hasPin)}
+            owner={!entered && isOwnTempRoom(token)}
+            onChanged={(next) => setScope((current) => (current ? { ...current, ...next } : current))}
+          />
           <ClipboardBoard
             base={`/api/rooms/${token}`}
             title="临时房间"

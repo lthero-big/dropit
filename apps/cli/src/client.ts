@@ -407,9 +407,14 @@ export class Client {
     return { id: share.id, url: share.url, expiresAt: share.expiresAt, maxViews: share.maxViews, views: share.views };
   }
 
-  async createRoom(): Promise<{ token: string; url: string; expiresAt: number }> {
-    const body = await this.send('POST', '/api/rooms');
-    return body.body as { token: string; url: string; expiresAt: number };
+  async createRoom(options: { code?: string; pin?: string } = {}): Promise<{ token: string; url: string; expiresAt: number; code?: string | null; hasPin?: boolean }> {
+    const body = await this.send('POST', '/api/rooms', options.code || options.pin ? { json: options } : undefined);
+    return body.body as { token: string; url: string; expiresAt: number; code?: string | null; hasPin?: boolean };
+  }
+
+  async enterRoom(code: string, pin?: string): Promise<{ token: string; expiresAt: number }> {
+    const body = await this.send('POST', '/api/rooms/enter', { json: { code, ...(pin ? { pin } : {}) } });
+    return body.body as { token: string; expiresAt: number };
   }
 
   async roomInfo(roomToken: string): Promise<{ id: string; name: string; expiresAt: number | null }> {

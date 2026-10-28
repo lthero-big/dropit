@@ -44,7 +44,7 @@ pnpm workspace 管理三个包，根目录 `pnpm lint / typecheck / test / build
 
 ## 前端
 
-- 路由：`/`（剪贴板）、`/login`、`/invite/:token`、`/rooms/:token`、`/s/:token`（分享页）、`/admin`、`/settings`、`/device`。
+- 路由：`/`（剪贴板）、`/login`、`/invite/:token`、`/r/:token`（旧的 `/rooms/:token` 仍可用）、`/join`、`/s/:token`（分享页）、`/admin`、`/settings`、`/device`。
 - 通过 WebSocket 接收 snapshot 与增量事件，断线指数退避重连。
 - 大文件分片上传，支持中断续传。
 

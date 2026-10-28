@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button.tsx'
+import { EnterRoomForm } from '@/components/enter-room.tsx'
 import { api, errorText, loginErrorText } from '@/lib/api.ts'
 import { openTempRoom } from '@/lib/temp-room.ts'
 import { takeReturn } from '@/lib/machine.ts'
@@ -71,7 +72,7 @@ export function LoginPage({ invite }: { invite?: string }) {
     setBusy(true)
     try {
       const room = await openTempRoom()
-      navigate(`/rooms/${room.token}`)
+      navigate(`/r/${room.token}`)
     } catch (error) {
       toast.error(errorText(error))
     } finally {
@@ -203,6 +204,12 @@ export function LoginPage({ invite }: { invite?: string }) {
           <Button type="button" onClick={() => void enterRoom()} disabled={busy}>
             进入临时房间
           </Button>
+        )}
+        {invite ? null : (
+          <section className="mt-6 border-t border-line-1 pt-5">
+            <h2 className="mb-3 text-sm font-medium">有房间码？</h2>
+            <EnterRoomForm />
+          </section>
         )}
       </div>
     </main>

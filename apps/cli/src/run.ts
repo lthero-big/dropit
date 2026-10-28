@@ -49,16 +49,18 @@ function report(io: Io, json: boolean, error: unknown, secrets: readonly string[
   return cli.exitCode;
 }
 
+// A room link token is 6 characters (/r/<token>); older rooms use 43 (/rooms/<token>); entering by code gives <id>.<proof>.
+const ROOM_TOKEN = /^(?:[A-Za-z0-9]{6}|[A-Za-z0-9_-]{20,128}|[0-9a-f-]{36}\.[A-Za-z0-9_-]{43})$/;
 export function parseRoomToken(input: string): string {
   const trimmed = input.trim();
-  if (/^[A-Za-z0-9_-]{20,128}$/.test(trimmed)) return trimmed;
+  if (ROOM_TOKEN.test(trimmed)) return trimmed;
   let url: URL;
   try { url = new URL(trimmed); }
   catch { throw new CliError('USAGE', '无法识别房间链接', 2); }
   const parts = url.pathname.split('/').filter(Boolean);
-  const index = parts.lastIndexOf('rooms');
+  const index = Math.max(parts.lastIndexOf('rooms'), parts.lastIndexOf('r'));
   const token = decodeURIComponent(index >= 0 ? parts[index + 1] ?? '' : parts.at(-1) ?? '');
-  if (!/^[A-Za-z0-9_-]{20,128}$/.test(token)) throw new CliError('USAGE', '无法识别房间链接', 2);
+  if (!ROOM_TOKEN.test(token)) throw new CliError('USAGE', '无法识别房间链接', 2);
   return token;
 }
 
@@ -188,12 +190,25 @@ async function dispatch(parsed: Parsed, env: NodeJS.ProcessEnv, io: Io, secrets:
   }
 
   if (command.kind === 'room-new') {
-    const room = await client.createRoom();
+    if (command.pin) secrets.push(command.pin);
+    const room = await client.createRoom({ code: command.code, pin: command.pin });
     secrets.push(room.token);
     file.roomToken = room.token;
     if (base) file.url = base;
     await persist();
-    emit(io, json, { url: room.url, expiresAt: room.expiresAt }, `房间已创建。后续命令默认发往这个房间。\n${room.url}`);
+    emit(io, json, { url: room.url, expiresAt: room.expiresAt, code: room.code ?? null, hasPin: Boolean(room.hasPin) },
+      `房间已创建。后续命令默认发往这个房间。\n${room.url}${room.code ? `\n房间码 ${room.code}${room.hasPin ? '（需要 PIN）' : ''}` : ''}`);
+    return;
+  }
+
+  if (command.kind === 'room-enter') {
+    if (command.pin) secrets.push(command.pin);
+    const entry = await client.enterRoom(command.code, command.pin);
+    secrets.push(entry.token);
+    file.roomToken = entry.token;
+    if (base) file.url = base;
+    await persist();
+    emit(io, json, { ok: true, expiresAt: entry.expiresAt }, '已用房间码进入临时房间。后续命令默认发往该房间，用 --space 可以改回空间。');
     return;
   }
 

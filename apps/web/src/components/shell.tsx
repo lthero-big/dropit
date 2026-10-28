@@ -82,7 +82,7 @@ export function Shell({
   async function newRoom() {
     try {
       const room = await openTempRoom()
-      navigate(`/rooms/${room.token}`)
+      navigate(`/r/${room.token}`)
     } catch (error) {
       toast.error(errorText(error))
     }
@@ -148,6 +148,9 @@ export function Shell({
             <button type="button" className="inline-flex min-h-10 min-w-10 items-center" style={hitTarget} onClick={() => void newRoom()}>
               临时房间
             </button>
+            <Link to="/join" className={location.pathname === '/join' ? 'border-b border-primary' : ''}>
+              房间码
+            </Link>
           </nav>
           <div className="ml-auto flex shrink-0 items-center gap-2">
             <DropdownMenu>

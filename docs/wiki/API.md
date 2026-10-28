@@ -23,7 +23,7 @@
 | 设备码登录 | `POST /auth/device/authorize`、`POST /auth/device/token`、`GET /auth/device`、`POST /auth/device/approve`、`POST /auth/device/deny` |
 | 登录设备 | `GET /sessions`、`DELETE /sessions/:id`、`POST /sessions/revoke-others`（仅浏览器会话） |
 | 管理 | `/admin/users`、`/admin/users/:id/logout`、`GET /admin/users/:id/sessions`、`DELETE /admin/sessions/:id`、`/admin/invites`、`/admin/tokens`、`/admin/limits`、`/admin/limits/audit`、`GET /admin/update`、`POST /admin/update/check`、`GET/PUT /admin/site`（站点地址；公开的 `GET /site`） |
-| 空间与房间 | `GET /spaces`、`POST /rooms` |
+| 空间与房间 | `GET /spaces`、`POST /rooms`（可带 `code`/`pin`）、`POST /rooms/enter`、`PUT /rooms/:room/code`；个人邀请 `GET/POST /me/invites`、`DELETE /me/invites/:id` |
 | 条目（`base` = `/spaces/:id` 或 `/rooms/:token`） | `GET base`、`GET base/items`、`POST base/items/text`、`POST base/items/file`、`PATCH base/items/:id`、`PATCH base/items/:id/labels`、`DELETE base/items/:id`、`GET base/items/:id/{download,thumbnail,preview,media}` |
 | 分组 | `GET/POST base/groups`、`PATCH/DELETE base/groups/:name` |
 | 分片上传 | `POST base/uploads`、`GET base/uploads/:id`、`PUT base/uploads/:id/chunks/:index`、`POST base/uploads/:id/complete`、`DELETE base/uploads/:id` |

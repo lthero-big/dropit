@@ -40,6 +40,9 @@ export interface ScopeInfo {
   id: string
   name: string
   expiresAt: number | null
+  /** Temporary rooms only (auth step 3). */
+  code?: string | null
+  hasPin?: boolean
   maxFileBytes: number
   quotaBytes: number
 }
@@ -75,6 +78,30 @@ export interface Invite {
   expiresAt: number
   revoked: number
   createdBy: string
+  /** Auth step 3: 0 = personal invite (opens registration only). Older servers omit it. */
+  joinSpace?: number
+  createdByEmail?: string | null
+  status?: PersonalInvite['status']
+}
+
+export interface PersonalInvite {
+  id: string
+  maxUses: number
+  uses: number
+  expiresAt: number
+  revoked: number
+  createdAt: number | null
+  status: 'open' | 'used' | 'expired' | 'revoked'
+}
+
+export interface PersonalInvites {
+  enabled: boolean
+  /** null = unlimited (admins). */
+  limit: number | null
+  used: number
+  remaining: number | null
+  registration: 'closed' | 'invite' | 'open'
+  invites: PersonalInvite[]
 }
 
 export interface InviteCreated extends Invite {
@@ -83,7 +110,10 @@ export interface InviteCreated extends Invite {
 }
 
 export interface InvitePreview {
-  spaceName: string
+  /** Auth step 3: a personal invite only opens registration (no space). */
+  personal?: boolean
+  inviterName?: string | null
+  spaceName: string | null
   expiresAt: number
   remainingUses: number
 }
@@ -92,6 +122,10 @@ export interface AdminUser extends User {
   usedBytes: number
   quotaBytes: number
   quotaOverride: number | null
+  /** Auth step 3: per-user invite limit override (null = site default). */
+  inviteLimit?: number | null
+  inviteLimitEffective?: number
+  invitesUsed?: number
   hasPassword?: boolean
   mustChangePassword?: boolean
   providers?: string[]

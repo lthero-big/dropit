@@ -298,7 +298,9 @@ export function AdminPage() {
                         const state = inviteState(invite, now)
                         return (
                           <tr key={invite.id} className="border-b border-line-1 last:border-b-0">
-                            <td className={tdClass} data-l="空间">{space ? spaceLabel(space, me.user.id, spaces) : invite.spaceId.slice(0, 8)}</td>
+                            <td className={tdClass} data-l="空间">
+                              {invite.joinSpace === 0 ? `个人邀请 · ${invite.createdByEmail ?? '未知'}` : space ? spaceLabel(space, me.user.id, spaces) : invite.spaceId.slice(0, 8)}
+                            </td>
                             <td className={`${tdClass} tabular-nums`} data-l="使用">{invite.uses}/{invite.maxUses}</td>
                             <td className={`${tdClass} text-fg-2`} data-l="剩余">{formatRemain(invite.expiresAt - now)}</td>
                             <td className={tdClass} data-l="状态">
@@ -437,6 +439,7 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
   const [role, setRole] = useState<'admin' | 'user'>(user?.role ?? 'user')
   const [disabled, setDisabled] = useState(user ? user.disabled !== 0 : false)
   const [useDefault, setUseDefault] = useState(user ? user.quotaOverride == null : true)
+  const [inviteLimit, setInviteLimit] = useState(user?.inviteLimit == null ? '' : String(user.inviteLimit))
   const [quotaMb, setQuotaMb] = useState(user ? String(Math.max(1, Math.round(user.quotaBytes / (1024 * 1024)))) : '1024')
   const [busy, setBusy] = useState(false)
   const [withPassword, setWithPassword] = useState(false)
@@ -467,6 +470,14 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
     } catch {
       toast.error(`配额需为 1–${quotaCapMb} MB`)
       return
+    }
+    let inviteLimitValue: number | null = null
+    if (!creating && inviteLimit.trim() !== '') {
+      inviteLimitValue = Number(inviteLimit)
+      if (!/^\d+$/.test(inviteLimit.trim()) || !Number.isSafeInteger(inviteLimitValue) || inviteLimitValue > 1000) {
+        toast.error('邀请上限需为 0–1000 的整数，留空使用默认值')
+        return
+      }
     }
     setBusy(true)
     try {
@@ -502,6 +513,7 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
             role,
             disabled,
             quotaBytes,
+            inviteLimit: inviteLimitValue,
           }),
         })
         toast.success('已保存')
@@ -591,6 +603,13 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
             <input className={fieldClass} inputMode="numeric" value={quotaMb} disabled={useDefault} onChange={(event) => setQuotaMb(event.target.value)} />
           </label>
           <Switch className="self-end" label="使用安装默认配额" description="关闭后可单独设置这个用户的配额" checked={useDefault} onChange={(event) => setUseDefault(event.target.checked)} />
+          {creating ? null : (
+            <label className={labelClass}>
+              邀请上限（留空使用默认值 {user?.inviteLimitEffective !== undefined && user.inviteLimit == null ? `：${user.inviteLimitEffective}` : ''}）
+              <input className={fieldClass} inputMode="numeric" value={inviteLimit} placeholder="默认" onChange={(event) => setInviteLimit(event.target.value)} />
+              <span className="text-[11px] text-muted-foreground">已用 {user?.invitesUsed ?? 0}</span>
+            </label>
+          )}
           {creating ? (
             <Switch label="生成临时密码" description="创建后显示一次；对方首次登录必须修改。关闭则只能用 OAuth 绑定。" checked={withPassword} onChange={(event) => setWithPassword(event.target.checked)} />
           ) : null}

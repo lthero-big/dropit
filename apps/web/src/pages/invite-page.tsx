@@ -45,7 +45,9 @@ export function InvitePage() {
   return (
     <div>
       <p className="mx-auto mt-10 max-w-md rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">
-        登录成功后自动加入「{preview.spaceName === 'Private space' ? '私人空间' : preview.spaceName}」· 剩余 {preview.remainingUses} 次 ·{' '}
+        {preview.personal
+          ? `${preview.inviterName ? `${preview.inviterName} 邀请你` : '你被邀请'}注册 dropit，你会得到自己的私人空间 · 剩余 ${preview.remainingUses} 次 · `
+          : `登录成功后自动加入「${preview.spaceName === 'Private space' ? '私人空间' : preview.spaceName}」· 剩余 ${preview.remainingUses} 次 · `}
         {formatRemain(preview.expiresAt - now)}
       </p>
       <LoginPage invite={token} />
