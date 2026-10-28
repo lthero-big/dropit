@@ -107,7 +107,7 @@ export function DeviceSessions({ userId, onSelfSignedOut }: { userId?: string; o
           const title = sessionTitle(session)
           const seen = session.lastSeenAt ?? session.createdAt
           return (
-            <li key={session.id} className="flex flex-wrap items-center gap-3 rounded-md border border-line-2 px-3 py-3" data-session-id={session.id}>
+            <li key={session.id} className="flex flex-wrap items-center gap-3 rounded-md border border-line-1 bg-surface-0 px-3 py-3" data-session-id={session.id}>
               <span className="grid size-9 shrink-0 place-items-center rounded-md border border-line-1 bg-surface-2 text-fg-2" aria-hidden="true">
                 <DeviceGlyph kind={sessionKind(session)} className="size-4" />
               </span>

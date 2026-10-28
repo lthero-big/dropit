@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App.tsx'
 import { ThemeProvider } from './components/theme-provider.tsx'
 
-// RHEA-190 m11: 登录方式 (bind / unbind) and admin OAuth 配置 in 设置.
+// RHEA-190 m11: 登录方式 (bind / unbind) in 设置; admin OAuth 配置 (moved to 管理 in m22).
 class FakeSocket {
   static instances: FakeSocket[] = []
   onopen = null
@@ -88,7 +88,8 @@ describe('settings: login methods', () => {
     const section = await screen.findByRole('region', { name: '登录方式' })
     expect(await within(section).findByText(/ada@gmail\.com/)).toBeTruthy()
     // Users never see the admin OAuth section.
-    expect(screen.queryByRole('region', { name: 'OAuth 配置（管理员）' })).toBeNull()
+    expect(screen.queryByRole('region', { name: 'OAuth 配置' })).toBeNull()
+    expect(document.querySelector('[data-admin-moved]')).toBeNull()
     expect(calls.some((call) => call.url === '/api/admin/oauth')).toBe(false)
     const google = section.querySelector('[data-provider="google"]') as HTMLElement
     fireEvent.click(within(google).getByRole('button', { name: '解绑' }))
@@ -100,7 +101,52 @@ describe('settings: login methods', () => {
   })
 })
 
-describe('settings: OAuth configuration (admin)', () => {
+describe('admin: OAuth configuration', () => {
+  it('is no longer on 设置; admins get a link to 管理 → OAuth instead', async () => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json(me('admin'))
+      if (url === '/api/tokens') return json({ tokens: [] })
+      if (url === '/api/me/identities') return json({ identities: [{ provider: 'github', email: 'ada@example.com', linkedAt: 1 }], available: ['github'] })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/settings')
+    expect(await screen.findByRole('heading', { name: '设置' })).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'OAuth 配置' })).toBeNull()
+    const moved = document.querySelector('[data-admin-moved]') as HTMLElement
+    expect(within(moved).getByRole('link', { name: /前往管理/ }).getAttribute('href')).toBe('/admin?tab=oauth')
+    expect(calls.some((call) => call.url === '/api/admin/oauth')).toBe(false)
+  })
+
+  it('groups 管理 into categories and keeps the tab in the URL', async () => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json(me('admin'))
+      if (url === '/api/admin/oauth') return json({ origin: 'https://dropit.example', providers: [provider('github')] })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/admin')
+    const tablist = await screen.findByRole('tablist', { name: '管理分类' })
+    expect(within(tablist).getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['邀请', '用户', '用量', '限制', 'OAuth 登录', '更新'])
+    const nav = document.querySelector('[data-side-nav]') as HTMLElement
+    for (const group of ['成员与访问', '资源与限制', '登录与安全', '系统']) expect(within(nav).getByText(group)).toBeTruthy()
+    fireEvent.click(within(tablist).getByRole('tab', { name: 'OAuth 登录' }))
+    expect(window.location.search).toBe('?tab=oauth')
+    expect(await screen.findByRole('region', { name: 'OAuth 配置' })).toBeTruthy()
+    expect(within(tablist).getByRole('tab', { name: 'OAuth 登录' }).getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('sends old /settings#oauth links to 管理', async () => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json(me('admin'))
+      if (url === '/api/tokens') return json({ tokens: [] })
+      if (url === '/api/admin/oauth') return json({ origin: 'https://dropit.example', providers: [provider('github')] })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/settings#oauth')
+    expect(await screen.findByRole('region', { name: 'OAuth 配置' })).toBeTruthy()
+    expect(window.location.pathname).toBe('/admin')
+    expect(window.location.search).toBe('?tab=oauth')
+  })
+
   it('shows the callback URL to copy, saves id + secret without echoing it and verifies', async () => {
     let google = provider('google')
     const github = provider('github', { source: 'env', enabled: true, active: true, clientId: 'env-id', secretSet: true, secretHint: '••••••••cdef', envConfigured: true })
@@ -123,8 +169,8 @@ describe('settings: OAuth configuration (admin)', () => {
       }
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
-    renderAt('/settings')
-    const section = await screen.findByRole('region', { name: 'OAuth 配置（管理员）' })
+    renderAt('/admin?tab=oauth')
+    const section = await screen.findByRole('region', { name: 'OAuth 配置' })
     const card = () => section.querySelector('[data-provider="google"]') as HTMLElement
     expect(within(card()).getByRole('status').textContent).toBe('未配置')
     const callback = within(card()).getByLabelText('回调地址（Callback / Redirect URI）') as HTMLInputElement

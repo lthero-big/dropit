@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
+import { Panel, StatusPill, fieldClass, selectClass } from '@/components/settings-ui.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText } from '@/lib/api.ts'
 import {
@@ -75,16 +76,15 @@ export function LimitsEditor({ limits, onChange }: { limits: AdminLimits; onChan
   return (
     <div>
       <LimitsSubnav counts={Object.fromEntries(groups.map((group) => [group, LIMIT_SPECS.filter((spec) => spec.group === group).length]))} auditCount={entries.length} />
-      <div className="mb-4 rounded-md border border-line-1 border-l border-l-brand bg-surface-2 px-3 py-2 text-sm">
+      <div className="mb-5 rounded-md border-l-2 border-l-line-3 bg-surface-2 px-3 py-2 text-sm text-fg-2">
         <p>覆盖值保存在数据库，重启后保留；只读项仍需改环境变量。</p>
         <p className="mt-1 text-xs text-muted-foreground">
           只读项包括 APP_ORIGIN、TRUST_PROXY、DATA_DIR、OAuth 凭据、RATE_TOKEN 和清理间隔。调低上限或配额不会删除已有内容。保留时间只影响新条目和新房间，会话时长只影响新会话。
         </p>
       </div>
       {groups.map((group) => (
-        <section key={group} id={GROUP_ANCHOR[group]} data-limit-group={group} className="mb-6 scroll-mt-32">
-          <h2 className="text-xs font-medium">{group}</h2>
-          <ul className="border-t border-line-1">
+        <Panel key={group} id={GROUP_ANCHOR[group]} data-limit-group={group} className="scroll-mt-32" title={group} description={GROUP_HINT[group]} flush>
+          <ul>
             {LIMIT_SPECS.filter((spec) => spec.group === group).map((spec) => (
               <LimitRow
                 key={`${spec.key}:${limits[spec.key].value}:${limits[spec.key].overridden}`}
@@ -95,17 +95,16 @@ export function LimitsEditor({ limits, onChange }: { limits: AdminLimits; onChan
               />
             ))}
           </ul>
-        </section>
+        </Panel>
       ))}
-      <section id={GROUP_ANCHOR.变更记录} data-limit-group="变更记录" className="scroll-mt-32">
-        <h2 className="text-xs font-medium">变更记录</h2>
-        {auditError ? <p role="alert" className="mt-3 text-sm text-destructive">{auditError}</p> : null}
-        {auditLoading ? <p className="mt-3 text-sm text-muted-foreground">正在加载变更记录…</p> : null}
-        {!auditLoading && entries.length === 0 && !auditError ? <p className="mt-3 text-sm text-muted-foreground">还没有修改记录。</p> : null}
+      <Panel id={GROUP_ANCHOR.变更记录} data-limit-group="变更记录" className="scroll-mt-32" title="变更记录" description={GROUP_HINT.变更记录}>
+        {auditError ? <p role="alert" className="text-sm text-destructive">{auditError}</p> : null}
+        {auditLoading ? <p className="text-sm text-muted-foreground">正在加载变更记录…</p> : null}
+        {!auditLoading && entries.length === 0 && !auditError ? <p className="text-sm text-muted-foreground">还没有修改记录。</p> : null}
         {entries.length > 0 ? (
-          <ul className="mt-3 border-t border-line-1" aria-label="变更记录">
+          <ul className="-my-3" aria-label="变更记录">
             {entries.map((entry) => (
-              <li key={entry.id} className="grid gap-1 border-b border-line-2 py-3 text-sm sm:grid-cols-[minmax(0,1.4fr)_9rem_minmax(0,1.4fr)] sm:items-baseline sm:gap-3">
+              <li key={entry.id} className="grid gap-1 border-b border-line-1 py-3 text-sm last:border-b-0 sm:grid-cols-[minmax(0,1.4fr)_9rem_minmax(0,1.4fr)] sm:items-baseline sm:gap-3">
                 <span className="truncate">{entry.actorEmail || entry.actorId}</span>
                 <time dateTime={new Date(entry.createdAt).toISOString()} className="text-xs text-muted-foreground">{formatStamp(entry.createdAt)}</time>
                 <span>
@@ -121,7 +120,7 @@ export function LimitsEditor({ limits, onChange }: { limits: AdminLimits; onChan
             更早的记录
           </Button>
         ) : null}
-      </section>
+      </Panel>
     </div>
   )
 }
@@ -189,7 +188,7 @@ function LimitsSubnav({ counts, auditCount }: { counts: Record<string, number>; 
     <nav
       aria-label="限制分类"
       data-limits-subnav=""
-      className="sticky top-14 z-20 -mx-1 mb-5 flex gap-1 overflow-x-auto border-b border-line-1 bg-[var(--bg)] px-1 py-1.5"
+      className="sticky top-14 z-20 mb-4 flex gap-1 overflow-x-auto rounded-lg border border-line-1 bg-[color-mix(in_oklab,var(--bg)_92%,transparent)] p-1 backdrop-blur-md"
     >
       {targets.map((target) => {
         const current = active === target
@@ -200,8 +199,8 @@ function LimitsSubnav({ counts, auditCount }: { counts: Record<string, number>; 
             href={`#${GROUP_ANCHOR[target]}`}
             aria-current={current ? 'location' : undefined}
             title={GROUP_HINT[target]}
-            className={`inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-md border px-3 text-xs font-medium no-underline ${
-              current ? 'border-line-2 bg-surface-2 text-fg' : 'border-transparent text-fg-2 hover:bg-surface-2'
+            className={`inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-md border px-3 text-xs font-medium no-underline transition-colors ${
+              current ? 'border-line-2 bg-surface-1 text-fg shadow-elev-1' : 'border-transparent text-fg-2 hover:border-line-1 hover:bg-surface-2 hover:text-fg'
             }`}
             onClick={(event) => {
               event.preventDefault()
@@ -288,58 +287,60 @@ function LimitRow({
   }
 
   return (
-    <li data-limit={spec.key} className="border-b border-line-2 py-3">
-      <form onSubmit={save}>
-        <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-          <label htmlFor={`limit-${spec.key}`} className="text-xs font-medium">
-            {spec.label}
-          </label>
-          <span className={`text-[11px] font-medium ${field.overridden ? 'text-primary' : 'text-muted-foreground'}`}>
-            {field.overridden ? '已覆盖' : '未覆盖'}
-          </span>
-        </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          <span>当前 {formatLimit(spec.key, field.value)}</span>
-          <span aria-hidden="true"> · </span>
-          <span>默认 {formatLimit(spec.key, field.default)}</span>
-        </p>
-        <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
-          <input
-            id={`limit-${spec.key}`}
-            className="min-h-10 w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium text-foreground sm:max-w-40"
-            inputMode={unit === 'count' ? 'numeric' : 'decimal'}
-            autoComplete="off"
-            aria-invalid={error ? true : undefined}
-            aria-describedby={error ? errorId : undefined}
-            disabled={busy}
-            value={raw}
-            onChange={(event) => {
-              setRaw(event.target.value)
-              setError(null)
-            }}
-          />
-          {units.length > 1 ? (
-            <select
-              className="min-h-10 w-full rounded-md border border-line-2 bg-background px-2 py-2 text-sm font-medium sm:w-28"
-              aria-label={`${spec.label}单位`}
-              disabled={busy}
-              value={unit}
-              onChange={(event) => changeUnit(event.target.value as LimitUnit)}
-            >
-              {units.map((choice) => (
-                <option key={choice} value={choice}>{UNIT_LABEL[choice]}</option>
-              ))}
-            </select>
-          ) : null}
-          <div className="flex gap-2">
-            <Button type="submit" className="min-h-10 flex-1 sm:flex-none" disabled={busy || unchanged}>保存</Button>
-            <Button type="button" variant="outline" className="min-h-10 flex-1 sm:flex-none" disabled={busy || !field.overridden} onClick={restore}>
-              恢复默认
-            </Button>
+    <li data-limit={spec.key} className="border-b border-line-1 px-4 py-4 last:border-b-0 sm:px-5">
+      <form onSubmit={save} className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-start lg:gap-6">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor={`limit-${spec.key}`} className="text-sm font-medium text-fg">
+              {spec.label}
+            </label>
+            <StatusPill tone={field.overridden ? 'brand' : 'neutral'}>{field.overridden ? '已覆盖' : '未覆盖'}</StatusPill>
           </div>
+          <p className="mt-1 text-xs text-fg-3">
+            <span>当前 {formatLimit(spec.key, field.value)}</span>
+            <span aria-hidden="true"> · </span>
+            <span>默认 {formatLimit(spec.key, field.default)}</span>
+          </p>
+          {spec.hint ? <p className="mt-1 text-xs text-muted-foreground">{spec.hint}</p> : null}
         </div>
-        {spec.hint ? <p className="mt-2 text-xs text-muted-foreground">{spec.hint}</p> : null}
-        {error ? <p id={errorId} role="alert" className="mt-2 text-xs text-destructive">{error}</p> : null}
+        <div className="grid gap-2">
+          <div className="flex flex-wrap items-center gap-2 lg:flex-nowrap lg:justify-end">
+            <input
+              id={`limit-${spec.key}`}
+              className={`${fieldClass} w-full tabular-nums sm:w-32`}
+              inputMode={unit === 'count' ? 'numeric' : 'decimal'}
+              autoComplete="off"
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? errorId : undefined}
+              disabled={busy}
+              value={raw}
+              onChange={(event) => {
+                setRaw(event.target.value)
+                setError(null)
+              }}
+            />
+            {units.length > 1 ? (
+              <select
+                className={`${selectClass} w-full sm:w-24`}
+                aria-label={`${spec.label}单位`}
+                disabled={busy}
+                value={unit}
+                onChange={(event) => changeUnit(event.target.value as LimitUnit)}
+              >
+                {units.map((choice) => (
+                  <option key={choice} value={choice}>{UNIT_LABEL[choice]}</option>
+                ))}
+              </select>
+            ) : null}
+            <div className="flex gap-2">
+              <Button type="submit" className="h-10 flex-1 sm:flex-none" disabled={busy || unchanged}>保存</Button>
+              <Button type="button" variant="outline" className="h-10 flex-1 sm:flex-none" disabled={busy || !field.overridden} onClick={restore}>
+                恢复默认
+              </Button>
+            </div>
+          </div>
+          {error ? <p id={errorId} role="alert" className="text-xs text-destructive lg:text-right">{error}</p> : null}
+        </div>
       </form>
     </li>
   )
