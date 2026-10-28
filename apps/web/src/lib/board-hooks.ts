@@ -105,3 +105,18 @@ export const OTHERS_KEY = '#others'
 export function onlineDeviceCount(count: number, peers: ItemDevice[] | null, dots: PresenceDot[]): number {
   return peers ? dots.filter((dot) => dot.online).length : count
 }
+
+/** Phones / tablets: a coarse primary pointer or no hover. They get swipe gestures, never pin-drag or drag-to-group. */
+const TOUCH_QUERY = '(pointer: coarse), (hover: none)'
+
+export function useCoarsePointer(): boolean {
+  const [coarse, setCoarse] = useState(() => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia(TOUCH_QUERY).matches)
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const query = window.matchMedia(TOUCH_QUERY)
+    const onChange = () => setCoarse(query.matches)
+    query.addEventListener?.('change', onChange)
+    return () => query.removeEventListener?.('change', onChange)
+  }, [])
+  return coarse
+}
