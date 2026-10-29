@@ -67,6 +67,8 @@ docker logs dropit 2>&1 | grep 'setup code'
 
 镜像默认 `NODE_ENV=production`。设 `APP_ORIGIN=https://你的域名`（或登录后在「管理 → 站点地址」填写，页面设置优先于环境变量），容器只绑定 `127.0.0.1:8787`，由 nginx 等反向代理终止 TLS 并转发 WebSocket；`TRUST_PROXY` 填反代地址（如 `loopback`）。完整的 compose、nginx、升级与备份说明见 [部署文档](https://lthero-big.github.io/dropit/deploy/deployment/)。
 
+从源码构建的 compose 部署用 `./scripts/update.sh --docker` 升级：它会沿用正在运行的容器所用的 compose 文件（也可 `--compose-file compose.prod.yml`），升级前自动备份数据，发现会换到另一个数据卷时直接拒绝，升级后自检失败会自动切回旧镜像。先用 `--dry-run` 看计划。
+
 ### 从源码运行
 
 ```bash

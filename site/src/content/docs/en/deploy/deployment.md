@@ -90,7 +90,7 @@ Database migrations run automatically and atomically at startup, based on `user_
 | Install method | Upgrade command |
 | --- | --- |
 | Docker image (`image: lthero1/dropit:latest`) | `docker compose pull && docker compose up -d` |
-| Docker Compose built from source | `./scripts/update.sh --docker` |
+| Docker Compose built from source | `./scripts/update.sh --docker` (reuses the current compose file, see below) |
 | Source install (pnpm + systemd / pm2) | `./scripts/update.sh` |
 
 The bundled `docker-compose.yml` contains both `image: lthero1/dropit:latest` and `build:`: `docker compose pull` pulls the Docker Hub image, while `docker compose up -d --build` builds from source and tags it with the same name. Pick one and don't mix them, otherwise the next `pull` will overwrite your local build with the Hub image.
@@ -124,6 +124,20 @@ It uses the still-maintained `nickfedor/watchtower` (the original `containrrr/wa
 
 If your own compose file already runs a watchtower, just add the same label to dropit; there's no need to run a second one.
 
+### Docker Compose built from source (`update.sh --docker`)
+
+`./scripts/update.sh --docker` rebuilds from the git checkout on the server with compose and restarts. It:
+
+1. **Reuses the compose file of the running deployment**: it reads the compose labels of the running dropit container (`com.docker.compose.project.config_files` and the project name) and upgrades with the same files and project. No extra flags are needed when production uses another file such as `compose.prod.yml`. You can also be explicit: `--compose-file compose.prod.yml` (repeatable), `-p <project>`, or `COMPOSE_FILE`. Only when none of these applies does it use the default `docker-compose.yml`.
+2. **Refuses to switch to an empty volume**: if the selected config would mount `/data` from a different volume than the current container (for example production uses `dropit-data` while the default file creates `<project>_dropit-data`), it stops before `git pull` and the build and prints the right command. Set `ALLOW_VOLUME_CHANGE=1` if the switch is intended.
+3. **Backs up first**: copies the live database with the SQLite backup API and archives it together with the `files` directory to `~/dropit-backups/dropit-data-<old commit>-<time>.tgz` (`DROPIT_BACKUP_DIR` to change, `--no-backup` to skip), and tags the current image as `…:pre-update-<old commit>-<time>`.
+4. **Builds before replacing**: a failed build leaves the old container running; `DROPIT_COMMIT` / `DROPIT_BUILD_DATE` are passed as build args.
+5. **Checks afterwards**: waits for `/healthz` to return 200 (120 s by default, `DROPIT_UPDATE_TIMEOUT`), checks the commit in `/api/version`, that `/data` is still the same volume, and that the user count did not drop from non-zero to 0. If anything fails it switches back to the previous image and prints where the backup is.
+
+Preview without changing anything: `./scripts/update.sh --docker --dry-run` (only `git fetch`; prints the compose files, project and data volume it would use and runs the checks above).
+
+For a second (test) instance on the same host use a different project name and port (for example `docker compose -p dropit-dev …`). Never share the project + service name with production, or compose treats the production container as the same service and replaces it.
+
 ### Source install script
 
 `scripts/update.sh` runs `git pull --ff-only`, `pnpm install --frozen-lockfile` and `pnpm build` in order, then restarts:
@@ -132,7 +146,7 @@ If your own compose file already runs a watchtower, just add the same label to d
 - otherwise it runs `systemctl restart dropit` if `dropit.service` exists, or `pm2 restart dropit` if a pm2 app named `dropit` exists;
 - if neither exists, it only builds and asks you to restart manually.
 
-`--check` only reports how many commits behind upstream you are; `--docker` switches to `docker compose up -d --build`. The script refuses to run if tracked files have local modifications; when already up to date it skips the build (`FORCE=1` forces a rebuild).
+`--check` only reports how many commits behind upstream you are; `--docker` is described in the previous section. The script refuses to run if tracked files have local modifications; when already up to date it skips the build (`FORCE=1` forces a rebuild).
 
 ## Backup and restore
 

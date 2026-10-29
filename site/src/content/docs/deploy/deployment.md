@@ -90,7 +90,7 @@ docker run -d --name dropit \
 | 部署方式 | 升级命令 |
 | --- | --- |
 | Docker 镜像（`image: lthero1/dropit:latest`） | `docker compose pull && docker compose up -d` |
-| Docker Compose 从源码构建 | `./scripts/update.sh --docker` |
+| Docker Compose 从源码构建 | `./scripts/update.sh --docker`（自动沿用当前的 compose 文件，见下文） |
 | 源码部署（pnpm + systemd / pm2） | `./scripts/update.sh` |
 
 仓库自带的 `docker-compose.yml` 同时写了 `image: lthero1/dropit:latest` 和 `build:`：`docker compose pull` 拉 Docker Hub 镜像，`docker compose up -d --build` 则从源码构建并打成同名标签。两种方式二选一，不要混用，否则下一次 `pull` 会用 Hub 镜像覆盖本地构建。
@@ -124,6 +124,20 @@ docker compose --profile autoupdate up -d
 
 如果自己的 compose 文件已经有别的 watchtower，给 dropit 加上同样的标签即可，不需要再起一个。
 
+### Docker Compose 从源码构建（`update.sh --docker`）
+
+`./scripts/update.sh --docker` 用于在服务器的 git 检出目录里用 compose 从源码构建并重启。它会：
+
+1. **沿用当前部署用的 compose 文件**：读取正在运行的 dropit 容器的 compose 标签（`com.docker.compose.project.config_files` 和项目名），用同一份文件和项目名升级。生产用的是另一份文件（例如 `compose.prod.yml`）时不需要额外参数。也可以显式指定：`--compose-file compose.prod.yml`（可重复）、`-p 项目名`，或设置 `COMPOSE_FILE`。都没有时才用默认的 `docker-compose.yml`。
+2. **防止换到空数据卷**：如果这次的配置会让 `/data` 挂到和当前容器不同的卷（比如生产用 `dropit-data`，默认配置会新建 `<项目名>_dropit-data`），脚本在 `git pull` 和构建之前就拒绝执行，并给出正确的命令。确实要换卷时设 `ALLOW_VOLUME_CHANGE=1`。
+3. **升级前备份**：用 SQLite 备份 API 在线复制数据库，连同 `files` 目录打包到 `~/dropit-backups/dropit-data-<旧提交>-<时间>.tgz`（`DROPIT_BACKUP_DIR` 可改，`--no-backup` 跳过），并把当前镜像另打一个 `…:pre-update-<旧提交>-<时间>` 标签。
+4. **先构建再替换**：构建失败时旧容器不受影响；构建时自动传入 `DROPIT_COMMIT` / `DROPIT_BUILD_DATE`。
+5. **升级后自检**：等 `/healthz` 返回 200（默认 120 秒，`DROPIT_UPDATE_TIMEOUT`），检查 `/api/version` 的提交号、`/data` 仍是同一个卷、用户数没有从非 0 变成 0。任何一项不通过就自动切回旧镜像，并打印备份文件位置。
+
+先看计划不改动：`./scripts/update.sh --docker --dry-run`（只 `git fetch`，打印将使用的 compose 文件、项目、数据卷并做上述检查）。
+
+在同一台机器上另起测试实例时，请用不同的项目名和端口（例如 `docker compose -p dropit-dev …`），不要和生产共用项目名 + 服务名，否则 compose 会把生产容器当成同一个服务替换掉。
+
 ### 源码部署脚本
 
 `scripts/update.sh` 依次执行 `git pull --ff-only`、`pnpm install --frozen-lockfile`、`pnpm build`，然后重启：
@@ -132,7 +146,7 @@ docker compose --profile autoupdate up -d
 - 否则存在 `dropit.service` 就 `systemctl restart dropit`，存在名为 `dropit` 的 pm2 应用就 `pm2 restart dropit`；
 - 都没有时只构建并提示手动重启。
 
-`--check` 只报告落后上游几个提交；`--docker` 改为 `docker compose up -d --build`。已跟踪文件有本地修改时脚本会拒绝执行；已是最新时跳过构建（`FORCE=1` 强制重建）。
+`--check` 只报告落后上游几个提交；`--docker` 见上一节。已跟踪文件有本地修改时脚本会拒绝执行；已是最新时跳过构建（`FORCE=1` 强制重建）。
 
 ## 备份与恢复
 
