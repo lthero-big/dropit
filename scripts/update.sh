@@ -258,7 +258,7 @@ if [ "$mode" = docker ]; then
       cnode "$live" "const D=require('better-sqlite3'),p=require('path'),d=process.env.DATA_DIR||'/data';new D(p.join(d,'dropit.sqlite'),{readonly:true}).backup(p.join(d,'.update-backup.sqlite')).then(()=>process.exit(0),e=>{console.error(e);process.exit(1)})" \
         || die "database snapshot failed; nothing changed (use --no-backup to skip)"
       docker run --rm --user 0 --entrypoint sh -v "$src:/d:ro" -v "$bdir:/b" "$old_image" -c \
-        "mkdir -p /tmp/s && cp /d/.update-backup.sqlite /tmp/s/dropit.sqlite && tar czf '/b/$(basename "$backup_file")' -C /d --exclude=./.update-backup.sqlite --exclude=./dropit.sqlite --exclude=./dropit.sqlite-wal --exclude=./dropit.sqlite-shm . -C /tmp/s dropit.sqlite" \
+        "mkdir -p /tmp/s && cp /d/.update-backup.sqlite /tmp/s/dropit.sqlite && tar czf '/b/$(basename "$backup_file")' -C /d --exclude=./.update-backup.sqlite --exclude=./dropit.sqlite --exclude=./dropit.sqlite-wal --exclude=./dropit.sqlite-shm . -C /tmp/s ./dropit.sqlite" \
         || die "backup failed; nothing changed"
       docker exec "$live" rm -f "$(docker exec "$live" sh -c 'echo ${DATA_DIR:-/data}')/.update-backup.sqlite" || true
     else
@@ -312,7 +312,13 @@ if [ "$mode" = docker ]; then
     else
       echo "    no previous image to roll back to." >&2
     fi
-    [ -n "$backup_file" ] && echo "    data backup: $backup_file (restore: stop the container, untar into the volume)." >&2
+    if [ -n "$backup_file" ]; then
+      echo "    data backup: $backup_file" >&2
+      echo "    if the data needs restoring too (e.g. after a schema migration):" >&2
+      echo "      ${compose[*]} stop $service" >&2
+      echo "      docker run --rm --user 0 --entrypoint sh -v '$src:/d' -v '$bdir:/b' $old_image -c 'find /d -mindepth 1 -delete && tar xzf /b/$(basename "$backup_file") -C /d && chown -R 1000:1000 /d'" >&2
+      echo "      ${compose[*]} up -d --no-build $service" >&2
+    fi
     exit 1
   fi
   echo "Updated to $after (compose: ${compose[*]}, data: $t_data)."
