@@ -32,6 +32,40 @@
 | 命令行 | `dropit` CLI：发送、上传、下载、分享、`watch` 实时监听、临时房间 |
 | 运维 | 单进程 Node + SQLite（WAL）+ 本地磁盘；单 Docker 镜像；`/healthz` |
 
+## 截图
+
+> 截图全部来自一个只填充了虚构示例数据的临时实例（`demo@example.com`、示例文件与房间），不含任何真实数据；可用 [`scripts/screenshots.mjs`](scripts/screenshots.mjs) 一键重新生成，说明见 [`docs/screenshots/`](docs/screenshots/)。
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/board-light.png" alt="剪贴板（浅色）" /><br /><sub>剪贴板：文本 / 图片 / 文件、分组、置顶、来源设备</sub></td>
+    <td align="center"><img src="docs/screenshots/board-dark.png" alt="剪贴板（深色）" /><br /><sub>深色主题（另有 Bento / Swiss / 终端 界面风格）</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/share-panel.png" alt="分享面板" /><br /><sub>分享链接：有效期 + 查看次数，可随时撤销</sub></td>
+    <td align="center"><img src="docs/screenshots/share-link.png" alt="分享链接页" /><br /><sub>接收方打开分享链接，无需登录</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/room.png" alt="临时房间" /><br /><sub>临时房间：房间码即短链接 /r/&lt;房间码&gt;，扫码加入</sub></td>
+    <td align="center"><img src="docs/screenshots/command-palette.png" alt="命令面板" /><br /><sub>Ctrl / ⌘ K 命令面板，快速查找条目</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/login.png" alt="登录页" /><br /><sub>登录：邮箱密码、GitHub / Google，或直接进入临时房间</sub></td>
+    <td align="center"><img src="docs/screenshots/settings.png" alt="设置" /><br /><sub>设置：登录方式、密码、登录设备、设备码、访问令牌</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/admin-users.png" alt="管理 → 用户" /><br /><sub>管理 → 用户：预创建、角色、配额、停用</sub></td>
+    <td align="center"><img src="docs/screenshots/admin-limits.png" alt="管理 → 限制" /><br /><sub>管理 → 限制：运行时限额即时生效并留审计</sub></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/screenshots/mobile-board.png" alt="手机端剪贴板（浅色）" width="240" />
+  <img src="docs/screenshots/mobile-board-dark.png" alt="手机端剪贴板（深色）" width="240" />
+  <img src="docs/screenshots/mobile-room.png" alt="手机端临时房间" width="240" />
+  <br /><sub>手机端：浅色 / 深色剪贴板与临时房间</sub>
+</p>
+
 ## 快速开始
 
 ### Docker（推荐）

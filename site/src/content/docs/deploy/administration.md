@@ -13,6 +13,8 @@ title: 管理后台
 
 ## 用户
 
+![管理 → 用户](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/admin-users.png)
+
 - **预创建**：按邮箱创建待激活账号（可指定角色和配额），该邮箱第一次经 provider 验证的 OAuth 登录会绑定到此账号。勾选「生成临时密码」时会显示一次临时密码，对方用它登录即激活，并被要求立即改密码。
 - **重置密码**：在用户编辑里点「重置密码」，生成一次性显示的临时密码，同时让对方所有设备下线；对方下次登录必须先改密码（期间浏览器会话只能改密码或退出）。用户列表显示每人的登录方式（密码 / GitHub / Google）。
 - **命令行重置**：管理员自己也忘了密码时，`docker exec dropit dropit-admin reset-password <邮箱>` 直接改库并打印临时密码；`dropit-admin list-users` 列出账号。
@@ -46,6 +48,8 @@ title: 管理后台
 - 管理员可查看并吊销所有用户的令牌；用户自己在 `/settings` 管理。
 
 ## 运行时限额
+
+![管理 → 限制](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/admin-limits.png)
 
 - 后台限额编辑器展示每项的当前值、环境默认值、是否覆盖以及上下界。
 - 修改整体校验、原子提交，并写入审计记录（分页查看）。详细规则见 [配置](../../config/configuration/#运行时覆盖)。

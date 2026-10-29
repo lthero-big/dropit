@@ -13,6 +13,12 @@ dropit 是一个自托管的跨设备云剪贴板：在一台设备上粘贴文�
 | 管理 | 用户、邀请、令牌、运行时限额（即时生效 + 审计） |
 | 运维 | 单进程 Node + SQLite（WAL）+ 本地磁盘；单 Docker 镜像；`/healthz` |
 
+## 截图
+
+![dropit 剪贴板](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/board-light.png)
+
+更多截图（深色主题、分享、临时房间、管理后台、手机端）见仓库 [README](https://github.com/lthero-big/dropit#截图)。截图均为虚构示例数据。
+
 ## 从这里开始
 
 - 第一次使用：[快速开始](Getting-Started.md)
