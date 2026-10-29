@@ -54,7 +54,7 @@ export default defineConfig({
           ],
         },
         {
-          label: 'API',
+          label: '接口',
           translations: { en: 'API' },
           items: [
             { slug: 'api/overview' },

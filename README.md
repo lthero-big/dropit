@@ -75,14 +75,31 @@ cp .env.example .env
 pnpm dev              # http://localhost:5173
 ```
 
+### 命令行
+
+CLI 发布在 GitHub Packages，即使是公开包也需要认证。先在 `~/.npmrc` 里配置（令牌是具有 `read:packages` 权限的 GitHub 个人访问令牌）：
+
+```ini
+# ~/.npmrc
+@lthero-big:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=<具有 read:packages 权限的 GitHub 个人访问令牌>
+```
+
+```bash
+npm install -g @lthero-big/dropit-cli   # 首次发布之后可用；命令名是 dropit
+dropit login --url https://dropit.example.com
+```
+
+发布之前可以从源码安装：`pnpm install && pnpm --filter @lthero-big/dropit-cli build && npm install -g ./apps/cli`。详见 [命令行](https://lthero-big.github.io/dropit/start/cli/)。
+
 ## 文档
 
 完整文档在 **<https://lthero-big.github.io/dropit/>**（源文件在 [`site/`](site/)）：
 
 - [快速开始](https://lthero-big.github.io/dropit/start/getting-started/) · [使用指南](https://lthero-big.github.io/dropit/start/user-guide/) · [命令行](https://lthero-big.github.io/dropit/start/cli/)
 - [部署](https://lthero-big.github.io/dropit/deploy/deployment/) · [管理后台](https://lthero-big.github.io/dropit/deploy/administration/) · [安全模型](https://lthero-big.github.io/dropit/deploy/security/)
-- [配置](https://lthero-big.github.io/dropit/config/configuration/) · [后端配置参考](docs/backend-config.md)
-- [API 概览](https://lthero-big.github.io/dropit/api/overview/) · [API 契约](docs/api.md)
+- [配置](https://lthero-big.github.io/dropit/config/configuration/) · [后端配置参考](https://lthero-big.github.io/dropit/config/backend-config/)
+- [API 概览](https://lthero-big.github.io/dropit/api/overview/) · [API 契约](https://lthero-big.github.io/dropit/api/reference/)
 - [架构](https://lthero-big.github.io/dropit/dev/architecture/) · [开发与贡献](https://lthero-big.github.io/dropit/dev/development/) · [常见问题](https://lthero-big.github.io/dropit/faq/)
 
 ## 许可证

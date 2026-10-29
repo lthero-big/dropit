@@ -6,7 +6,7 @@
 apps/
   server/   后端：Hono 4 + @hono/node-server 2.x（内置 WebSocket），better-sqlite3，sharp
   web/      前端：React 19 + React Router + Vite + Tailwind CSS 4
-  cli/      命令行：@dropit/cli（命令 dropit）
+  cli/      命令行：@lthero-big/dropit-cli（命令 dropit）
 docs/       API 契约（api.md）、后端配置（backend-config.md）、Wiki 草稿
 scripts/    浏览器与 Docker 验收脚本
 Dockerfile  多阶段构建：构建前端与后端，运行镜像只含生产依赖与静态文件

@@ -1,0 +1,78 @@
+name: Release CLI
+
+# Publishes apps/cli to GitHub Packages (npm registry https://npm.pkg.github.com)
+# as `@lthero-big/dropit-cli` (command: dropit).
+# Trigger: push a tag `cli-v<version>` whose version equals apps/cli/package.json "version",
+# e.g. `git tag cli-v0.1.0 && git push origin cli-v0.1.0`; or run it by hand (workflow_dispatch),
+# optionally as a dry run.
+# Authenticates with the built-in GITHUB_TOKEN (packages: write); no extra repository secret is needed.
+# The package is linked to this repository through the "repository" field of apps/cli/package.json.
+on:
+  push:
+    tags: ['cli-v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Only pack and run npm publish --dry-run'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-cli
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: build, test, publish @lthero-big/dropit-cli
+    runs-on: ubuntu-latest
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://npm.pkg.github.com
+          scope: '@lthero-big'
+      - name: check tag matches package version
+        run: |
+          version=$(node -p 'require("./apps/cli/package.json").version')
+          echo "package version: $version"
+          if [[ "$GITHUB_REF" == refs/tags/cli-v* ]]; then
+            tag="${GITHUB_REF_NAME#cli-v}"
+            if [[ "$tag" != "$version" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match apps/cli/package.json version $version"
+              exit 1
+            fi
+          fi
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @lthero-big/dropit-cli lint
+      - run: pnpm --filter @lthero-big/dropit-cli typecheck
+      - run: pnpm --filter @lthero-big/dropit-cli test
+      - run: pnpm --filter @lthero-big/dropit-cli build
+      - name: smoke test the packed tarball
+        working-directory: apps/cli
+        run: |
+          npm pack
+          prefix=$(mktemp -d)
+          npm install -g --prefix "$prefix" ./lthero-big-dropit-cli-*.tgz
+          "$prefix/bin/dropit" --help
+          rm -f lthero-big-dropit-cli-*.tgz
+      - name: npm publish to GitHub Packages (dry run)
+        if: env.DRY_RUN == 'true'
+        working-directory: apps/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm publish --dry-run
+      - name: npm publish to GitHub Packages
+        if: env.DRY_RUN != 'true'
+        working-directory: apps/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm publish

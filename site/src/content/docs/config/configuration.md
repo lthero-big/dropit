@@ -2,7 +2,7 @@
 title: 配置
 ---
 
-所有配置都来自进程环境变量（开发模式额外读取仓库根目录 `.env`）。启动时 `loadConfig()` 校验全部取值，任何不合法的值或跨字段冲突都会让进程拒绝启动。完整参考表见仓库 [docs/backend-config.md](../backend-config/)。
+所有配置都来自进程环境变量（开发模式额外读取仓库根目录 `.env`）。启动时 `loadConfig()` 校验全部取值，任何不合法的值或跨字段冲突都会让进程拒绝启动。完整参考表见 [后端配置参考](../backend-config/)（译自仓库 [docs/backend-config.md](https://github.com/lthero-big/dropit/blob/main/docs/backend-config.md)）。
 
 ## 基础
 

@@ -1,18 +1,40 @@
 {
-  "name": "@dropit/cli",
+  "name": "@lthero-big/dropit-cli",
   "version": "0.1.0",
-  "private": true,
+  "description": "Command-line client for dropit, the self-hosted real-time clipboard and file drop (command: dropit)",
+  "keywords": [
+    "dropit",
+    "clipboard",
+    "cli",
+    "file-transfer",
+    "self-hosted",
+    "pastebin"
+  ],
   "license": "AGPL-3.0-only",
+  "author": "lthero-big",
+  "homepage": "https://lthero-big.github.io/dropit/start/cli/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lthero-big/dropit.git",
+    "directory": "apps/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/lthero-big/dropit/issues"
+  },
   "type": "module",
   "bin": {
     "dropit": "./dist/index.js"
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=22"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
