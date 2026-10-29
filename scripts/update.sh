@@ -258,7 +258,7 @@ if [ "$mode" = docker ]; then
       cnode "$live" "const D=require('better-sqlite3'),p=require('path'),d=process.env.DATA_DIR||'/data';new D(p.join(d,'dropit.sqlite'),{readonly:true}).backup(p.join(d,'.update-backup.sqlite')).then(()=>process.exit(0),e=>{console.error(e);process.exit(1)})" \
         || die "database snapshot failed; nothing changed (use --no-backup to skip)"
       docker run --rm --user 0 --entrypoint sh -v "$src:/d:ro" -v "$bdir:/b" "$old_image" -c \
-        "mkdir -p /tmp/s && cp /d/.update-backup.sqlite /tmp/s/dropit.sqlite && tar czf '/b/$(basename "$backup_file")' -C /d --exclude=./.update-backup.sqlite --exclude=./dropit.sqlite --exclude=./dropit.sqlite-wal --exclude=./dropit.sqlite-shm . -C /tmp/s ./dropit.sqlite" \
+        "tar czf '/b/$(basename "$backup_file")' -C /d --exclude=./dropit.sqlite --exclude=./dropit.sqlite-wal --exclude=./dropit.sqlite-shm --transform='s,^./.update-backup.sqlite$,./dropit.sqlite,' ." \
         || die "backup failed; nothing changed"
       docker exec "$live" rm -f "$(docker exec "$live" sh -c 'echo ${DATA_DIR:-/data}')/.update-backup.sqlite" || true
     else
