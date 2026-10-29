@@ -8,7 +8,7 @@ title: Architecture
 apps/
   server/   Backend: Hono 4 + @hono/node-server 2.x (built-in WebSocket), better-sqlite3, sharp
   web/      Frontend: React 19 + React Router + Vite + Tailwind CSS 4
-  cli/      CLI: @dropit/cli (command dropit)
+  cli/      CLI: dropit-cli (command dropit)
 docs/       API contract (api.md), backend config (backend-config.md), Wiki sources
 site/       Docs site (Starlight, published to GitHub Pages)
 scripts/    Browser and Docker acceptance scripts

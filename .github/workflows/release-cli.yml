@@ -1,0 +1,80 @@
+name: Release CLI
+
+# Publishes apps/cli to npm as `dropit-cli` (command: dropit).
+# Trigger: push a tag `cli-v<version>` whose version equals apps/cli/package.json "version",
+# e.g. `git tag cli-v0.1.0 && git push origin cli-v0.1.0`; or run it by hand (workflow_dispatch),
+# optionally as a dry run.
+# Requires the repository Actions secret NPM_TOKEN (npm granular access token with read and write
+# permission). Without it the job fails with a clear message before anything is published.
+on:
+  push:
+    tags: ['cli-v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Only pack and run npm publish --dry-run'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write # npm provenance
+
+concurrency:
+  group: release-cli
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: build, test, publish dropit-cli
+    runs-on: ubuntu-latest
+    env:
+      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - name: check tag matches package version
+        run: |
+          version=$(node -p 'require("./apps/cli/package.json").version')
+          echo "package version: $version"
+          if [[ "$GITHUB_REF" == refs/tags/cli-v* ]]; then
+            tag="${GITHUB_REF_NAME#cli-v}"
+            if [[ "$tag" != "$version" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match apps/cli/package.json version $version"
+              exit 1
+            fi
+          fi
+      - name: check NPM_TOKEN
+        if: env.DRY_RUN != 'true' && env.HAS_NPM_TOKEN != 'true'
+        run: |
+          echo "::error::Repository secret NPM_TOKEN is not set (Settings → Secrets and variables → Actions). Nothing was published."
+          exit 1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter dropit-cli lint
+      - run: pnpm --filter dropit-cli typecheck
+      - run: pnpm --filter dropit-cli test
+      - run: pnpm --filter dropit-cli build
+      - name: smoke test the packed tarball
+        working-directory: apps/cli
+        run: |
+          npm pack
+          prefix=$(mktemp -d)
+          npm install -g --prefix "$prefix" ./dropit-cli-*.tgz
+          "$prefix/bin/dropit" --help
+          rm -f dropit-cli-*.tgz
+      - name: npm publish (dry run)
+        if: env.DRY_RUN == 'true'
+        working-directory: apps/cli
+        run: npm publish --dry-run --access public
+      - name: npm publish
+        if: env.DRY_RUN != 'true'
+        working-directory: apps/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public

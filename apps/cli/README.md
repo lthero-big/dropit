@@ -1,12 +1,19 @@
 # dropit 命令行
 
-`@dropit/cli` 是 dropit 的命令行客户端，命令名是 `dropit`。适合脚本，以及没有打开网页的另一台设备。
+`dropit-cli` 是 dropit 的命令行客户端，命令名是 `dropit`。适合脚本，以及没有打开网页的另一台设备。
 
-需要 Node.js 22+。在仓库里安装：
+需要 Node.js 22+。从 npm 安装（首次发布之后可用）：
+
+```bash
+npm install -g dropit-cli
+dropit --help
+```
+
+或在仓库里从源码安装：
 
 ```bash
 pnpm install
-pnpm --filter @dropit/cli build
+pnpm --filter dropit-cli build
 npm install -g ./apps/cli
 ```
 
@@ -16,7 +23,9 @@ npm install -g ./apps/cli
 npx --yes ./apps/cli --help
 ```
 
-包名是 `@dropit/cli`，不要对公共 registry 执行 `npx dropit`。
+npm 包名是 `dropit-cli`（npm 上的 `dropit` 是另一个无关的包），不要执行 `npx dropit`；不安装直接用可以 `npx --yes dropit-cli --help`。
+
+发布流程：维护者推送 `cli-v<版本>` 标签（与 `apps/cli/package.json` 的 `version` 一致）后，`.github/workflows/release-cli.yml` 构建、测试并用仓库 Secret `NPM_TOKEN` 发布到 npm（带 provenance）。
 
 ## 登录
 

@@ -2,13 +2,21 @@
 title: CLI
 ---
 
-`@dropit/cli` provides the `dropit` command, handy for scripts and for devices without the web app open. Requires Node.js 22+. The package is not published to the public npm registry, so do not run `npx dropit`.
+The npm package `dropit-cli` provides the `dropit` command, handy for scripts and for devices without the web app open. Requires Node.js 22+. Note that `dropit` on npm is an unrelated package, so do not run `npx dropit`.
 
 ## Install
 
 ```bash
+npm install -g dropit-cli        # available after the first npm release
+dropit --help
+# or without installing: npx --yes dropit-cli --help
+```
+
+Build from source (before the first release, or for unreleased changes):
+
+```bash
 pnpm install
-pnpm --filter @dropit/cli build
+pnpm --filter dropit-cli build
 npm install -g ./apps/cli
 # or without installing: npx --yes ./apps/cli --help
 ```

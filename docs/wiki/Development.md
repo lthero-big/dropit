@@ -19,7 +19,7 @@ pnpm test           # web 用 vitest，server 与 cli 用 tsx --test；后端使
 pnpm build
 ```
 
-单包运行：`pnpm --filter @dropit/server test`、`pnpm --filter @dropit/web test`、`pnpm --filter @dropit/cli test`。
+单包运行：`pnpm --filter @dropit/server test`、`pnpm --filter @dropit/web test`、`pnpm --filter dropit-cli test`。
 
 自动化测试不需要真实 OAuth 凭据。`scripts/` 下另有浏览器与 Docker 验收脚本。
 

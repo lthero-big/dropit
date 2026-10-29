@@ -2,7 +2,7 @@
 title: API 概览
 ---
 
-本页是概览，权威契约见仓库 [docs/api.md](../reference/)。
+本页是概览，权威契约见 [API 契约](../reference/)（译自仓库 [docs/api.md](https://github.com/lthero-big/dropit/blob/main/docs/api.md)）。
 
 ## 约定
 

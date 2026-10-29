@@ -8,7 +8,7 @@ title: 架构
 apps/
   server/   后端：Hono 4 + @hono/node-server 2.x（内置 WebSocket），better-sqlite3，sharp
   web/      前端：React 19 + React Router + Vite + Tailwind CSS 4
-  cli/      命令行：@dropit/cli（命令 dropit）
+  cli/      命令行：dropit-cli（命令 dropit）
 docs/       API 契约（api.md）、后端配置（backend-config.md）、Wiki 源文件
 site/       文档站（Starlight，发布到 GitHub Pages）
 scripts/    浏览器与 Docker 验收脚本

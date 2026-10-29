@@ -1,12 +1,20 @@
 # 命令行
 
-`@dropit/cli` 提供命令 `dropit`，适合脚本和没有打开网页的设备。需要 Node.js 22+。包未发布到公共 npm registry，请勿运行 `npx dropit`。
+npm 包 `dropit-cli` 提供命令 `dropit`，适合脚本和没有打开网页的设备。需要 Node.js 22+。注意 npm 上的 `dropit` 是另一个无关的包，请勿运行 `npx dropit`。
 
 ## 安装
 
 ```bash
+npm install -g dropit-cli        # 首次发布到 npm 之后可用
+dropit --help
+# 或不安装：npx --yes dropit-cli --help
+```
+
+从源码构建（发布之前，或需要未发布的改动时）：
+
+```bash
 pnpm install
-pnpm --filter @dropit/cli build
+pnpm --filter dropit-cli build
 npm install -g ./apps/cli
 # 或不安装：npx --yes ./apps/cli --help
 ```
