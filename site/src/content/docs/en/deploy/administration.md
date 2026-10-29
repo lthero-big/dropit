@@ -13,6 +13,8 @@ The admin panel lives at `/admin` and is only accessible to enabled admins.
 
 ## Users
 
+![Admin → Users](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/admin-users.png)
+
 - **Pre-create**: create a pending account by email (role and quota can be set); the first provider-verified OAuth sign-in with that email is bound to this account. With “Generate a temporary password” the password is shown once; signing in with it activates the account and asks for a new password right away.
 - **Reset password**: “Reset password” in the user editor shows a one-time temporary password and signs the user out everywhere; the next sign-in must change it first (until then the browser session can only change the password or sign out). The user list shows each person's sign-in methods (password / GitHub / Google).
 - **Command-line reset**: when you lost your own admin password, `docker exec dropit dropit-admin reset-password <email>` updates the database directly and prints a temporary password; `dropit-admin list-users` lists accounts.
@@ -47,6 +49,8 @@ The admin panel lives at `/admin` and is only accessible to enabled admins.
 - Admins can view and revoke every user's tokens; users manage their own on `/settings`.
 
 ## Runtime limits
+
+![Admin → Limits](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/admin-limits.png)
 
 - The limits editor shows each setting's current value, environment default, whether it is overridden, and its lower/upper bounds.
 - Changes are validated as a whole, committed atomically and recorded in an audit log (paginated). See [Configuration](../../config/configuration/#runtime-overrides) for the detailed rules.

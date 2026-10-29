@@ -4,6 +4,8 @@ title: 使用指南
 
 ## 空间与条目
 
+![剪贴板](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/board-light.png)
+
 - 每个账号自动拥有一个**私人空间**；通过邀请加入的是**共享空间**。
 - 在输入框粘贴或输入文本发送；拖拽、粘贴文件或点选上传文件。
 - 新条目通过 WebSocket 实时出现在同一空间的所有设备上；侧栏「在线」显示当前频道的连接数。
@@ -27,6 +29,8 @@ title: 使用指南
 
 ## 分享链接
 
+![分享面板](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/share-panel.png)
+
 条目作者或空间所有者可为单条内容生成只读链接：
 
 - 有效期：1 小时 / 1 天 / 7 天 / 不过期；查看次数：一次、若干次（最多 100）或不限。
@@ -35,6 +39,8 @@ title: 使用指南
 - 链接是能力凭据：拿到 URL 的人即可查看。
 
 ## 临时房间
+
+![临时房间与二维码](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/room.png)
 
 - 在登录页点「进入临时房间」即可创建，无需账号；持有房间链接的人都能读写、分享和撤回。
 - 每个房间只有一个房间码，房间链接就是 `/r/<房间码>`（例如 `/r/Ab3dEf`）。默认是 6 位随机码（不含 `0 O 1 l I` 这类易混字符，区分大小写）；房主可以在房间页「房间码与 PIN」里改成 3–32 位自定义码（字母、数字、`_`、`-`，区分大小写），或重新随机生成。改房间码后链接随之改变，旧链接失效。
@@ -49,5 +55,7 @@ title: 使用指南
 - 管理员可以在「管理 → 注册」里关闭此功能或调整默认上限，也可以在用户编辑里为某个用户单独设置上限。
 
 ## 设置
+
+![设置页](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/settings.png)
 
 `/settings` 页面可管理个人访问令牌（供命令行和脚本使用），并在「登录设备」中查看所有登录过的设备，单独登出某台设备或一键登出其他设备；被登出的设备立即失效。顶栏的「N 台在线」可点开查看在线设备。命令行设备码登录的批准页是 `/device`。

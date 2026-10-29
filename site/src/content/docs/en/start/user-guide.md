@@ -4,6 +4,8 @@ title: User guide
 
 ## Spaces and items
 
+![The clipboard board](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/board-light.png)
+
 - Every account automatically gets a **private space**; spaces you join through an invitation are **shared spaces**.
 - Paste or type text in the input box to send it; drag and drop, paste, or pick files to upload them.
 - New items appear in real time via WebSocket on every device in the same space; “Online” in the sidebar shows the number of connections on the current channel.
@@ -27,6 +29,8 @@ title: User guide
 
 ## Share links
 
+![Share panel](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/share-panel.png)
+
 The item's author or the space owner can create a read-only link for a single item:
 
 - Validity: 1 hour / 1 day / 7 days / never expires; views: once, a fixed number (up to 100) or unlimited.
@@ -35,6 +39,8 @@ The item's author or the space owner can create a read-only link for a single it
 - Links are capabilities: anyone who has the URL can view the content.
 
 ## Temporary rooms
+
+![Temporary room with QR code](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/room.png)
 
 - Click “Enter a temporary room” on the login page to create one — no account needed; anyone holding the room link can read, write, share and retract.
 - Every room has exactly one room code, and its link is `/r/<code>` (for example `/r/Ab3dEf`). By default it is a random 6-character code (no look-alikes such as `0 O 1 l I`, case-sensitive); the owner can change it under “Room code & PIN” on the room page to a custom 3–32 character code (letters, digits, `_`, `-`, case-sensitive) or draw a new random one. Changing the code changes the link; the old link stops working.
@@ -49,5 +55,7 @@ The item's author or the space owner can create a read-only link for a single it
 - Admins can switch this off or change the default under Admin → Registration, and set a per-user limit in the user editor.
 
 ## Settings
+
+![Settings](https://raw.githubusercontent.com/lthero-big/dropit/main/docs/screenshots/settings.png)
 
 The `/settings` page manages personal access tokens (for the CLI and scripts). Under “Signed-in devices” you can see every device that has signed in, sign out a single device or sign out all other devices at once; signed-out devices are invalidated immediately. Click “N online” in the top bar to see online devices. The approval page for CLI device-code login is `/device`.
