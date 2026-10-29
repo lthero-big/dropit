@@ -2,21 +2,31 @@
 title: CLI
 ---
 
-The npm package `dropit-cli` provides the `dropit` command, handy for scripts and for devices without the web app open. Requires Node.js 22+. Note that `dropit` on npm is an unrelated package, so do not run `npx dropit`.
+The npm package `@lthero-big/dropit-cli` (published to GitHub Packages) provides the `dropit` command, handy for scripts and for devices without the web app open. Requires Node.js 22+. Note that `dropit` on npmjs is an unrelated package, so do not run `npx dropit`.
 
 ## Install
 
+The CLI is published to GitHub Packages. Its npm registry requires authentication even for public packages: create a GitHub personal access token (classic) with the `read:packages` scope, then add to `~/.npmrc`:
+
+```ini
+# ~/.npmrc
+@lthero-big:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=<GitHub personal access token with read:packages>
+```
+
+Then install (available after the first release):
+
 ```bash
-npm install -g dropit-cli        # available after the first npm release
+npm install -g @lthero-big/dropit-cli
 dropit --help
-# or without installing: npx --yes dropit-cli --help
+# or without installing: npx --yes @lthero-big/dropit-cli --help
 ```
 
 Build from source (before the first release, or for unreleased changes):
 
 ```bash
 pnpm install
-pnpm --filter dropit-cli build
+pnpm --filter @lthero-big/dropit-cli build
 npm install -g ./apps/cli
 # or without installing: npx --yes ./apps/cli --help
 ```

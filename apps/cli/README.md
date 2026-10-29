@@ -1,19 +1,28 @@
 # dropit 命令行
 
-`dropit-cli` 是 dropit 的命令行客户端，命令名是 `dropit`。适合脚本，以及没有打开网页的另一台设备。
+`@lthero-big/dropit-cli` 是 dropit 的命令行客户端，命令名是 `dropit`。适合脚本，以及没有打开网页的另一台设备。
 
-需要 Node.js 22+。从 npm 安装（首次发布之后可用）：
+需要 Node.js 22+。CLI 发布在 GitHub Packages。GitHub Packages 的 npm 仓库即使是公开包也要求认证：先在 GitHub 创建一个具有 `read:packages` 权限的个人访问令牌（classic PAT），然后在 `~/.npmrc` 里写入：
+
+```ini
+# ~/.npmrc
+@lthero-big:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=<具有 read:packages 权限的 GitHub 个人访问令牌>
+```
+
+再安装（首次发布之后可用）：
 
 ```bash
-npm install -g dropit-cli
+npm install -g @lthero-big/dropit-cli
 dropit --help
+# 或不安装：npx --yes @lthero-big/dropit-cli --help
 ```
 
 或在仓库里从源码安装：
 
 ```bash
 pnpm install
-pnpm --filter dropit-cli build
+pnpm --filter @lthero-big/dropit-cli build
 npm install -g ./apps/cli
 ```
 
@@ -23,9 +32,9 @@ npm install -g ./apps/cli
 npx --yes ./apps/cli --help
 ```
 
-npm 包名是 `dropit-cli`（npm 上的 `dropit` 是另一个无关的包），不要执行 `npx dropit`；不安装直接用可以 `npx --yes dropit-cli --help`。
+包名是 `@lthero-big/dropit-cli`，发布在 GitHub Packages 而不是 npmjs（npmjs 上的 `dropit` 是另一个无关的包），不要执行 `npx dropit`；配置好 `~/.npmrc` 后，不安装直接用可以 `npx --yes @lthero-big/dropit-cli --help`。
 
-发布流程：维护者推送 `cli-v<版本>` 标签（与 `apps/cli/package.json` 的 `version` 一致）后，`.github/workflows/release-cli.yml` 构建、测试并用仓库 Secret `NPM_TOKEN` 发布到 npm（带 provenance）。
+发布流程：维护者推送 `cli-v<版本>` 标签（与 `apps/cli/package.json` 的 `version` 一致）后，`.github/workflows/release-cli.yml` 构建、测试，并用内置的 `GITHUB_TOKEN`（`packages: write`）发布到 GitHub Packages，不需要额外的 Secret。首次发布后，可在仓库或账号的 Packages 设置里确认包已关联到本仓库，并按需把可见性改为公开。
 
 ## 登录
 

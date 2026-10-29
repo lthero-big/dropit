@@ -1,20 +1,30 @@
 # 命令行
 
-npm 包 `dropit-cli` 提供命令 `dropit`，适合脚本和没有打开网页的设备。需要 Node.js 22+。注意 npm 上的 `dropit` 是另一个无关的包，请勿运行 `npx dropit`。
+npm 包 `@lthero-big/dropit-cli`（发布在 GitHub Packages）提供命令 `dropit`，适合脚本和没有打开网页的设备。需要 Node.js 22+。注意 npmjs 上的 `dropit` 是另一个无关的包，请勿运行 `npx dropit`。
 
 ## 安装
 
+CLI 发布在 GitHub Packages。GitHub Packages 的 npm 仓库即使是公开包也要求认证：先在 GitHub 创建一个具有 `read:packages` 权限的个人访问令牌（classic PAT），然后在 `~/.npmrc` 里写入：
+
+```ini
+# ~/.npmrc
+@lthero-big:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=<具有 read:packages 权限的 GitHub 个人访问令牌>
+```
+
+再安装（首次发布之后可用）：
+
 ```bash
-npm install -g dropit-cli        # 首次发布到 npm 之后可用
+npm install -g @lthero-big/dropit-cli
 dropit --help
-# 或不安装：npx --yes dropit-cli --help
+# 或不安装：npx --yes @lthero-big/dropit-cli --help
 ```
 
 从源码构建（发布之前，或需要未发布的改动时）：
 
 ```bash
 pnpm install
-pnpm --filter dropit-cli build
+pnpm --filter @lthero-big/dropit-cli build
 npm install -g ./apps/cli
 # 或不安装：npx --yes ./apps/cli --help
 ```

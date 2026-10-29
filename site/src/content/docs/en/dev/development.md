@@ -21,7 +21,7 @@ pnpm test           # vitest for web, tsx --test for server and cli; the backend
 pnpm build
 ```
 
-Run a single package: `pnpm --filter @dropit/server test`, `pnpm --filter @dropit/web test`, `pnpm --filter dropit-cli test`.
+Run a single package: `pnpm --filter @dropit/server test`, `pnpm --filter @dropit/web test`, `pnpm --filter @lthero-big/dropit-cli test`.
 
 Automated tests need no real OAuth credentials. `scripts/` also contains browser and Docker acceptance scripts.
 

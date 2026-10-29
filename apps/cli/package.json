@@ -1,5 +1,5 @@
 {
-  "name": "dropit-cli",
+  "name": "@lthero-big/dropit-cli",
   "version": "0.1.0",
   "description": "Command-line client for dropit, the self-hosted real-time clipboard and file drop (command: dropit)",
   "keywords": [
@@ -34,7 +34,7 @@
     "node": ">=22"
   },
   "publishConfig": {
-    "access": "public"
+    "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
