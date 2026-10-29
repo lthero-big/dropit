@@ -1,0 +1,58 @@
+# Production deployment built from source, behind a reverse proxy on the host (nginx/Caddy
+# terminates TLS and proxies to 127.0.0.1:8787). Real values live in .env (gitignored):
+#   cp .env.example .env   # set at least APP_ORIGIN and TRUST_PROXY
+#   docker compose -f compose.prod.yml config        # check the result
+#   docker compose -f compose.prod.yml up -d --build
+# Upgrade: ./scripts/update.sh --docker  (reuses this file and the project name automatically)
+#
+# Keep `name`, the service name and the volume name unchanged on an existing deployment:
+# they decide which data volume is used. A throwaway test instance needs its own project,
+# container, volume and port, e.g. in .env of a separate checkout:
+#   DROPIT_PROJECT=dropit-test DROPIT_CONTAINER=dropit-test DROPIT_VOLUME=dropit-test-data
+#   DROPIT_PORT=18787 DROPIT_SUBNET=10.87.88.0/24 DROPIT_GATEWAY=10.87.88.1
+name: ${DROPIT_PROJECT:-dropit}
+services:
+  dropit:
+    build:
+      context: .
+      args:
+        DROPIT_VERSION: ${DROPIT_VERSION:-}
+        DROPIT_COMMIT: ${DROPIT_COMMIT:-}
+        DROPIT_BUILD_DATE: ${DROPIT_BUILD_DATE:-}
+    image: ${DROPIT_LOCAL_IMAGE:-dropit:latest}
+    container_name: ${DROPIT_CONTAINER:-dropit}
+    restart: unless-stopped
+    ports:
+      # Loopback only; the reverse proxy on the host connects here.
+      - "${DROPIT_BIND:-127.0.0.1}:${DROPIT_PORT:-8787}:8787"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: production
+      # Public address, e.g. https://drop.example.com (no path). Required here so links,
+      # cookies and OAuth callbacks never fall back to http behind the proxy.
+      APP_ORIGIN: ${APP_ORIGIN:?set APP_ORIGIN in .env, e.g. https://drop.example.com}
+      PORT: "8787"
+      HOST: 0.0.0.0
+      DATA_DIR: /data
+      STATIC_DIR: /app/public
+      # A host reverse proxy reaches the container through docker-proxy, i.e. from the
+      # bridge gateway below. Set TRUST_PROXY=loopback,<DROPIT_GATEWAY> in .env.
+      TRUST_PROXY: ${TRUST_PROXY:-loopback}
+    volumes:
+      - dropit-data:/data
+    networks:
+      - dropit
+
+networks:
+  dropit:
+    # Fixed subnet so the gateway address in TRUST_PROXY stays stable.
+    ipam:
+      config:
+        - subnet: ${DROPIT_SUBNET:-10.87.87.0/24}
+          gateway: ${DROPIT_GATEWAY:-10.87.87.1}
+
+volumes:
+  dropit-data:
+    name: ${DROPIT_VOLUME:-dropit-data}
