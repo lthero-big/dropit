@@ -18,6 +18,7 @@ import { formatBytes, quotaTone, spaceLabel } from '@/lib/format.ts'
 import { useSession } from '@/lib/session.tsx'
 import type { SpaceSummary } from '@/lib/types.ts'
 import { PRESENCE_SLOT } from '@/lib/device.ts'
+import { EnterRoomDialog } from './enter-room.tsx'
 import { Logo } from './logo.tsx'
 import { SKINS, useTheme } from './theme-provider.tsx'
 
@@ -45,6 +46,7 @@ export function Shell({
   const displayName = me?.user.name || me?.user.email || '访客'
   const initial = displayName.slice(0, 1).toUpperCase()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [joinOpen, setJoinOpen] = useState(false)
   const [drawer, setDrawer] = useState(() => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 767px)').matches)
 
   useEffect(() => {
@@ -123,7 +125,7 @@ export function Shell({
                     <DropdownMenuItem key={space.id} className="gap-2 normal-case tracking-normal" onSelect={() => onSpace(space.id)}>
                       <CheckIcon className={`size-3.5 shrink-0 ${space.id === current.id ? '' : 'invisible'}`} aria-hidden="true" />
                       <span className="min-w-0 flex-1 truncate">{spaceLabel(space, me.user.id, spaces)}</span>
-                      <span className="text-[11px] text-muted-foreground">{space.ownerId === me.user.id ? '我的' : '受邀加入'}</span>
+                      <span className="text-[11px] text-muted-foreground">{space.ownerId === me.user.id ? '我的' : space.role === 'viewer' ? '受邀 · 只读' : '受邀加入'}</span>
                     </DropdownMenuItem>
                   ))}
                   <DropdownMenuSeparator />
@@ -148,9 +150,9 @@ export function Shell({
             <button type="button" className="inline-flex min-h-10 min-w-10 items-center" style={hitTarget} onClick={() => void newRoom()}>
               临时房间
             </button>
-            <Link to="/join" className={location.pathname === '/join' ? 'border-b border-primary' : ''}>
+            <button type="button" className={`inline-flex min-h-10 min-w-10 items-center ${location.pathname === '/join' ? 'border-b border-primary' : ''}`} style={hitTarget} aria-haspopup="dialog" onClick={() => setJoinOpen(true)}>
               房间码
-            </Link>
+            </button>
           </nav>
           <div className="ml-auto flex shrink-0 items-center gap-2">
             <DropdownMenu>
@@ -257,14 +259,18 @@ export function Shell({
         </div>
       </header>
       <div className="mx-auto max-w-[1120px] px-4 pt-5 pb-24 sm:px-6 md:pb-12">{children}</div>
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-2 border-t border-line-1 bg-[color-mix(in_oklab,var(--bg)_88%,transparent)] pb-[env(safe-area-inset-bottom)] backdrop-blur-md md:hidden" data-shell-nav="">
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-3 border-t border-line-1 bg-[color-mix(in_oklab,var(--bg)_88%,transparent)] pb-[env(safe-area-inset-bottom)] backdrop-blur-md md:hidden" data-shell-nav="">
         <Link to="/" className="flex min-h-11 items-center justify-center text-xs font-medium">
           剪贴板
         </Link>
         <button type="button" className="min-h-11 min-w-10 text-xs font-medium" style={hitTarget} onClick={() => void newRoom()}>
           房间
         </button>
+        <button type="button" className="min-h-11 min-w-10 text-xs font-medium" style={hitTarget} aria-haspopup="dialog" onClick={() => setJoinOpen(true)}>
+          房间码
+        </button>
       </nav>
+      {joinOpen ? <EnterRoomDialog onClose={() => setJoinOpen(false)} /> : null}
     </div>
   )
 }

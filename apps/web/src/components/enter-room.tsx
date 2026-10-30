@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button.tsx'
+import { Modal } from '@/components/modal.tsx'
 import { fieldClass, labelClass } from '@/components/settings-ui.tsx'
 import { ApiError, errorText } from '@/lib/api.ts'
 import { enterRoomByCode, roomPath } from '@/lib/temp-room.ts'
@@ -10,7 +11,7 @@ import { enterRoomByCode, roomPath } from '@/lib/temp-room.ts'
  * RHEA-190 auth step 3/4: join a temporary room with its (case-sensitive) code, and the PIN when it has one.
  * Same as opening /r/<code>: the browser remembers the room afterwards, so the room page does not ask again.
  */
-export function EnterRoomForm({ initialCode = '' }: { initialCode?: string }) {
+export function EnterRoomForm({ initialCode = '', autoFocus = false, onEntered }: { initialCode?: string; autoFocus?: boolean; onEntered?: () => void }) {
   const navigate = useNavigate()
   const [code, setCode] = useState(initialCode)
   const [pin, setPin] = useState('')
@@ -26,6 +27,7 @@ export function EnterRoomForm({ initialCode = '' }: { initialCode?: string }) {
     try {
       const entry = await enterRoomByCode(code.trim(), needPin ? pin : undefined)
       navigate(roomPath(entry))
+      onEntered?.()
     } catch (caught) {
       if (caught instanceof ApiError && caught.code === 'PIN_REQUIRED') {
         setNeedPin(true)
@@ -53,6 +55,7 @@ export function EnterRoomForm({ initialCode = '' }: { initialCode?: string }) {
         <input
           className={fieldClass}
           value={code}
+          autoFocus={autoFocus}
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
@@ -83,5 +86,15 @@ export function EnterRoomForm({ initialCode = '' }: { initialCode?: string }) {
         </Button>
       </div>
     </form>
+  )
+}
+
+/** RHEA-190 m50: the top bar's 房间码 opens this popup to enter a room by code (/join keeps working too). */
+export function EnterRoomDialog({ onClose }: { onClose: () => void }) {
+  return (
+    <Modal title="输入房间码" onClose={onClose}>
+      <p className="mb-4 text-sm text-muted-foreground">房间码区分大小写。无需登录；房间有 PIN 时会再问一次。</p>
+      <EnterRoomForm autoFocus onEntered={onClose} />
+    </Modal>
   )
 }

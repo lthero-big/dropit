@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { toast } from 'sonner'
-import { CopyIcon, DoorOpenIcon, GaugeIcon, GlobeIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, SlidersHorizontalIcon, TicketIcon, UsersIcon } from 'lucide-react'
+import { BoxesIcon, CopyIcon, DoorOpenIcon, GaugeIcon, GlobeIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, SlidersHorizontalIcon, TicketIcon, UsersIcon } from 'lucide-react'
+import { AdminRooms } from '@/components/admin-rooms.tsx'
 import { DeviceSessions } from '@/components/device-sessions.tsx'
 import { LimitsEditor } from '@/components/limits-editor.tsx'
 import { OAuthSettings } from '@/components/oauth-settings.tsx'
@@ -25,8 +26,8 @@ const hourChoices = [
 ]
 const quotaCapMb = 102400
 
-type Tab = 'invites' | 'users' | 'registration' | 'usage' | 'limits' | 'site' | 'oauth' | 'update'
-const tabIds: Tab[] = ['invites', 'users', 'registration', 'usage', 'limits', 'site', 'oauth', 'update']
+type Tab = 'invites' | 'users' | 'registration' | 'rooms' | 'usage' | 'limits' | 'site' | 'oauth' | 'update'
+const tabIds: Tab[] = ['invites', 'users', 'registration', 'rooms', 'usage', 'limits', 'site', 'oauth', 'update']
 
 /**
  * RHEA-190 m22: 管理 is grouped by what the admin is doing, and OAuth (an
@@ -44,6 +45,7 @@ const NAV: NavGroup<Tab>[] = [
   {
     label: '资源与限制',
     items: [
+      { id: 'rooms', label: '临时房间', icon: BoxesIcon, hint: '关闭、删除、解除 PIN 锁定' },
       { id: 'usage', label: '用量', icon: GaugeIcon, hint: '每个用户的存储占用' },
       { id: 'limits', label: '限制', icon: SlidersHorizontalIcon, hint: '容量、时间、限流' },
     ],
@@ -62,6 +64,7 @@ const HEADERS: Record<Tab, { title: string; description: string }> = {
   invites: { title: '邀请', description: '为某个空间生成邀请链接。链接只在生成时显示一次，过期、撤销或用尽后立即失效。' },
   users: { title: '用户', description: '预创建账号、调整角色与配额、重置密码、停用或强制下线。预创建的账号可用临时密码登录，或首次 OAuth 登录时按邮箱绑定。' },
   registration: { title: '注册', description: '谁可以创建新账号：关闭、仅邀请（默认）或开放注册。' },
+  rooms: { title: '临时房间', description: '所有未过期的临时房间：房间码、创建者、创建与最后活跃时间、内容条数和 PIN。管理员可以关闭或删除房间、解除 PIN 锁定，但看不到房间内容。' },
   usage: { title: '用量', description: '每个用户当前占用的存储与配额。调低配额不会删除已有内容。' },
   limits: { title: '限制', description: '上传大小、保留时间、会话与限流。修改立即生效，并写入变更记录。' },
   site: { title: '站点地址', description: '浏览器访问本站的地址（APP_ORIGIN）。可以在这里改，不用重启；优先级高于环境变量。' },
@@ -341,6 +344,7 @@ export function AdminPage() {
                         <th className={thClass}>用户</th>
                         <th className={thClass}>角色</th>
                         <th className={thClass}>配额</th>
+                        <th className={thClass}>空间邀请</th>
                         <th className={thClass}>状态</th>
                         <th className={thClass}>
                           <span className="sr-only">操作</span>
@@ -363,6 +367,10 @@ export function AdminPage() {
                           </td>
                           <td className={`${tdClass} tabular-nums text-fg-2`} data-l="配额">
                             {formatBytes(user.usedBytes)} / {formatBytes(user.quotaBytes)}
+                          </td>
+                          <td className={tdClass} data-l="空间邀请" data-space-invites="">
+                            {user.spaceInvitesEnabled ? <StatusPill tone="good">已开启</StatusPill> : <StatusPill tone="neutral">未开启</StatusPill>}
+                            <small className="mt-0.5 block text-[11px] text-fg-3 tabular-nums">有效 {user.activeSpaceInvites ?? 0} 个</small>
                           </td>
                           <td className={tdClass} data-l="状态">
                             <StatusPill tone={stateTone(userState(user))}>{userState(user)}</StatusPill>
@@ -422,6 +430,7 @@ export function AdminPage() {
             </Panel>
           ) : null}
           {tab === 'limits' ? limits ? <LimitsEditor limits={limits} onChange={setLimits} /> : <p className="text-sm text-muted-foreground">正在读取…</p> : null}
+          {tab === 'rooms' ? <AdminRooms /> : null}
           {tab === 'site' ? <SiteOriginSettings /> : null}
           {tab === 'oauth' ? <OAuthSettings /> : null}
           {tab === 'registration' ? <RegistrationSettings /> : null}

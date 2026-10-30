@@ -84,7 +84,7 @@ const labels: Record<string, string> = {
   PASSWORD_CHANGE_REQUIRED: '请先修改临时密码',
   CURRENT_PASSWORD_INVALID: '当前密码不对',
   PASSWORD_UNCHANGED: '新密码不能和当前密码相同',
-  INVALID_CODE: '房间码只能用字母、数字、- 和 _，3–32 位',
+  INVALID_CODE: '房间码需为 6 位字母或数字（区分大小写）',
   INVALID_PIN: 'PIN 需要 4–32 位，不能含控制字符',
   PIN_REQUIRED: '这个房间需要 PIN',
   PIN_INVALID: 'PIN 不对',
@@ -92,6 +92,10 @@ const labels: Record<string, string> = {
   INVITE_LIMIT_REACHED: '邀请名额已用完',
   INVITES_DISABLED: '管理员暂时关闭了邀请功能',
   INVITE_USED: '这个邀请已被使用，不能撤销',
+  INVITES_ADMIN_ONLY: '只有管理员可以邀请别人注册',
+  INVITE_NEEDS_ACCOUNT: '这个邀请只能由已有账号接受：请先登录，再打开邀请链接',
+  READ_ONLY: '你在这个空间是只读成员，只能查看和复制',
+  OWNER_CANNOT_LEAVE: '空间所有者不能退出自己的空间',
 }
 
 const oauthLoginErrors = new Set([

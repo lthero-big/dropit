@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router'
-import { ArrowRightIcon, KeyRoundIcon, LockKeyholeIcon, KeySquareIcon, MonitorSmartphoneIcon, PlusIcon, ShieldIcon, SquareTerminalIcon, UserPlusIcon, UserRoundIcon } from 'lucide-react'
+import { ArrowRightIcon, KeyRoundIcon, LockKeyholeIcon, KeySquareIcon, MonitorSmartphoneIcon, PlusIcon, ShieldIcon, SquareTerminalIcon, UserPlusIcon, UserRoundIcon, UsersIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { DeviceConfirm } from '@/components/device-confirm.tsx'
 import { DeviceSessions } from '@/components/device-sessions.tsx'
 import { InviteSettings } from '@/components/invite-settings.tsx'
 import { LoginMethods } from '@/components/login-methods.tsx'
 import { PasswordForm } from '@/components/password-form.tsx'
+import { SpaceSharing } from '@/components/space-sharing.tsx'
 import { ChoiceChip, Facts, NavLinkOut, Panel, SettingRow, SettingsLayout, SideNav, StatusPill, fieldClass, labelClass, selectClass, type NavGroup } from '@/components/settings-ui.tsx'
 import { PageTitle, Shell } from '@/components/shell.tsx'
 import { UpdateNotice } from '@/components/update-panel.tsx'
@@ -25,8 +26,8 @@ const expiryChoices = [
   { value: 'custom', label: '自定义' },
 ]
 
-type SectionId = 'login-methods' | 'password' | 'devices' | 'invites' | 'device-code' | 'tokens'
-const SECTION_IDS: SectionId[] = ['login-methods', 'password', 'devices', 'invites', 'device-code', 'tokens']
+type SectionId = 'login-methods' | 'password' | 'devices' | 'space-sharing' | 'invites' | 'device-code' | 'tokens'
+const SECTION_IDS: SectionId[] = ['login-methods', 'password', 'devices', 'space-sharing', 'invites', 'device-code', 'tokens']
 const SETTINGS_NAV: NavGroup<SectionId>[] = [
   {
     label: '账户',
@@ -34,7 +35,9 @@ const SETTINGS_NAV: NavGroup<SectionId>[] = [
       { id: 'login-methods', label: '登录方式', icon: UserRoundIcon, hint: '绑定 GitHub / Google' },
       { id: 'password', label: '密码', icon: LockKeyholeIcon, hint: '邮箱 + 密码登录' },
       { id: 'devices', label: '登录设备', icon: MonitorSmartphoneIcon, hint: '已登录的浏览器' },
-      { id: 'invites', label: '邀请', icon: UserPlusIcon, hint: '邀请别人注册' },
+      { id: 'space-sharing', label: '空间成员', icon: UsersIcon, hint: '邀请别人加入我的空间' },
+      // RHEA-190 m50: registration invites are admin-only (filtered out for everyone else)
+      { id: 'invites', label: '注册邀请', icon: UserPlusIcon, hint: '邀请别人注册（管理员）' },
     ],
   },
   {
@@ -102,7 +105,7 @@ export function SettingsPage() {
       navigate('/admin?tab=oauth', { replace: true })
       return
     }
-    if (!['devices', 'login-methods', 'password', 'invites', 'device-code', 'tokens'].includes(anchor)) return
+    if (!['devices', 'login-methods', 'password', 'space-sharing', 'invites', 'device-code', 'tokens'].includes(anchor)) return
     const id = window.setTimeout(() => document.getElementById(anchor)?.scrollIntoView?.({ block: 'start' }), 50)
     return () => window.clearTimeout(id)
   }, [me, navigate])
@@ -258,7 +261,7 @@ export function SettingsPage() {
         nav={
           <SideNav
             label="设置分类"
-            groups={SETTINGS_NAV}
+            groups={me.user.role === 'admin' ? SETTINGS_NAV : SETTINGS_NAV.map((group) => ({ ...group, items: group.items.filter((item) => item.id !== 'invites') }))}
             active={section}
             onSelect={jumpTo}
             mode="anchors"
@@ -293,7 +296,8 @@ export function SettingsPage() {
         <Panel id="devices" title="登录设备" description="所有登录了这个账号的浏览器。可以单独登出某一台，或一次登出其他所有设备。">
           <DeviceSessions onSelfSignedOut={() => void refresh().then(() => window.location.assign('/login'))} />
         </Panel>
-        <InviteSettings />
+        <SpaceSharing meId={me.user.id} />
+        {me.user.role === 'admin' ? <InviteSettings /> : null}
         <DeviceConfirm initialCode="" initialVerificationId={null} auto={false} />
         <Panel
           id="tokens"
