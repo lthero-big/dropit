@@ -106,12 +106,13 @@ describe('device code helpers', () => {
     expect(parseDeviceEntry('abcd')).toEqual({ code: 'ABCD' })
   })
 
-  it('only restores device and settings paths', () => {
+  it('only restores device, settings and admin paths', () => {
     expect(isSafeReturn('/device?user_code=ABCD-EFGH&verification_id=vid-1')).toBe(true)
     expect(isSafeReturn('/settings')).toBe(true)
     expect(isSafeReturn('https://evil.example/device')).toBe(false)
     expect(isSafeReturn('//evil.example/device')).toBe(false)
-    expect(isSafeReturn('/admin')).toBe(false)
+    expect(isSafeReturn('/admin')).toBe(true)
+    expect(isSafeReturn('/r/abc')).toBe(false)
   })
 })
 
@@ -261,9 +262,10 @@ describe('settings and device confirmation', () => {
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
     renderAt('/device?user_code=ABCD-EFGH&verification_id=vid-1')
-    expect(await screen.findByRole('heading', { name: '确认设备' })).toBeTruthy()
-    expect(screen.getByText('ABCD-EFGH')).toBeTruthy()
-    expect(sessionStorage.getItem('dropit-return')).toBe('/device?user_code=ABCD-EFGH&verification_id=vid-1')
+    // RHEA-190 m48: signed out goes straight to /login?next=…; the login page stores the return path.
+    await waitFor(() => expect(window.location.pathname).toBe('/login'))
+    expect(new URLSearchParams(window.location.search).get('next')).toBe('/device?user_code=ABCD-EFGH&verification_id=vid-1')
+    await waitFor(() => expect(sessionStorage.getItem('dropit-return')).toBe('/device?user_code=ABCD-EFGH&verification_id=vid-1'))
     cleanup()
     stubFetch((url) => {
       if (url === '/api/me') return json(me)
