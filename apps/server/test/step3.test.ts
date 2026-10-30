@@ -233,8 +233,10 @@ test('RHEA-190 m50: registration invites are admin-only; users invite into their
   t.after(() => f.close());
   const admin = await f.admin();
   const alice = await f.member(admin, 'alice@example.com');
-  const view = await (await f.request('/api/me/invites', { cookie: alice.cookie })).json();
-  assert.equal(view.enabled, false);
+  // RHEA-192 m17: ordinary users cannot even list registration invites
+  const view = await f.request('/api/me/invites', { cookie: alice.cookie });
+  assert.equal(view.status, 403);
+  assert.equal(await f.errorCode(view), 'INVITES_ADMIN_ONLY');
   assert.equal((await f.request('/api/me/invites')).status, 401);
   const refused = await f.request('/api/me/invites', { method: 'POST', cookie: alice.cookie, body: {} });
   assert.equal(refused.status, 403);
@@ -258,9 +260,9 @@ test('RHEA-190 m50: registration invites are admin-only; users invite into their
   assert.equal(listed.enabled, true);
   assert.equal(listed.invites[0].status, 'used');
   const open = await (await f.request('/api/me/invites', { method: 'POST', cookie: admin, body: {} })).json();
-  assert.equal((await f.request(`/api/me/invites/${open.id}`, { method: 'DELETE', cookie: alice.cookie })).status, 404);
+  assert.equal((await f.request(`/api/me/invites/${open.id}`, { method: 'DELETE', cookie: alice.cookie })).status, 403);
   assert.equal((await f.request(`/api/me/invites/${open.id}`, { method: 'DELETE', cookie: admin })).status, 204);
-  // per-user limit and the default stay admin controlled (they now bound open space invites)
+  // the per-user limit stays admin controlled (it bounds open space invites; the default is 5)
   const users = await (await f.request('/api/admin/users', { cookie: admin })).json();
   const aliceRow = users.users.find((user: { email: string }) => user.email === 'alice@example.com');
   assert.equal(aliceRow.inviteLimit, null);
@@ -268,8 +270,8 @@ test('RHEA-190 m50: registration invites are admin-only; users invite into their
   assert.equal((await f.request(`/api/admin/users/${aliceRow.id}`, { method: 'PATCH', cookie: alice.cookie, body: { inviteLimit: 50 } })).status, 403);
   assert.equal((await f.request(`/api/admin/users/${aliceRow.id}`, { method: 'PATCH', cookie: admin, body: { inviteLimit: -1 } })).status, 400);
   assert.equal((await f.request(`/api/admin/users/${aliceRow.id}`, { method: 'PATCH', cookie: admin, body: { inviteLimit: 8 } })).status, 204);
-  const registration = await f.request('/api/admin/registration', { method: 'PUT', cookie: admin, body: { userInvites: { defaultLimit: 1 } } });
-  assert.deepEqual((await registration.json()).userInvites, { enabled: true, defaultLimit: 1 });
-  assert.equal((await f.request('/api/admin/registration', { method: 'PUT', cookie: admin, body: { userInvites: { defaultLimit: 'x' } } })).status, 400);
+  // RHEA-192 m17: the site-wide 允许普通用户邀请 / 每人默认邀请上限 setting is gone
+  assert.equal((await f.request('/api/admin/registration', { method: 'PUT', cookie: admin, body: { userInvites: { defaultLimit: 1 } } })).status, 400);
+  assert.ok(!('userInvites' in await (await f.request('/api/admin/registration', { cookie: admin })).json()));
 });
 

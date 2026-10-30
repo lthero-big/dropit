@@ -11,7 +11,7 @@
 - JSON 请求需要 `Content-Type: application/json`。
 - 错误格式：`{"error":{"code":"QUOTA_EXCEEDED"}}`；429 带 `Retry-After`。
 - 健康检查：`GET /healthz` → `{"status":"ok"}`。
-- 版本：`GET /api/version`（无需登录）→ `{"version":"0.1.0","commit":"ab078cf","buildDate":"…","install":"docker"}`。
+- 版本：`GET /api/version`（无需登录）→ `{"version":"0.1.0+20","commit":"ab078cf","buildDate":"…","install":"docker"}`。`version` 是最新的 `vX.Y.Z` 标签加上之后的提交数（正好在标签上时就是 `0.1.0`），由 `scripts/release-version.sh` 算出。
 
 ## 端点分组
 

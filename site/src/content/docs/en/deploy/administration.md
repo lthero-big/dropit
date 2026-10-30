@@ -38,11 +38,12 @@ The admin panel lives at `/admin` and is only accessible to enabled admins.
 - Choose the target space, number of uses (1–100) and validity (1–720 hours) to generate an invitation link `/invite/<token>`.
 - The token is returned only once at creation; the database stores only its SHA-256. Invitations can be revoked at any time.
 
-## User invitations
+## Registration invitations (admins only)
 
-- The “User invitations” switch under Admin → Registration controls whether normal users can create personal invitations (default on) and sets the default limit (default 5).
-- In the user editor you can change the “invite limit” per user (empty = use the default; admins are not limited).
-- The invitations list shows every invitation (personal ones with creator and status); admins can revoke unused ones. Personal invitations cannot register anyone while the policy is “closed”.
+- Only admins invite people to register: Admin → Invites, type “Registration invite”, with a use count and expiry and no cap. The invitee gets their own account and private space and joins no space.
+- Normal users cannot create registration invitations (`/api/me/invites` and `POST /api/admin/invites` answer 403). They can invite existing accounts into their own space from Settings → Space members; such an invite cannot create an account.
+- Per user, “Space invite limit” in the user editor caps open space invites (empty = default 5, 0 = none; admins are not limited).
+- The Invites list shows every invitation with its type, creator and status, and admins can revoke them. Registration invitations made by normal users in older versions are flagged and no longer register anyone.
 
 ## Personal access tokens
 

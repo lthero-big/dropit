@@ -214,7 +214,9 @@ fi
 
 DROPIT_COMMIT="$after"
 DROPIT_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-export DROPIT_COMMIT DROPIT_BUILD_DATE
+# RHEA-192 m17: newest vX.Y.Z tag + commits since it, e.g. 0.1.0+20 (the Docker build context has no .git).
+DROPIT_VERSION=$(sh scripts/release-version.sh 2>/dev/null || true)
+export DROPIT_COMMIT DROPIT_BUILD_DATE DROPIT_VERSION
 
 if [ "$mode" = docker ]; then
   [ "$dry_run" = 1 ] || resolve_and_check quiet
@@ -269,7 +271,7 @@ if [ "$mode" = docker ]; then
   fi
 
   echo "==> ${compose[*]} build"
-  "${compose[@]}" build --build-arg "DROPIT_COMMIT=$DROPIT_COMMIT" --build-arg "DROPIT_BUILD_DATE=$DROPIT_BUILD_DATE" "$service" \
+  "${compose[@]}" build --build-arg "DROPIT_COMMIT=$DROPIT_COMMIT" --build-arg "DROPIT_BUILD_DATE=$DROPIT_BUILD_DATE" --build-arg "DROPIT_VERSION=$DROPIT_VERSION" "$service" \
     || die "build failed; the running instance was not touched."
   echo "==> ${compose[*]} up -d"
   "${compose[@]}" up -d --no-build "$service"

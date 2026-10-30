@@ -12,7 +12,13 @@ if (!commit) {
   try { commit = execFileSync('git', ['rev-parse', '--short=7', 'HEAD'], { cwd: root, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).toString().trim(); }
   catch { commit = null; }
 }
+// RHEA-192 m17: newest vX.Y.Z tag + commits since it (scripts/release-version.sh), so every release shows a new
+// version instead of the never-bumped package.json "0.1.0". package.json stays the fallback without git.
 let version = env('DROPIT_VERSION');
+if (!version) {
+  try { version = execFileSync('sh', [fileURLToPath(new URL('scripts/release-version.sh', `file://${root}`))], { cwd: root, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).toString().trim() || null; }
+  catch { version = null; }
+}
 if (!version) {
   try { version = JSON.parse(readFileSync(new URL('package.json', `file://${root}`), 'utf8')).version ?? null; }
   catch { version = null; }

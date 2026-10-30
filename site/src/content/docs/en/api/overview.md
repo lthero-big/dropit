@@ -13,7 +13,7 @@ This page is an overview; the authoritative contract is [docs/api.md](../referen
 - JSON requests need `Content-Type: application/json`.
 - Error format: `{"error":{"code":"QUOTA_EXCEEDED"}}`; 429 responses include `Retry-After`.
 - Health check: `GET /healthz` → `{"status":"ok"}`.
-- Version: `GET /api/version` (no sign-in required) → `{"version":"0.1.0","commit":"ab078cf","buildDate":"…","install":"docker"}`.
+- Version: `GET /api/version` (no sign-in required) → `{"version":"0.1.0+20","commit":"ab078cf","buildDate":"…","install":"docker"}`. `version` is the newest `vX.Y.Z` tag plus the number of commits since it (exactly `0.1.0` on the tag), computed by `scripts/release-version.sh`.
 
 ## Endpoint groups
 

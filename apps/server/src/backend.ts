@@ -20,7 +20,7 @@ import { describeAgent } from './agent.js';
 import { loadUpdateSettings, UpdateChecker } from './update-check.js';
 import { buildInfoPath, loadBuildInfo } from './version.js';
 import { ORIGIN_SETTING, parseOrigin, requestOriginResolver, sameOrigin } from './origin.js';
-import { MAX_INVITE_LIMIT, USER_INVITES_SETTING, editUserInvites, parseUserInvites } from './invites.js';
+import { DEFAULT_SPACE_INVITE_LIMIT, MAX_INVITE_LIMIT } from './invites.js';
 import { PASSWORD_MAX, REGISTRATION_SETTING, checkPassword, hashPassword, hashPasswordSync, parsePolicy, sameSetupCode, setupCode, temporaryPassword, verifyPassword, type RegistrationPolicy } from './password.js';
 
 type Env = { Variables: { session: Session | undefined; ip: string; remote: string } };
@@ -160,7 +160,6 @@ export function createBackend(options: BackendOptions = {}) {
     if (firstRunCode && repo.userCount() > 0) firstRunCode = null;
     return firstRunCode !== null;
   };
-  const userInviteSettings = () => parseUserInvites(repo.setting(USER_INVITES_SETTING)?.value);
   const registrationPolicy = (): RegistrationPolicy => parsePolicy(repo.setting(REGISTRATION_SETTING)?.value) ?? 'invite';
   const service = new ClipboardService(config, repo, files, events, now);
   const update = options.update ?? new UpdateChecker(loadBuildInfo(process.env, readJsonFile(buildInfoPath)), loadUpdateSettings(),
@@ -735,13 +734,12 @@ export function createBackend(options: BackendOptions = {}) {
   const effectiveQuota = (userId: string) => repo.quotaOverride(userId) ?? config.userQuotaBytes;
   app.get('/api/admin/users', c => {
     service.admin(c.get('session'));
-    const usage = repo.inviteUsageByUser(now());
     const activeSpaceInvites = repo.activeSpaceInvitesByUser(now());
-    const defaults = userInviteSettings();
     return c.json({ users: repo.users().map(user => ({
-      inviteLimit: user.inviteLimit, inviteLimitEffective: user.inviteLimit ?? defaults.defaultLimit, invitesUsed: usage.get(user.id) ?? 0,
+      // RHEA-192 m17: inviteLimit only caps open space invites now (registration invites are admin-only, uncapped).
+      inviteLimit: user.inviteLimit, inviteLimitEffective: user.inviteLimit ?? DEFAULT_SPACE_INVITE_LIMIT,
       // RHEA-190 m50: 空间邀请 column: may this user invite people into their space, and how many invites are open now.
-      spaceInvitesEnabled: user.role === 'admin' || (defaults.enabled && (user.inviteLimit ?? defaults.defaultLimit) > 0),
+      spaceInvitesEnabled: user.role === 'admin' || (user.inviteLimit ?? DEFAULT_SPACE_INVITE_LIMIT) > 0,
       activeSpaceInvites: activeSpaceInvites.get(user.id) ?? 0,
       id: user.id, email: user.email, name: user.name, role: user.role, disabled: user.disabled,
       pending: user.pending, createdAt: user.createdAt, usedBytes: user.usedBytes,
@@ -770,20 +768,17 @@ export function createBackend(options: BackendOptions = {}) {
   // RHEA-190 auth step 2: 管理 → 注册. closed / invite (default) / open.
   const registrationView = () => {
     const row = repo.setting(REGISTRATION_SETTING);
-    return { policy: registrationPolicy(), default: 'invite', updatedAt: row?.updatedAt ?? null, updatedBy: row?.updatedBy ?? null,
-      userInvites: userInviteSettings() };
+    return { policy: registrationPolicy(), default: 'invite', updatedAt: row?.updatedAt ?? null, updatedBy: row?.updatedBy ?? null };
   };
   app.get('/api/admin/registration', c => { adminBrowser(c); return c.json(registrationView()); });
   app.put('/api/admin/registration', async c => {
     const auth = adminBrowser(c);
     limit(c, 'registration-config', config.rateAuth);
     const body = await json(c, 1024);
-    if (!('policy' in body) && !('userInvites' in body)) throw new ApiError(400, 'INVALID_INPUT');
-    const policy = 'policy' in body ? parsePolicy(body.policy) : null;
-    if ('policy' in body && !policy) throw new ApiError(400, 'INVALID_INPUT');
-    const invites = 'userInvites' in body ? editUserInvites(userInviteSettings(), body.userInvites) : null;
-    if (policy) repo.saveSetting(REGISTRATION_SETTING, policy, now(), auth.user.email);
-    if (invites) repo.saveSetting(USER_INVITES_SETTING, JSON.stringify(invites), now(), auth.user.email);
+    // RHEA-192 m17: `userInvites` (ordinary users inviting to register) no longer exists; only the policy is editable.
+    const policy = parsePolicy(body.policy);
+    if (!policy) throw new ApiError(400, 'INVALID_INPUT');
+    repo.saveSetting(REGISTRATION_SETTING, policy, now(), auth.user.email);
     return c.json(registrationView());
   });
   app.post('/api/admin/users', async c => {
@@ -862,19 +857,23 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.get('/api/admin/invites', c => {
     service.admin(c.get('session'));
-    return c.json({ invites: repo.invites().map(invite => ({ ...invite, status: inviteStatus(invite, now()) })) });
+    // RHEA-192 m17: kind tells registration invites (joinSpace=0) from space invites; a registration invite made by
+    // someone who is not an admin (older data) is listed with creatorAdmin=false: it can no longer open registration.
+    return c.json({ invites: repo.invites().map(({ createdByRole, ...invite }) => ({ ...invite,
+      kind: invite.joinSpace === 0 ? 'registration' : 'space', creatorAdmin: createdByRole === 'admin', status: inviteStatus(invite, now()) })) });
   });
-  // RHEA-190 auth step 3: 设置 → 邀请. Every signed-in user may invite someone to register (admin switch and limit in 管理 → 注册).
-  app.get('/api/me/invites', c => c.json({ ...service.personalInvites(c.get('session'), userInviteSettings()), registration: registrationPolicy() }));
+  // RHEA-192 m17: registration invites are admin-only. These older self-service routes stay for API clients but
+  // answer 403 INVITES_ADMIN_ONLY to anyone who is not an admin; admins normally use 管理 → 邀请.
+  app.get('/api/me/invites', c => c.json({ ...service.personalInvites(c.get('session')), registration: registrationPolicy() }));
   app.post('/api/me/invites', async c => {
-    service.requireSession(c.get('session'));
+    service.registrationAdmin(c.get('session'));
     limit(c, 'invite', config.rateInvite);
     const body = c.req.header('content-type')?.startsWith('application/json') ? await json(c, 1024) : {};
     const hours = integer(body.expiresInHours ?? 168, 1, 720);
-    return c.json(service.createPersonalInvite(c.get('session'), userInviteSettings(), hours, originFor(c)), 201);
+    return c.json(service.createRegistrationInvite(c.get('session'), { maxUses: 1, hours }, originFor(c)), 201);
   });
   app.delete('/api/me/invites/:id', c => {
-    const auth = service.requireSession(c.get('session'));
+    const auth = service.registrationAdmin(c.get('session'));
     limit(c, 'invite', config.rateInvite);
     repo.revokePersonalInvite(c.req.param('id'), auth.user.id);
     return c.body(null, 204);
@@ -882,6 +881,12 @@ export function createBackend(options: BackendOptions = {}) {
   app.post('/api/admin/invites', async c => {
     service.admin(c.get('session')); limit(c, 'invite', config.rateInvite);
     const body = await json(c, 2048);
+    // RHEA-192 m17: 管理 → 邀请 → 注册邀请: opens registration only, never joins a space, no cap.
+    if (body.kind === 'registration') {
+      return c.json(service.createRegistrationInvite(c.get('session'), {
+        maxUses: integer(body.maxUses ?? 1, 1, 100), hours: integer(body.expiresInHours ?? 168, 1, 720) }, originFor(c)), 201);
+    }
+    if (body.kind !== undefined && body.kind !== 'space') throw new ApiError(400, 'INVALID_INPUT');
     return c.json(service.createInvite(c.get('session'), string(body.spaceId), integer(body.maxUses ?? 1, 1, 100), integer(body.expiresInHours ?? 24, 1, 720), originFor(c)), 201);
   });
   app.delete('/api/admin/invites/:id', c => {
@@ -900,12 +905,12 @@ export function createBackend(options: BackendOptions = {}) {
     if (value !== 'viewer' && value !== 'editor') throw new ApiError(400, 'INVALID_INPUT');
     return value;
   };
-  app.get('/api/spaces/:space/invites', c => c.json(service.spaceInvites(c.get('session'), c.req.param('space'), userInviteSettings())));
+  app.get('/api/spaces/:space/invites', c => c.json(service.spaceInvites(c.get('session'), c.req.param('space'))));
   app.post('/api/spaces/:space/invites', async c => {
     service.requireSession(c.get('session'));
     limit(c, 'invite', config.rateInvite);
     const body = c.req.header('content-type')?.startsWith('application/json') ? await json(c, 1024) : {};
-    return c.json(service.createSpaceInvite(c.get('session'), c.req.param('space'), userInviteSettings(), {
+    return c.json(service.createSpaceInvite(c.get('session'), c.req.param('space'), {
       maxUses: integer(body.maxUses ?? 1, 1, 100), hours: integer(body.expiresInHours ?? 168, 1, 720),
       role: body.role === undefined ? 'viewer' : memberRoleInput(body.role),
     }, originFor(c)), 201);

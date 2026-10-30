@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router'
-import { ArrowRightIcon, KeyRoundIcon, LockKeyholeIcon, KeySquareIcon, MonitorSmartphoneIcon, PlusIcon, ShieldIcon, SquareTerminalIcon, UserPlusIcon, UserRoundIcon, UsersIcon } from 'lucide-react'
+import { ArrowRightIcon, KeyRoundIcon, LockKeyholeIcon, KeySquareIcon, MonitorSmartphoneIcon, PlusIcon, ShieldIcon, SquareTerminalIcon, UserRoundIcon, UsersIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { DeviceConfirm } from '@/components/device-confirm.tsx'
 import { DeviceSessions } from '@/components/device-sessions.tsx'
-import { InviteSettings } from '@/components/invite-settings.tsx'
 import { LoginMethods } from '@/components/login-methods.tsx'
 import { PasswordForm } from '@/components/password-form.tsx'
 import { SpaceSharing } from '@/components/space-sharing.tsx'
@@ -28,8 +27,8 @@ const expiryChoices = [
   { value: 'custom', label: '自定义' },
 ]
 
-type SectionId = 'login-methods' | 'password' | 'devices' | 'space-sharing' | 'invites' | 'device-code' | 'tokens'
-const SECTION_IDS: SectionId[] = ['login-methods', 'password', 'devices', 'space-sharing', 'invites', 'device-code', 'tokens']
+type SectionId = 'login-methods' | 'password' | 'devices' | 'space-sharing' | 'device-code' | 'tokens'
+const SECTION_IDS: SectionId[] = ['login-methods', 'password', 'devices', 'space-sharing', 'device-code', 'tokens']
 const SETTINGS_NAV: NavGroup<SectionId>[] = [
   {
     label: '账户',
@@ -38,8 +37,6 @@ const SETTINGS_NAV: NavGroup<SectionId>[] = [
       { id: 'password', label: '密码', icon: LockKeyholeIcon, hint: '邮箱 + 密码登录' },
       { id: 'devices', label: '登录设备', icon: MonitorSmartphoneIcon, hint: '已登录的浏览器' },
       { id: 'space-sharing', label: '空间成员', icon: UsersIcon, hint: '邀请别人加入我的空间' },
-      // RHEA-190 m50: registration invites are admin-only (filtered out for everyone else)
-      { id: 'invites', label: '注册邀请', icon: UserPlusIcon, hint: '邀请别人注册（管理员）' },
     ],
   },
   {
@@ -102,7 +99,12 @@ export function SettingsPage() {
       navigate('/admin?tab=oauth', { replace: true })
       return
     }
-    if (!['devices', 'login-methods', 'password', 'space-sharing', 'invites', 'device-code', 'tokens'].includes(anchor)) return
+    // RHEA-192 m17: registration invites moved to 管理 → 邀请 (admins only). Old links to /settings#invites land there.
+    if (anchor === 'invites' && me.user.role === 'admin') {
+      navigate('/admin?tab=invites', { replace: true })
+      return
+    }
+    if (!['devices', 'login-methods', 'password', 'space-sharing', 'device-code', 'tokens'].includes(anchor)) return
     const id = window.setTimeout(() => document.getElementById(anchor)?.scrollIntoView?.({ block: 'start' }), 50)
     return () => window.clearTimeout(id)
   }, [me, navigate])
@@ -248,7 +250,7 @@ export function SettingsPage() {
         nav={
           <SideNav
             label="设置分类"
-            groups={me.user.role === 'admin' ? SETTINGS_NAV : SETTINGS_NAV.map((group) => ({ ...group, items: group.items.filter((item) => item.id !== 'invites') }))}
+            groups={SETTINGS_NAV}
             active={section}
             onSelect={jumpTo}
             mode="anchors"
@@ -284,7 +286,6 @@ export function SettingsPage() {
           <DeviceSessions onSelfSignedOut={() => void refresh().then(() => window.location.assign('/login'))} />
         </Panel>
         <SpaceSharing meId={me.user.id} />
-        {me.user.role === 'admin' ? <InviteSettings /> : null}
         <DeviceConfirm initialCode="" initialVerificationId={null} auto={false} />
         <Panel
           id="tokens"

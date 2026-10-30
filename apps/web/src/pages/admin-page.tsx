@@ -38,7 +38,7 @@ const NAV: NavGroup<Tab>[] = [
   {
     label: '成员与访问',
     items: [
-      { id: 'invites', label: '邀请', icon: TicketIcon, hint: '生成一次性邀请链接' },
+      { id: 'invites', label: '邀请', icon: TicketIcon, hint: '注册邀请与空间邀请' },
       { id: 'users', label: '用户', icon: UsersIcon, hint: '预创建、编辑、停用用户' },
       { id: 'registration', label: '注册', icon: DoorOpenIcon, hint: '关闭 / 仅邀请 / 开放' },
     ],
@@ -62,7 +62,7 @@ const NAV: NavGroup<Tab>[] = [
 ]
 
 const HEADERS: Record<Tab, { title: string; description: string }> = {
-  invites: { title: '邀请', description: '为某个空间生成邀请链接。链接只在生成时显示一次，过期、撤销或用尽后立即失效。' },
+  invites: { title: '邀请', description: '只有管理员能邀请别人注册。注册邀请只开放注册、不加入任何空间；空间邀请把人拉进某个空间。链接只在生成时显示一次，过期、撤销或用尽后立即失效。' },
   users: { title: '用户', description: '预创建账号、调整角色与配额、重置密码、停用或强制下线。预创建的账号可用临时密码登录，或首次 OAuth 登录时按邮箱绑定。' },
   registration: { title: '注册', description: '谁可以创建新账号：关闭、仅邀请（默认）或开放注册。' },
   rooms: { title: '临时房间', description: '所有未过期的临时房间：房间码、创建者、创建与最后活跃时间、内容条数和 PIN。管理员可以关闭或删除房间、解除 PIN 锁定，但看不到房间内容。' },
@@ -78,6 +78,14 @@ function initialTab(): Tab {
   return tabIds.includes(requested as Tab) ? (requested as Tab) : 'invites'
 }
 type Editor = 'new' | AdminUser | null
+
+type InviteKind = 'registration' | 'space'
+
+/** RHEA-192 m17: what an invite is for, in the 邀请记录 table. */
+function inviteKindLabel(invite: Invite): string {
+  if (invite.joinSpace !== 0) return '空间邀请'
+  return invite.creatorAdmin === false ? `注册邀请 · ${invite.createdByEmail ?? '未知'}（普通用户创建，已不能注册）` : `注册邀请 · ${invite.createdByEmail ?? '未知'}`
+}
 
 function inviteState(invite: Invite, now: number): string {
   if (invite.revoked) return '已撤销'
@@ -117,7 +125,8 @@ export function AdminPage() {
   const [spaces, setSpaces] = useState<SpaceSummary[]>([])
   const [limits, setLimits] = useState<AdminLimits | null>(null)
   const [spaceId, setSpaceId] = useState('')
-  const [maxUses, setMaxUses] = useState('5')
+  const [kind, setKind] = useState<InviteKind>('registration')
+  const [maxUses, setMaxUses] = useState('1')
   const [hours, setHours] = useState('168')
   const [freshUrl, setFreshUrl] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>(initialTab)
@@ -179,11 +188,11 @@ export function AdminPage() {
       const created = await api<InviteCreated>('/api/admin/invites', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          spaceId,
-          maxUses: Number(maxUses),
-          expiresInHours: Number(hours),
-        }),
+        body: JSON.stringify(
+          kind === 'registration'
+            ? { kind, maxUses: Number(maxUses), expiresInHours: Number(hours) }
+            : { kind, spaceId, maxUses: Number(maxUses), expiresInHours: Number(hours) },
+        ),
       })
       setFreshUrl(created.url)
       toast.success('邀请已生成。链接只显示这一次。')
@@ -237,18 +246,29 @@ export function AdminPage() {
           />
           {tab === 'invites' ? (
             <>
-              <Panel title="生成邀请" description="选择空间、可用次数和有效期。">
-                <form className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_8.5rem_8.5rem_auto] sm:items-end" onSubmit={(event) => void createInvite(event)}>
+              <Panel title="生成邀请" description="注册邀请：对方用链接注册自己的账号，不加入任何空间，不限数量。空间邀请：选择空间，对方加入该空间。">
+                <form className="grid gap-3 sm:grid-cols-[9rem_minmax(0,1fr)_7rem_7.5rem_auto] sm:items-end" onSubmit={(event) => void createInvite(event)} aria-label="生成邀请">
                   <label className={labelClass}>
-                    空间
-                    <select className={selectClass} value={spaceId} onChange={(event) => setSpaceId(event.target.value)}>
-                      {spaces.map((space) => (
-                        <option key={space.id} value={space.id}>
-                          {spaceLabel(space, me.user.id, spaces)}
-                        </option>
-                      ))}
+                    类型
+                    <select className={selectClass} value={kind} onChange={(event) => setKind(event.target.value as InviteKind)} data-invite-kind="">
+                      <option value="registration">注册邀请</option>
+                      <option value="space">空间邀请</option>
                     </select>
                   </label>
+                  {kind === 'space' ? (
+                    <label className={labelClass}>
+                      空间
+                      <select className={selectClass} value={spaceId} onChange={(event) => setSpaceId(event.target.value)}>
+                        {spaces.map((space) => (
+                          <option key={space.id} value={space.id}>
+                            {spaceLabel(space, me.user.id, spaces)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <p className="self-center text-xs text-muted-foreground">只开放注册：对方得到自己的账号和私人空间。</p>
+                  )}
                   <label className={labelClass}>
                     次数
                     <select className={selectClass} value={maxUses} onChange={(event) => setMaxUses(event.target.value)}>
@@ -288,7 +308,7 @@ export function AdminPage() {
                   <table className="w-full text-sm">
                     <thead className="bg-surface-0">
                       <tr className="border-b border-line-1">
-                        <th className={thClass}>空间</th>
+                        <th className={thClass}>类型 / 空间</th>
                         <th className={thClass}>使用</th>
                         <th className={thClass}>剩余</th>
                         <th className={thClass}>状态</th>
@@ -303,8 +323,8 @@ export function AdminPage() {
                         const state = inviteState(invite, now)
                         return (
                           <tr key={invite.id} className="border-b border-line-1 last:border-b-0">
-                            <td className={tdClass} data-l="空间">
-                              {invite.joinSpace === 0 ? `个人邀请 · ${invite.createdByEmail ?? '未知'}` : space ? spaceLabel(space, me.user.id, spaces) : invite.spaceId.slice(0, 8)}
+                            <td className={tdClass} data-l="类型 / 空间" data-invite-row={invite.joinSpace === 0 ? 'registration' : 'space'}>
+                              {invite.joinSpace === 0 ? inviteKindLabel(invite) : `${inviteKindLabel(invite)} · ${space ? spaceLabel(space, me.user.id, spaces) : invite.spaceId.slice(0, 8)}`}
                             </td>
                             <td className={`${tdClass} tabular-nums`} data-l="使用">{invite.uses}/{invite.maxUses}</td>
                             <td className={`${tdClass} text-fg-2`} data-l="剩余">{formatRemain(invite.expiresAt - now)}</td>
@@ -616,9 +636,9 @@ function UserEditor({ user, onClose, onSaved }: { user: AdminUser | null; onClos
           <Switch className="self-end" label="使用安装默认配额" description="关闭后可单独设置这个用户的配额" checked={useDefault} onChange={(event) => setUseDefault(event.target.checked)} />
           {creating ? null : (
             <label className={labelClass}>
-              邀请上限（留空使用默认值 {user?.inviteLimitEffective !== undefined && user.inviteLimit == null ? `：${user.inviteLimitEffective}` : ''}）
+              空间邀请上限（留空使用默认值{user?.inviteLimitEffective !== undefined && user.inviteLimit == null ? `：${user.inviteLimitEffective}` : ''}；0 = 不能邀请）
               <input className={fieldClass} inputMode="numeric" value={inviteLimit} placeholder="默认" onChange={(event) => setInviteLimit(event.target.value)} />
-              <span className="text-[11px] text-muted-foreground">已用 {user?.invitesUsed ?? 0}</span>
+              <span className="text-[11px] text-muted-foreground">同时有效的空间邀请 {user?.activeSpaceInvites ?? 0} 个。注册邀请只有管理员能生成。</span>
             </label>
           )}
           {creating ? (

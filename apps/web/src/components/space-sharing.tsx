@@ -107,7 +107,7 @@ export function SpaceSharing({ meId }: { meId: string }) {
       }
     >
       <div className="grid gap-4 px-4 py-3.5 sm:px-5">
-        {!invites.enabled ? <Note>管理员暂时关闭了普通用户的空间邀请。</Note> : null}
+        {!invites.enabled ? <Note>管理员关闭了你的空间邀请（上限为 0）。</Note> : null}
         {invites.enabled && full ? <Note>有效邀请已达上限：撤销一个，或等它过期 / 用完；也可以请管理员提高上限。</Note> : null}
         <form className="grid gap-3 sm:grid-cols-[repeat(3,minmax(0,1fr))_auto] sm:items-end" onSubmit={(event) => void create(event)} aria-label="生成空间邀请">
           <label className={labelClass}>
