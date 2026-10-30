@@ -16,6 +16,7 @@ import { HoldToConfirm, MediaViewer, type ViewerMedia } from '@/components/clip-
 import { CodeLines, GridBody, RowBody, shortLeft, type ClipVisual } from '@/components/clip-visual.tsx'
 import { ConfirmRetract } from '@/components/confirm-retract.tsx'
 import { SharePanel } from '@/components/share-panel.tsx'
+import { TextReader } from '@/components/text-reader.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { MarkdownText } from '@/lib/markdown.tsx'
 import { AGING_WINDOW, clipKind, codeSource, parseColor, parseLink } from '@/lib/clip-kind.ts'
@@ -171,12 +172,15 @@ export function BoardCard(props: BoardCardProps) {
   const [lifted, setLifted] = useState(false)
   const liftTimer = useRef(0)
   const [viewer, setViewer] = useState<ViewerMedia | null>(null)
+  // RHEA-190 lt2: a long text card opens the full-screen reader instead of growing in place
+  const [reading, setReading] = useState(false)
   const remaining = item.expiresAt - now
   const aging = remaining < AGING_WINDOW
   const ratio = Math.max(0, Math.min(1, remaining / AGING_WINDOW))
   const life = aging ? 0.15 + ratio * 0.85 : 1
   const curl = aging ? 1 - ratio : 0
   const visual = itemVisual(item, base)
+  const longText = item.kind === 'text' && visual.kind === 'text' && !displayable(item.text ?? '') && textOverflows(item.text ?? '')
   const busy = editing || props.shareOpen
   const canDrag = gesture === 'pin-drag' ? !busy && (canRetract || canShare) : !busy
   // Touch: a left swipe parks the card aside while 确认撤回 waits behind it.
@@ -322,24 +326,25 @@ export function BoardCard(props: BoardCardProps) {
     if (item.kind !== 'text' || visual.kind !== 'text') return undefined
     const text = item.text ?? ''
     const long = textOverflows(text)
-    const expander = long ? (
-      <button
-        type="button"
-        data-action=""
-        className="mt-1 inline-flex min-h-10 min-w-10 items-center justify-center self-start rounded-md px-2 text-xs font-medium text-fg-3 hover:text-fg"
-        style={touchTarget}
-        aria-expanded={props.textOpen}
-        onClick={props.onToggleText}
-      >
-        {props.textOpen ? '收起' : '展开'}
-      </button>
-    ) : null
-    if (variant === 'row' && !props.textOpen && !long && displayable(text)) return <p className="dd-display truncate text-[15px] font-medium">{text}</p>
+    if (variant === 'row' && !long && displayable(text)) return <p className="dd-display truncate text-[15px] font-medium">{text}</p>
     if (variant === 'grid' && displayable(text)) return <p className="dd-display text-[20px] font-medium leading-[1.35] tracking-[-0.01em] break-words text-[var(--fg)]">{text}</p>
+    // RHEA-190 lt2: long text always stays a collapsed preview on the board; 展开 (or a click on the card) opens the reader.
     return (
-      <div className="flex min-w-0 flex-col text-[var(--fg)]">
-        <MarkdownText text={text} collapsed={!props.textOpen} />
-        {expander}
+      <div className={`flex min-w-0 flex-col text-[var(--fg)] ${long ? 'cursor-zoom-in' : ''}`} data-text-preview={long ? '' : undefined}>
+        <MarkdownText text={text} collapsed={long} />
+        {long ? (
+          <button
+            type="button"
+            data-action=""
+            className="mt-1 inline-flex min-h-10 min-w-10 items-center justify-center self-start rounded-md px-2 text-xs font-medium text-fg-3 hover:text-fg"
+            style={touchTarget}
+            aria-haspopup="dialog"
+            aria-expanded={reading}
+            onClick={() => setReading(true)}
+          >
+            展开
+          </button>
+        ) : null}
       </div>
     )
   })()
@@ -387,7 +392,7 @@ export function BoardCard(props: BoardCardProps) {
       data-copied={copied ? '' : undefined}
       layout={reduced ? false : 'position'}
       transition={{ layout: item.pinned ? springBounce : springSettle }}
-      className={`relative list-none outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${variant === 'grid' ? 'h-full' : ''}`}
+      className="relative list-none outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       style={{ zIndex: lifted || open ? 30 : undefined }}
     >
       {gesture === 'swipe' ? (
@@ -403,7 +408,7 @@ export function BoardCard(props: BoardCardProps) {
         </div>
       ) : null}
       {gesture === 'swipe' && canRetract ? <AnimatePresence>{armed ? <ConfirmRetract onConfirm={props.onRetractNow} /> : null}</AnimatePresence> : null}
-      <motion.div ref={scope} className={`relative ${variant === 'grid' ? 'h-full' : ''}`}>
+      <motion.div ref={scope} className="relative">
         <motion.div
           ref={cardRef}
           data-card=""
@@ -411,7 +416,7 @@ export function BoardCard(props: BoardCardProps) {
           data-open={open || pending || undefined}
           data-aging={aging || undefined}
           data-copied={copied || undefined}
-          className={`dd-card flex flex-col outline-none ${variant === 'grid' ? 'h-full' : ''} ${canDrag && gesture === 'pin-drag' ? 'cursor-grab' : ''}`}
+          className={`dd-card flex flex-col outline-none ${canDrag && gesture === 'pin-drag' ? 'cursor-grab' : ''}`}
           style={{
             ['--life' as string]: life,
             ['--curl' as string]: curl,
@@ -456,6 +461,10 @@ export function BoardCard(props: BoardCardProps) {
           onTap={(event) => {
             if (dragged.current || isInteractive(event.target)) return
             if (window.getSelection?.()?.toString()) return
+            if (longText && !editing && event.target instanceof Element && event.target.closest('.dd-card-body')) {
+              setReading(true)
+              return
+            }
             onOpen(!open)
           }}
         >
@@ -624,6 +633,7 @@ export function BoardCard(props: BoardCardProps) {
           )
         : null}
       <MediaViewer media={viewer} anchor={scope} reduced={reduced} onClose={() => setViewer(null)} />
+      {longText ? <TextReader text={item.text ?? ''} open={reading} anchor={cardRef} reduced={reduced} meta={`${sender} · ${formatWhen(item.createdAt, now)}`} onClose={() => setReading(false)} /> : null}
     </motion.li>
   )
 }
