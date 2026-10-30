@@ -5,6 +5,7 @@ import { PageTitle, Shell } from '@/components/shell.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { normalizeUserCode, readVerificationId } from '@/lib/machine.ts'
 import { useSession } from '@/lib/session.tsx'
+import { PageLoading } from '@/components/page-loading.tsx'
 
 export function DevicePage() {
   const { status, me, refresh } = useSession()
@@ -12,7 +13,7 @@ export function DevicePage() {
   const code = normalizeUserCode(params.get('user_code') ?? '')
   const verificationId = readVerificationId(params.get('verification_id'))
 
-  if (status === 'loading') return <main className="px-6 py-16 text-sm text-muted-foreground">正在连接…</main>
+  if (status === 'loading') return <PageLoading label="正在连接…" />
   if (status === 'error') {
     return (
       <main className="mx-auto max-w-md px-6 py-16">

@@ -369,3 +369,45 @@
     animation: none !important;
   }
 }
+
+/* RHEA-190 m51: the shared full-page loading transition (components/page-loading.tsx). */
+.dd-page-loading-body {
+  transition: opacity var(--dur-slow) var(--ease-enter), transform var(--dur-slow) var(--ease-enter);
+}
+.dd-page-loading[data-page-loading="pending"] .dd-page-loading-body {
+  opacity: 0;
+  transform: translateY(4px);
+}
+.dd-page-loading[data-page-loading="shown"] .dd-page-loading-body {
+  opacity: 1;
+  transform: none;
+}
+.dd-spinner {
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: 9999px;
+  border: 2px solid color-mix(in oklab, var(--fg) 14%, transparent);
+  border-top-color: var(--brand);
+  animation: dd-spin 0.9s linear infinite;
+}
+@keyframes dd-spin {
+  to { transform: rotate(360deg); }
+}
+html[data-page-reveal] #root > :not([data-page-loading]):not(section) {
+  animation: dd-page-in var(--dur-slow) var(--ease-enter) both;
+}
+@keyframes dd-page-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dd-spinner,
+  html[data-page-reveal] #root > :not([data-page-loading]):not(section) {
+    animation: none !important;
+  }
+  .dd-page-loading[data-page-loading] .dd-page-loading-body {
+    transition: none !important;
+    transform: none;
+  }
+}
