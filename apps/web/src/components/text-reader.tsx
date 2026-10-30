@@ -72,19 +72,19 @@ function Reader({ text, meta, reduced, onClose }: { text: string; meta?: string;
       aria-modal="true"
       aria-labelledby={titleId}
       data-text-reader=""
-      className="fixed inset-0 z-[100] flex items-center justify-center p-0 sm:p-6 lg:p-10"
+      className="fixed inset-0 z-[100] flex items-center justify-center px-3 pt-[max(0.75rem,env(safe-area-inset-top))] pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-6 lg:p-10"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1, transition: { duration: reduced ? 0 : dur.base, ease: easeOut } }}
       exit={{ opacity: 0, transition: { duration: reduced ? 0 : dur.fast, ease: easeIn } }}
     >
       <div data-text-reader-backdrop="" className="absolute inset-0 bg-[color-mix(in_oklab,var(--bg)_45%,black)]/70 backdrop-blur-md" onClick={onClose} aria-hidden />
       <motion.article
-        className="relative z-10 flex h-full max-h-full w-full flex-col overflow-hidden border-[var(--line-2)] bg-[var(--surface-1)] shadow-[var(--elev-3)] sm:h-auto sm:max-h-[min(88vh,1100px)] sm:max-w-[min(820px,100%)] sm:rounded-[var(--radius-lg)] sm:border"
+        className="relative z-10 flex max-h-full w-full max-w-[min(820px,100%)] flex-col overflow-hidden rounded-[var(--radius-lg)] border border-[var(--line-2)] bg-[var(--surface-1)] shadow-[var(--elev-3)] sm:max-h-[min(88vh,1100px)]"
         initial={reduced ? false : { opacity: 0, y: 16, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1, transition: reduced ? { duration: 0 } : springSettle }}
         exit={reduced ? { opacity: 0 } : { opacity: 0, y: 10, scale: 0.98, transition: { duration: dur.fast, ease: easeIn } }}
       >
-        <header className="flex shrink-0 items-center gap-3 border-b border-[var(--line-1)] py-2 pr-2 pl-5 pt-[max(0.5rem,env(safe-area-inset-top))]">
+        <header className="flex shrink-0 items-center gap-3 border-b border-[var(--line-1)] py-2 pr-2 pl-5">
           <h2 id={titleId} className="text-[14px] font-semibold text-[var(--fg)]">
             全文
           </h2>
@@ -103,7 +103,7 @@ function Reader({ text, meta, reduced, onClose }: { text: string; meta?: string;
             <XIcon className="size-4" />
           </button>
         </header>
-        <div data-text-reader-scroll="" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 pb-[max(1rem,env(safe-area-inset-bottom))] text-[var(--fg)] sm:px-8 sm:py-6">
+        <div data-text-reader-scroll="" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 text-[var(--fg)] sm:px-8 sm:py-6">
           <MarkdownText text={text} defaultRendered />
         </div>
       </motion.article>
