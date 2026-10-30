@@ -13,7 +13,8 @@ import { UpdateNotice } from '@/components/update-panel.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText } from '@/lib/api.ts'
 import { copyText, formatWhen, useClock } from '@/lib/format.ts'
-import { formatStamp, rememberReturn, scopeLabel } from '@/lib/machine.ts'
+import { formatStamp, scopeLabel } from '@/lib/machine.ts'
+import { LoginRedirect } from '@/components/login-redirect.tsx'
 import { useSession } from '@/lib/session.tsx'
 import type { AccessToken } from '@/lib/types.ts'
 
@@ -77,11 +78,6 @@ export function SettingsPage() {
     const body = await api<{ tokens: AccessToken[] }>('/api/tokens')
     setTokens(body.tokens)
   }, [])
-
-  useEffect(() => {
-    if (status !== 'anon') return
-    rememberReturn(`${window.location.pathname}${window.location.search}`)
-  }, [status])
 
   useEffect(() => {
     if (!me) return
@@ -238,17 +234,7 @@ export function SettingsPage() {
       </main>
     )
   }
-  if (!me) {
-    return (
-      <main className="mx-auto flex min-h-svh max-w-md flex-col justify-center px-6 py-16">
-        <h1 className="text-4xl font-semibold">请先登录</h1>
-        <p className="mt-4 text-sm text-muted-foreground">登录后可以确认设备码，并管理个人访问令牌。</p>
-        <Link to="/login" className="mt-6 text-sm font-medium">
-          登录后继续
-        </Link>
-      </main>
-    )
-  }
+  if (!me) return <LoginRedirect />
 
   return (
     <Shell>

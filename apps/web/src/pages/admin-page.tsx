@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { Link } from 'react-router'
 import { toast } from 'sonner'
 import { CopyIcon, DoorOpenIcon, GaugeIcon, GlobeIcon, KeyRoundIcon, PlusIcon, RefreshCwIcon, SlidersHorizontalIcon, TicketIcon, UsersIcon } from 'lucide-react'
 import { DeviceSessions } from '@/components/device-sessions.tsx'
+import { LoginRedirect } from '@/components/login-redirect.tsx'
 import { LimitsEditor } from '@/components/limits-editor.tsx'
 import { OAuthSettings } from '@/components/oauth-settings.tsx'
 import { RegistrationSettings } from '@/components/registration-settings.tsx'
@@ -106,7 +106,7 @@ const thClass = 'px-4 py-2.5 text-left text-[11px] font-medium text-fg-3 first:p
 const tdClass = 'px-4 py-3 align-middle first:pl-4 sm:first:pl-5 last:pr-4 sm:last:pr-5'
 
 export function AdminPage() {
-  const { status, me } = useSession()
+  const { status, me, refresh } = useSession()
   const now = useClock(0)
   const [users, setUsers] = useState<AdminUser[]>([])
   const [invites, setInvites] = useState<Invite[]>([])
@@ -140,16 +140,17 @@ export function AdminPage() {
   }, [load, me])
 
   if (status === 'loading') return <main className="px-6 py-16 text-sm text-muted-foreground">正在连接…</main>
-  if (!me) {
+  if (status === 'error') {
     return (
       <main className="mx-auto max-w-md px-6 py-16">
-        <h1 className="text-3xl font-semibold">请先登录</h1>
-        <Link to="/login" className="mt-4 inline-block text-sm font-medium">
-          登录
-        </Link>
+        <h1 className="text-3xl font-semibold">无法连接</h1>
+        <Button type="button" className="mt-6" onClick={() => void refresh()}>
+          重试
+        </Button>
       </main>
     )
   }
+  if (!me) return <LoginRedirect />
   if (me.user.role !== 'admin') {
     return (
       <Shell>

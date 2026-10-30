@@ -43,16 +43,34 @@ export function lifetimeText(days: number | null): string {
   return `${days} 天`
 }
 
-/** OAuth always returns to `/`, so the device link is restored from sessionStorage. */
+/** Pages that send a signed-out visitor to /login and expect to get them back afterwards. */
+const RETURN_PATHS = new Set(['/device', '/settings', '/admin'])
+
+/**
+ * OAuth always returns to `/`, so the page to go back to is kept in sessionStorage.
+ * Only same-origin paths on the allow list are accepted, so `?next=` can't become an open redirect.
+ */
 export function isSafeReturn(path: string): boolean {
   if (!path.startsWith('/') || path.startsWith('//') || path.includes('\\') || path.includes('://')) return false
+  // Control characters (tabs, newlines) are stripped by URL parsing and could hide a scheme or host.
+  if ([...path].some((char) => char.charCodeAt(0) < 0x20 || char.charCodeAt(0) === 0x7f)) return false
   try {
     const url = new URL(path, 'http://dropit.local')
     if (url.origin !== 'http://dropit.local' || url.username || url.password) return false
-    return url.pathname === '/device' || url.pathname === '/settings'
+    return RETURN_PATHS.has(url.pathname)
   } catch {
     return false
   }
+}
+
+/** Reads `?next=` on the login page. Anything that isn't a safe return path is dropped. */
+export function readNext(value: string | null): string | null {
+  return value && isSafeReturn(value) ? value : null
+}
+
+/** Where a signed-out visitor of `path` is sent: `/login?next=<path>`, or plain `/login` if `path` isn't allowed. */
+export function loginPath(path: string): string {
+  return isSafeReturn(path) ? `/login?${new URLSearchParams({ next: path }).toString()}` : '/login'
 }
 
 export function rememberReturn(path: string) {

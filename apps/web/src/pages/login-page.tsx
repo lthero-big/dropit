@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button.tsx'
 import { EnterRoomForm } from '@/components/enter-room.tsx'
 import { api, errorText, loginErrorText } from '@/lib/api.ts'
 import { openTempRoom, roomPath } from '@/lib/temp-room.ts'
-import { takeReturn } from '@/lib/machine.ts'
+import { readNext, rememberReturn, takeReturn } from '@/lib/machine.ts'
 import { useSession } from '@/lib/session.tsx'
 import { Logo } from '@/components/logo.tsx'
 import { ProviderIcon } from '@/components/brand-icons.tsx'
@@ -20,6 +20,10 @@ export function LoginPage({ invite }: { invite?: string }) {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const loginError = invite ? null : loginErrorText(params.get('error'))
+  // RHEA-190 m48: /admin, /settings and /device send signed-out visitors here with ?next=<path>.
+  // It goes into sessionStorage so both the password form (below) and OAuth (which lands on `/`,
+  // see HomePage) return there after login.
+  const next = invite ? null : readNext(params.get('next'))
   const [providers, setProviders] = useState<string[] | null>(null)
   const [info, setInfo] = useState<AuthInfo | null>(null)
   const [mode, setMode] = useState<'login' | 'register'>('login')
@@ -65,8 +69,12 @@ export function LoginPage({ invite }: { invite?: string }) {
   }, [navigate])
 
   useEffect(() => {
-    if (!invite && status === 'ready') navigate(takeReturn() ?? '/', { replace: true })
-  }, [invite, navigate, status])
+    if (next) rememberReturn(next)
+  }, [next])
+
+  useEffect(() => {
+    if (!invite && status === 'ready') navigate(takeReturn() ?? next ?? '/', { replace: true })
+  }, [invite, navigate, next, status])
 
   async function enterRoom() {
     setBusy(true)
