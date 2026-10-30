@@ -143,19 +143,19 @@ describe('space invites in 设置', () => {
     expect(await screen.findByText('只有你自己。')).toBeTruthy()
   })
 
-  it('admins still see registration invites', async () => {
+  it('admins no longer see registration invites in 设置 (they moved to 管理 → 邀请, RHEA-192 m17)', async () => {
     stubFetch((url) => {
       if (url === '/api/me') return json(admin)
       if (url === '/api/tokens') return json({ tokens: [] })
       if (url === '/api/spaces') return json({ spaces: [own] })
       if (url === '/api/spaces/s1/invites') return json({ enabled: true, limit: null, active: 0, remaining: null, invites: [] })
       if (url === '/api/spaces/s1/members') return json({ members: [] })
-      if (url === '/api/me/invites') return json({ enabled: true, adminOnly: true, limit: null, used: 0, remaining: null, registration: 'invite', invites: [] })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
     renderAt('/settings')
-    expect(await screen.findByRole('heading', { name: '注册邀请' })).toBeTruthy()
     expect(await screen.findByRole('heading', { name: '空间成员与邀请' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: '注册邀请' })).toBeNull()
+    expect(calls.some((call) => call.url === '/api/me/invites')).toBe(false)
   })
 })
 

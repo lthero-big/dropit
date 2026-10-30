@@ -136,6 +136,10 @@ export interface Invite {
   /** Auth step 3: 0 = personal invite (opens registration only). Older servers omit it. */
   joinSpace?: number
   createdByEmail?: string | null
+  /** RHEA-192 m17: registration = opens registration only (admin-made); space = joins a space. */
+  kind?: 'registration' | 'space'
+  /** RHEA-192 m17: false for older registration invites made by non-admins (they no longer open registration). */
+  creatorAdmin?: boolean
   status?: PersonalInvite['status']
 }
 
@@ -147,16 +151,6 @@ export interface PersonalInvite {
   revoked: number
   createdAt: number | null
   status: 'open' | 'used' | 'expired' | 'revoked'
-}
-
-export interface PersonalInvites {
-  enabled: boolean
-  /** null = unlimited (admins). */
-  limit: number | null
-  used: number
-  remaining: number | null
-  registration: 'closed' | 'invite' | 'open'
-  invites: PersonalInvite[]
 }
 
 export interface InviteCreated extends Invite {
@@ -182,10 +176,9 @@ export interface AdminUser extends User {
   usedBytes: number
   quotaBytes: number
   quotaOverride: number | null
-  /** Auth step 3: per-user invite limit override (null = site default). */
+  /** RHEA-192 m17: per-user cap on open space invites (null = default 5, 0 = none). Registration invites are admin-only. */
   inviteLimit?: number | null
   inviteLimitEffective?: number
-  invitesUsed?: number
   /** RHEA-190 m50: 空间邀请 column. */
   spaceInvitesEnabled?: boolean
   activeSpaceInvites?: number

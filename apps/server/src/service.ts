@@ -7,6 +7,7 @@ import type { Broadcaster } from './events.js';
 import type { Repository } from './repository.js';
 import { sniffRaster } from './media.js';
 import { UploadService } from './uploads.js';
+import { DEFAULT_SPACE_INVITE_LIMIT } from './invites.js';
 
 export class ClipboardService {
   readonly uploads = new UploadService(this);
@@ -189,23 +190,25 @@ export class ClipboardService {
     return { ...publicInvite, token: inviteToken, url: `${origin}/invite/${inviteToken}` };
   }
   /**
-   * RHEA-190 auth step 3: any signed-in user can invite someone to register. The invite is single use, never adds
-   * the invitee to the inviter's space and counts against the inviter's limit (admins are not limited).
+   * RHEA-192 m17: a registration invite (joinSpace=0) only lets someone create their own account; it never adds
+   * them to a space. Admins only, with no cap; everyone else gets 403 INVITES_ADMIN_ONLY.
    */
-  createPersonalInvite(session: Session | undefined, settings: UserInviteSettings, hours: number, origin = this.config.origin) {
-    const auth = this.requireSession(session);
-    const admin = auth.user.role === 'admin';
-    // RHEA-190 m50: inviting someone to register is for admins only; users invite people into their space instead.
-    if (!admin) throw new ApiError(403, 'INVITES_ADMIN_ONLY');
-    void settings;
+  createRegistrationInvite(session: Session | undefined, input: { maxUses: number; hours: number }, origin = this.config.origin) {
+    const auth = this.registrationAdmin(session);
     const spaceId = this.repo.personalSpaceId(auth.user.id);
     if (!spaceId) throw new ApiError(404, 'NOT_FOUND');
     const inviteToken = token();
-    const invite: Invite = { id: randomUUID(), tokenHash: hash(inviteToken), spaceId, maxUses: 1, uses: 0,
-      expiresAt: this.now() + hours * 3600000, revoked: 0, createdBy: auth.user.id, joinSpace: 0, createdAt: this.now() };
-    this.repo.createPersonalInvite(invite, admin ? null : this.inviteLimitFor(auth.user.id, settings), this.now());
+    const invite: Invite = { id: randomUUID(), tokenHash: hash(inviteToken), spaceId, maxUses: input.maxUses, uses: 0,
+      expiresAt: this.now() + input.hours * 3600000, revoked: 0, createdBy: auth.user.id, joinSpace: 0, createdAt: this.now() };
+    this.repo.createInvite(invite);
     const { tokenHash: _hash, spaceId: _space, ...publicInvite } = invite;
-    return { ...publicInvite, token: inviteToken, url: `${origin}/invite/${inviteToken}` };
+    return { ...publicInvite, kind: 'registration' as const, token: inviteToken, url: `${origin}/invite/${inviteToken}` };
+  }
+  /** RHEA-192 m17: registration invites are an admin tool; 403 INVITES_ADMIN_ONLY for everyone else. */
+  registrationAdmin(session: Session | undefined) {
+    const auth = this.requireSession(session);
+    if (auth.user.role !== 'admin') throw new ApiError(403, 'INVITES_ADMIN_ONLY');
+    return auth;
   }
   /** RHEA-190 m50: the caller's own private space (owner only). Members, viewers and rooms get NOT_FOUND / FORBIDDEN. */
   ownedSpace(spaceId: string, session: Session | undefined) {
@@ -214,30 +217,28 @@ export class ClipboardService {
     if (space.ownerId !== auth.user.id) throw new ApiError(403, 'FORBIDDEN');
     return { auth, space };
   }
-  /** How many open space invites the user may have at once (null = unlimited); INVITES_DISABLED when off. */
-  spaceInviteLimit(session: Session, settings: UserInviteSettings) {
-    if (session.user.role === 'admin') return null;
-    if (!settings.enabled) throw new ApiError(403, 'INVITES_DISABLED');
-    return this.inviteLimitFor(session.user.id, settings);
+  /** How many open space invites the user may have at once (null = unlimited for admins; 0 = not allowed). */
+  spaceInviteLimit(session: Session) {
+    return session.user.role === 'admin' ? null : this.inviteLimitFor(session.user.id);
   }
-  spaceInvites(session: Session | undefined, spaceId: string, settings: UserInviteSettings) {
+  spaceInvites(session: Session | undefined, spaceId: string) {
     const { auth } = this.ownedSpace(spaceId, session);
     const now = this.now();
-    const admin = auth.user.role === 'admin';
-    const limit = admin ? null : this.inviteLimitFor(auth.user.id, settings);
+    const limit = this.spaceInviteLimit(auth);
     const active = this.repo.activeSpaceInvitesByUser(now).get(auth.user.id) ?? 0;
     return {
-      enabled: admin || settings.enabled, limit, active, remaining: limit === null ? null : Math.max(0, limit - active),
+      enabled: limit !== 0, limit, active, remaining: limit === null ? null : Math.max(0, limit - active),
       invites: this.repo.spaceInvites(spaceId).map(({ spaceId: _space, createdBy: _by, joinSpace: _join, ...invite }) => ({
         ...invite, role: invite.role ?? 'editor', status: inviteStatus(invite, now),
       })),
     };
   }
   /** RHEA-190 m50: an owner invites people into their private space; read-only (viewer) unless they choose editor. */
-  createSpaceInvite(session: Session | undefined, spaceId: string, settings: UserInviteSettings,
+  createSpaceInvite(session: Session | undefined, spaceId: string,
     input: { maxUses: number; hours: number; role: MemberRole }, origin = this.config.origin) {
     const { auth } = this.ownedSpace(spaceId, session);
-    const limit = this.spaceInviteLimit(auth, settings);
+    const limit = this.spaceInviteLimit(auth);
+    if (limit === 0) throw new ApiError(403, 'INVITES_DISABLED');
     const inviteToken = token();
     const invite: Invite = { id: randomUUID(), tokenHash: hash(inviteToken), spaceId, maxUses: input.maxUses, uses: 0,
       expiresAt: this.now() + input.hours * 3600000, revoked: 0, createdBy: auth.user.id, joinSpace: 1, createdAt: this.now(), role: input.role };
@@ -292,15 +293,13 @@ export class ClipboardService {
     this.repo.endRoom(id, this.now());
     await this.cleanup();
   }
-  inviteLimitFor(userId: string, settings: UserInviteSettings) { return this.repo.inviteLimit(userId) ?? settings.defaultLimit; }
-  personalInvites(session: Session | undefined, settings: UserInviteSettings) {
-    const auth = this.requireSession(session);
-    const admin = auth.user.role === 'admin';
+  inviteLimitFor(userId: string) { return this.repo.inviteLimit(userId) ?? DEFAULT_SPACE_INVITE_LIMIT; }
+  /** The calling admin's own registration invites (GET /api/me/invites; 管理 → 邀请 lists everyone's). */
+  personalInvites(session: Session | undefined) {
+    const auth = this.registrationAdmin(session);
     const now = this.now();
-    const limit = admin ? null : this.inviteLimitFor(auth.user.id, settings);
-    const used = this.repo.inviteUsage(auth.user.id, now);
     return {
-      enabled: admin, adminOnly: true, limit, used, remaining: limit === null ? null : Math.max(0, limit - used),
+      enabled: true, adminOnly: true, limit: null,
       invites: this.repo.personalInvites(auth.user.id).map(({ spaceId: _space, createdBy: _by, joinSpace: _join, ...invite }) => ({
         ...invite, status: inviteStatus(invite, now) })),
     };
@@ -495,6 +494,5 @@ export const roomCodeInfo = (space: Space) => ({ code: space.roomCode ?? null, h
 /** The room link is the code: /r/<code>. */
 export const roomUrl = (origin: string, space: Pick<Space, 'roomCode'>) => `${origin}/r/${encodeURIComponent(space.roomCode ?? '')}`;
 
-export interface UserInviteSettings { enabled: boolean; defaultLimit: number }
 export const inviteStatus = (invite: { uses: number; maxUses: number; revoked: number; expiresAt: number }, now: number) =>
   invite.revoked ? 'revoked' : invite.uses >= invite.maxUses ? 'used' : invite.expiresAt <= now ? 'expired' : 'open';

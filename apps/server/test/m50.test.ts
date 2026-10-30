@@ -144,12 +144,12 @@ test('space invites: read-only by default, owner-only management, limit, expiry,
   f.advance(3600000 + 1000);
   assert.equal((await f.request(`/api/invites/${shortLived.token}/accept`, { method: 'POST', cookie: bob.cookie })).status, 403);
   assert.equal((await (await f.request('/api/admin/users', { cookie: admin })).json()).users.find((user: { email: string }) => user.email === 'alice@example.com').activeSpaceInvites, 0);
-  // the admin's limit applies to open space invites; the switch turns them off
+  // the admin's per-user limit applies to open space invites; 0 turns them off for that user (RHEA-192 m17)
   await f.request(`/api/admin/users/${aliceRow.id}`, { method: 'PATCH', cookie: admin, body: { inviteLimit: 1 } });
   assert.equal((await f.request(`/api/spaces/${aliceSpace.id}/invites`, { method: 'POST', cookie: alice.cookie, body: {} })).status, 201);
   const over = await f.request(`/api/spaces/${aliceSpace.id}/invites`, { method: 'POST', cookie: alice.cookie, body: {} });
   assert.equal(await f.errorCode(over), 'INVITE_LIMIT_REACHED');
-  await f.request('/api/admin/registration', { method: 'PUT', cookie: admin, body: { userInvites: { enabled: false } } });
+  await f.request(`/api/admin/users/${aliceRow.id}`, { method: 'PATCH', cookie: admin, body: { inviteLimit: 0 } });
   assert.equal(await f.errorCode(await f.request(`/api/spaces/${aliceSpace.id}/invites`, { method: 'POST', cookie: alice.cookie, body: {} })), 'INVITES_DISABLED');
   assert.equal((await (await f.request('/api/admin/users', { cookie: admin })).json()).users.find((user: { email: string }) => user.email === 'alice@example.com').spaceInvitesEnabled, false);
   // admins are not limited

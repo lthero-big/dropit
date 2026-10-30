@@ -134,15 +134,10 @@ export interface Repository {
   touchRoom(id: string, now: number): void;
   invite(tokenHash: string, now: number): Invite | undefined;
   createInvite(invite: Invite): void;
-  invites(): (Omit<Invite, 'tokenHash'> & { createdByEmail: string | null })[];
+  invites(): (Omit<Invite, 'tokenHash'> & { createdByEmail: string | null; createdByRole: 'admin' | 'user' | null })[];
   revokeInvite(id: string): void;
   /** Personal invites (joinSpace=0) a user created that still exist, newest first. */
   personalInvites(userId: string): Omit<Invite, 'tokenHash'>[];
-  /** Invites a user has spent from their limit: used ones plus those still open. */
-  inviteUsage(userId: string, now: number): number;
-  inviteUsageByUser(now: number): Map<string, number>;
-  /** Atomic: counts the user's usage, refuses beyond limit (INVITE_LIMIT_REACHED), then inserts. limit null = unlimited. */
-  createPersonalInvite(invite: Invite, limit: number | null, now: number): void;
   revokePersonalInvite(id: string, userId: string): void;
   inviteLimit(userId: string): number | null;
   personalSpaceId(userId: string): string | undefined;
@@ -709,27 +704,12 @@ export class SqliteRepository implements Repository {
         revoked: invite.revoked, createdBy: invite.createdBy, joinSpace: invite.joinSpace ?? 1, createdAt: invite.createdAt ?? null, role: invite.role ?? null });
   }
   invites() {
-    return this.db.prepare(`SELECT i.id,i.spaceId,i.maxUses,i.uses,i.expiresAt,i.revoked,i.createdBy,i.joinSpace,i.createdAt,i.role,u.email AS createdByEmail
-      FROM invites i LEFT JOIN users u ON u.id=i.createdBy ORDER BY i.expiresAt DESC`).all() as (Omit<Invite, 'tokenHash'> & { createdByEmail: string | null })[];
+    return this.db.prepare(`SELECT i.id,i.spaceId,i.maxUses,i.uses,i.expiresAt,i.revoked,i.createdBy,i.joinSpace,i.createdAt,i.role,u.email AS createdByEmail,u.role AS createdByRole
+      FROM invites i LEFT JOIN users u ON u.id=i.createdBy ORDER BY i.expiresAt DESC`).all() as (Omit<Invite, 'tokenHash'> & { createdByEmail: string | null; createdByRole: 'admin' | 'user' | null })[];
   }
   personalInvites(userId: string) {
     return this.db.prepare(`SELECT id,spaceId,maxUses,uses,expiresAt,revoked,createdBy,joinSpace,createdAt FROM invites
       WHERE createdBy=? AND joinSpace=0 AND NOT (revoked=1 AND uses=0) ORDER BY coalesce(createdAt,0) DESC, expiresAt DESC`).all(userId) as Omit<Invite, 'tokenHash'>[];
-  }
-  // A personal invite counts against the user's limit once it was used, or while it can still be used.
-  // Revoking or letting an unused one expire gives the slot back.
-  inviteUsage(userId: string, now: number) {
-    return (this.db.prepare(`SELECT count(*) AS n FROM invites WHERE createdBy=? AND joinSpace=0 AND (uses>0 OR (revoked=0 AND expiresAt>?))`).get(userId, now) as { n: number }).n;
-  }
-  inviteUsageByUser(now: number) {
-    const rows = this.db.prepare(`SELECT createdBy, count(*) AS n FROM invites WHERE joinSpace=0 AND (uses>0 OR (revoked=0 AND expiresAt>?)) GROUP BY createdBy`).all(now) as { createdBy: string; n: number }[];
-    return new Map(rows.map(row => [row.createdBy, row.n]));
-  }
-  createPersonalInvite(invite: Invite, limit: number | null, now: number) {
-    this.db.transaction(() => {
-      if (limit !== null && this.inviteUsage(invite.createdBy, now) >= limit) throw new ApiError(403, 'INVITE_LIMIT_REACHED');
-      this.createInvite({ ...invite, joinSpace: 0 });
-    }).immediate();
   }
   revokePersonalInvite(id: string, userId: string) {
     const row = this.db.prepare('SELECT uses,revoked FROM invites WHERE id=? AND createdBy=? AND joinSpace=0').get(id, userId) as { uses: number; revoked: number } | undefined;

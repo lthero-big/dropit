@@ -33,19 +33,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags + history: the version is the newest vX.Y.Z tag + commits since it
       - name: build metadata
         run: |
           echo "DROPIT_COMMIT=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
           echo "DROPIT_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-          echo "DROPIT_VERSION=$(node -p 'require("./package.json").version')" >> "$GITHUB_ENV"
+          echo "DROPIT_VERSION=$(sh scripts/release-version.sh)" >> "$GITHUB_ENV"
       - run: >-
           docker build -t dropit:ci
           --build-arg DROPIT_COMMIT --build-arg DROPIT_BUILD_DATE --build-arg DROPIT_VERSION .
       - name: image reports its build
         run: |
           docker image inspect dropit:ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -qx "$DROPIT_COMMIT"
-          docker image inspect dropit:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' | grep -qx "$DROPIT_VERSION"
-          docker run --rm dropit:ci node -e "import('./dist/version.js').then(m=>{const b=m.loadBuildInfo(process.env,null);console.log(JSON.stringify(b));if(b.commit!==process.env.DROPIT_COMMIT||b.install!=='docker')process.exit(1)})"
+          docker image inspect dropit:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' | grep -qxF "$DROPIT_VERSION"
+          docker run --rm dropit:ci node -e "import('./dist/version.js').then(m=>{const b=m.loadBuildInfo(process.env,null);console.log(JSON.stringify(b));if(b.commit!==process.env.DROPIT_COMMIT||b.version!==process.env.DROPIT_VERSION||b.install!=='docker')process.exit(1)})"
 
   publish:
     name: publish image
@@ -60,6 +62,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         if: env.HAS_HUB == 'true'
+        with:
+          fetch-depth: 0
       - uses: docker/login-action@v3
         if: env.HAS_HUB == 'true'
         with:
@@ -69,7 +73,8 @@ jobs:
         if: env.HAS_HUB == 'true'
         run: |
           commit=$(git rev-parse --short=7 HEAD)
-          version=$(node -p 'require("./package.json").version')
+          # RHEA-192 m17: e.g. 0.1.0+20 (20 commits after v0.1.0); exactly 0.2.0 on the v0.2.0 tag.
+          version=$(sh scripts/release-version.sh)
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; fi
           args=(--build-arg DROPIT_COMMIT="$commit" --build-arg DROPIT_VERSION="$version" --build-arg DROPIT_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)")
           tags=(-t "$IMAGE:$commit")

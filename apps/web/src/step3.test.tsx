@@ -223,46 +223,7 @@ describe('room codes', () => {
 })
 
 describe('personal invites (admin-only since RHEA-190 m50)', () => {
-  const admin = { ...member, user: { ...member.user, role: 'admin' as const } }
-  const view = (extra: Record<string, unknown> = {}) => ({
-    enabled: true,
-    limit: 2,
-    used: 1,
-    remaining: 1,
-    registration: 'invite',
-    invites: [{ id: 'i1', maxUses: 1, uses: 0, expiresAt: Date.now() + 3_600_000, revoked: 0, createdAt: 1, status: 'open' }],
-    ...extra,
-  })
-
-  it('creates an invite once, shows its link a single time and enforces the visible limit', async () => {
-    const writeText = vi.fn(async () => undefined)
-    vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(writeText)
-    let current = view()
-    stubFetch((url, init) => {
-      if (url === '/api/me') return json(admin)
-      if (url === '/api/tokens') return json({ tokens: [] })
-      if (url === '/api/me/invites' && init?.method === 'POST') {
-        current = view({ used: 2, remaining: 0, invites: [...current.invites, { id: 'i2', maxUses: 1, uses: 0, expiresAt: Date.now() + 7_200_000, revoked: 0, createdAt: 2, status: 'open' }] })
-        return json({ id: 'i2', token: 'tok', url: 'http://dropit.lan/invite/tok', expiresAt: Date.now() + 7_200_000 }, 201)
-      }
-      if (url === '/api/me/invites/i1' && init?.method === 'DELETE') {
-        current = view({ used: 1, remaining: 1, invites: [{ ...current.invites[0]!, status: 'revoked', revoked: 1 }] })
-        return new Response(null, { status: 204 })
-      }
-      if (url === '/api/me/invites') return json(current)
-      return json({ error: { code: 'NOT_FOUND' } }, 404)
-    })
-    renderAt('/settings')
-    expect(await screen.findByText(/已用 1 \/ 2/)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '生成邀请' }))
-    expect(await screen.findByText('http://dropit.lan/invite/tok')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '复制链接' }))
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith('http://dropit.lan/invite/tok'))
-    await waitFor(() => expect((screen.getByRole('button', { name: '生成邀请' }) as HTMLButtonElement).disabled).toBe(true))
-    expect(screen.getByText(/邀请名额已用完/)).toBeTruthy()
-  })
-
-  it('normal users no longer get registration invites; they see space invites (off when the admin switched them off)', async () => {
+  it('normal users no longer get registration invites; they see space invites (off when the admin set their cap to 0)', async () => {
     stubFetch((url) => {
       if (url === '/api/me') return json(member)
       if (url === '/api/tokens') return json({ tokens: [] })
@@ -272,7 +233,7 @@ describe('personal invites (admin-only since RHEA-190 m50)', () => {
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
     renderAt('/settings')
-    expect(await screen.findByText(/管理员暂时关闭了普通用户的空间邀请/)).toBeTruthy()
+    expect(await screen.findByText(/管理员关闭了你的空间邀请/)).toBeTruthy()
     expect((screen.getByRole('button', { name: '生成空间邀请' }) as HTMLButtonElement).disabled).toBe(true)
     expect(screen.queryByRole('button', { name: '生成邀请' })).toBeNull()
     expect(calls.some((call) => call.url === '/api/me/invites')).toBe(false)
@@ -291,29 +252,3 @@ describe('personal invites (admin-only since RHEA-190 m50)', () => {
   })
 })
 
-describe('admin invite controls', () => {
-  it('saves the user-invite switch and default limit together with registration', async () => {
-    const admin = { ...member, user: { ...member.user, role: 'admin' as const } }
-    let invites = { enabled: true, defaultLimit: 5 }
-    stubFetch((url, init) => {
-      if (url === '/api/me') return json(admin)
-      if (url === '/api/admin/registration' && init?.method === 'PUT') {
-        invites = { ...invites, ...(JSON.parse(String(init.body)) as { userInvites: typeof invites }).userInvites }
-        return json({ policy: 'invite', default: 'invite', updatedAt: null, updatedBy: null, userInvites: invites })
-      }
-      if (url === '/api/admin/registration') return json({ policy: 'invite', default: 'invite', updatedAt: null, updatedBy: null, userInvites: invites })
-      if (url === '/api/admin/users') return json({ users: [] })
-      if (url === '/api/admin/invites') return json({ invites: [] })
-      if (url === '/api/spaces') return json({ spaces: [] })
-      if (url === '/api/admin/limits') return json({ limits: {} })
-      return json({ error: { code: 'NOT_FOUND' } }, 404)
-    })
-    renderAt('/admin?tab=registration')
-    const field = await screen.findByLabelText(/每人默认邀请上限/)
-    fireEvent.change(field, { target: { value: '8' } })
-    fireEvent.click(screen.getByRole('button', { name: '保存邀请设置' }))
-    await waitFor(() => expect(invites.defaultLimit).toBe(8))
-    const put = calls.filter((call) => call.url === '/api/admin/registration' && call.init?.method === 'PUT').pop()
-    expect(JSON.parse(String(put?.init?.body))).toEqual({ userInvites: { enabled: true, defaultLimit: 8 } })
-  })
-})
