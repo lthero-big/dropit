@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
-import { Download, Link2Off, RefreshCw } from 'lucide-react'
+import { Download, File, Link2Off, RefreshCw } from 'lucide-react'
 import { useReducedMotion } from 'motion/react'
 import { Link, useParams } from 'react-router'
 import { MediaViewer, type ViewerMedia } from '@/components/clip-media.tsx'
@@ -118,8 +118,12 @@ function ShareItem({
               </div>
               <MediaViewer media={viewer} anchor={anchor} reduced={reduced} onClose={() => setViewer(null)} />
             </div>
-          ) : null}
-          <p className={`${visual ? 'mt-4' : ''} max-w-full text-base font-bold break-all`}>{share.item.filename}</p>
+          ) : (
+            <span className="grid size-16 place-items-center rounded-2xl border border-line-1 bg-surface-1 text-muted-foreground shadow-elev-1" aria-hidden="true" data-share-icon="">
+              <File className="size-7" />
+            </span>
+          )}
+          <p className="mt-4 max-w-full text-base font-bold break-all">{share.item.filename}</p>
           <p className="mt-1 text-xs text-muted-foreground">{formatBytes(share.item.size)}</p>
           <Button type="button" className="mt-5 w-full max-w-xs sm:w-auto sm:min-w-40" asChild>
             <a href={`/api/s/${encodeURIComponent(token)}/file?access=${encodeURIComponent(share.access)}`}>

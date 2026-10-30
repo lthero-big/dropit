@@ -29,6 +29,8 @@ describe('PageLoading', () => {
     expect(loader()?.dataset.pageLoading).toBe('pending')
     expect(loader()?.getAttribute('aria-busy')).toBe('true')
     expect(screen.getByRole('status').textContent).toContain('正在连接…')
+    // the brand mark is decoration: screen readers only hear the label
+    expect(loader()?.querySelector('[data-logo]')?.parentElement?.getAttribute('aria-hidden')).toBe('true')
     expect(loader()?.querySelector('[data-logo]')).toBeTruthy()
     expect(loader()?.querySelector('.dd-spinner')).toBeTruthy()
     act(() => vi.advanceTimersByTime(PAGE_LOADING_DELAY_MS - 1))
@@ -113,6 +115,7 @@ describe('share page', () => {
     expect(section.closest('main')?.classList.contains('min-h-svh')).toBe(true)
     const item = section.querySelector('[data-share-item="file"]') as HTMLElement
     expect(item.classList.contains('items-center')).toBe(true)
+    expect(item.querySelector('[data-share-icon]')).toBeTruthy()
     expect(item.textContent).toContain('report.pdf')
     expect(item.textContent).toContain('2.0 KB')
     const download = screen.getByRole('link', { name: '下载' })

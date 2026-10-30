@@ -38,7 +38,9 @@ export function PageLoading({ label, delayMs = PAGE_LOADING_DELAY_MS }: { label:
   return (
     <main className="dd-page-loading grid min-h-svh place-items-center px-6 py-16" data-page-loading={shown ? 'shown' : 'pending'} aria-busy="true">
       <div className="dd-page-loading-body flex flex-col items-center gap-5 text-center" role="status" aria-live="polite">
-        <Logo size="lg" word={false} />
+        <span aria-hidden="true">
+          <Logo size="lg" word={false} />
+        </span>
         <span className="dd-spinner" aria-hidden="true" />
         <p className="text-sm text-muted-foreground">{label}</p>
       </div>
