@@ -7,6 +7,7 @@ import { ApiError, api, errorText } from '@/lib/api.ts'
 import { formatRemain, useClock } from '@/lib/format.ts'
 import { useSession } from '@/lib/session.tsx'
 import type { InvitePreview } from '@/lib/types.ts'
+import { PageLoading } from '@/components/page-loading.tsx'
 
 const ROLE_TEXT = { viewer: '只读：可以查看和复制，不能发送、编辑或删除', editor: '可编辑：可以查看、发送和整理内容' } as const
 
@@ -47,7 +48,7 @@ export function InvitePage() {
   }
 
   if (!preview) {
-    return <main className="px-6 py-16 text-sm text-muted-foreground">正在核对邀请…</main>
+    return <PageLoading label="正在核对邀请…" />
   }
 
   const spaceTitle = preview.spaceName === 'Private space' ? (preview.inviterName ? `${preview.inviterName} 的空间` : '私人空间') : preview.spaceName

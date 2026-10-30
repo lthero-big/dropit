@@ -4,6 +4,7 @@ import { Logo } from '@/components/logo.tsx'
 import { PasswordForm } from '@/components/password-form.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { useSession } from '@/lib/session.tsx'
+import { PageLoading } from '@/components/page-loading.tsx'
 
 /** RHEA-190 auth step 2: shown after signing in with a temporary password (admin reset or dropit-admin). */
 export function ChangePasswordPage() {
@@ -14,7 +15,7 @@ export function ChangePasswordPage() {
     if (status === 'anon') navigate('/login', { replace: true })
   }, [navigate, status])
 
-  if (!me) return <main className="px-6 py-16 text-sm text-muted-foreground">正在读取…</main>
+  if (!me) return <PageLoading label="正在读取…" />
   const forced = Boolean(me.mustChangePassword)
   return (
     <main className="mx-auto flex min-h-svh max-w-md flex-col justify-center px-6 py-16">

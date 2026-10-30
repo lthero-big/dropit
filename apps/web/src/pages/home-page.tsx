@@ -9,6 +9,7 @@ import { spaceLabel } from '@/lib/format.ts'
 import { takeReturn } from '@/lib/machine.ts'
 import { useSession } from '@/lib/session.tsx'
 import type { ConnectionStatus, Item, SpaceSummary } from '@/lib/types.ts'
+import { PageLoading } from '@/components/page-loading.tsx'
 
 const spaceKey = 'dropit-space'
 
@@ -65,7 +66,7 @@ export function HomePage() {
     void refresh()
   }, [refresh])
 
-  if (status === 'loading') return <main className="px-6 py-16 text-sm text-muted-foreground">正在连接…</main>
+  if (status === 'loading') return <PageLoading label="正在连接…" />
   if (status === 'error') {
     return (
       <main className="mx-auto max-w-md px-6 py-16">
