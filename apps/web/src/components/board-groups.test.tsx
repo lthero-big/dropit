@@ -174,6 +174,59 @@ describe('groups on the board', () => {
     await waitFor(() => expect(within(screen.getByRole('toolbar', { name: '分组' })).queryByRole('button', { name: /^个人/ })).toBeNull())
   })
 
+  it('stays on the current group after creating a new one (RHEA-190 m52)', async () => {
+    const socket = renderBoard((url, init) => {
+      if (url === '/api/spaces/s1/groups' && init?.method === 'POST') return json({ groups: ['工作', '个人', '旅行'] }, 201)
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    socket?.emit({
+      type: 'snapshot',
+      items: [item({ id: 'w', text: 'work note', group: '工作' }), item({ id: 'p', text: 'home note', group: '个人' })],
+      groups: ['工作', '个人'],
+      serverTime: Date.now(),
+      expiresAt: null,
+    })
+    expect(await screen.findByText('work note')).toBeTruthy()
+    const bar = () => screen.getByRole('toolbar', { name: '分组' })
+    fireEvent.click(within(bar()).getByRole('button', { name: /^工作/ }))
+    expect(within(bar()).getByRole('button', { name: /^工作/ }).getAttribute('aria-pressed')).toBe('true')
+
+    fireEvent.click(within(bar()).getByRole('button', { name: '新建分组' }))
+    const input = screen.getByLabelText('分组名')
+    fireEvent.change(input, { target: { value: '旅行' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/spaces/s1/groups' && call.init?.method === 'POST')).toBe(true))
+
+    const created = await within(bar()).findByRole('button', { name: /^旅行/ })
+    expect(created.getAttribute('aria-pressed')).toBe('false')
+    expect(within(bar()).getByRole('button', { name: /^工作/ }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByText('work note')).toBeTruthy()
+    expect(screen.queryByText('home note')).toBeNull()
+
+    // the new group can still be switched to by hand
+    fireEvent.click(created)
+    expect(within(bar()).getByRole('button', { name: /^旅行/ }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.queryByText('work note')).toBeNull()
+  })
+
+  it('stays on 全部 after creating a new group', async () => {
+    const socket = renderBoard((url, init) => {
+      if (url === '/api/spaces/s1/groups' && init?.method === 'POST') return json({ groups: ['工作', '旅行'] }, 201)
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    socket?.emit({ type: 'snapshot', items: [item({ id: 'w', text: 'work note', group: '工作' }), item({ id: 'n', text: 'loose note' })], groups: ['工作'], serverTime: Date.now(), expiresAt: null })
+    expect(await screen.findByText('work note')).toBeTruthy()
+    const bar = () => screen.getByRole('toolbar', { name: '分组' })
+    fireEvent.click(within(bar()).getByRole('button', { name: '新建分组' }))
+    const input = screen.getByLabelText('分组名')
+    fireEvent.change(input, { target: { value: '旅行' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect((await within(bar()).findByRole('button', { name: /^旅行/ })).getAttribute('aria-pressed')).toBe('false')
+    expect(within(bar()).getByRole('button', { name: /全部/ }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByText('work note')).toBeTruthy()
+    expect(screen.getByText('loose note')).toBeTruthy()
+  })
+
   it('moves a clip with the card group badge and shows the 按分组 view', async () => {
     const socket = renderBoard((url, init) => {
       if (url === '/api/spaces/s1/items/n/labels' && init?.method === 'PATCH') {
