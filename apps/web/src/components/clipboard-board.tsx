@@ -299,8 +299,9 @@ export function ClipboardBoard({
       toast.error('分组太多了（最多 24 个）')
       return false
     }
+    // RHEA-190 m52: a new group only joins the chip bar; the board stays on the
+    // group the user is looking at (they can tap the new chip to switch).
     channel.setGroups((current) => (current.includes(name) ? current : [...current, name]))
-    setGroupFilter(name)
     void api<{ groups: string[] }>(`${base}/groups`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })
       .then((result) => channel.setGroups(result.groups))
       .catch(groupFailed)
