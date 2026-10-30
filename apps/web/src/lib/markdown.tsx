@@ -224,9 +224,9 @@ function MarkdownBody({ source }: { source: string }) {
   return <div className="max-w-full min-w-0 text-[15px] [overflow-wrap:anywhere]">{blocks}</div>
 }
 
-export function MarkdownText({ text, collapsed = false }: { text: string; collapsed?: boolean }) {
+export function MarkdownText({ text, collapsed = false, defaultRendered = false }: { text: string; collapsed?: boolean; defaultRendered?: boolean }) {
   const markdown = looksLikeMarkdown(text)
-  const [rendered, setRendered] = useState(false)
+  const [rendered, setRendered] = useState(defaultRendered)
   return (
     <div className="max-w-full">
       {markdown ? (
@@ -250,7 +250,14 @@ export function MarkdownText({ text, collapsed = false }: { text: string; collap
         </div>
       ) : null}
       {rendered && markdown ? (
-        <MarkdownBody source={text} />
+        collapsed ? (
+          // RHEA-190 lt2: the rendered view is clipped like the source view, with a fade at the bottom
+          <div data-collapsed="" className="max-h-[9.5rem] overflow-hidden [mask-image:linear-gradient(to_bottom,black_65%,transparent)]">
+            <MarkdownBody source={text} />
+          </div>
+        ) : (
+          <MarkdownBody source={text} />
+        )
       ) : (
         <p className={`max-w-full min-w-0 text-[15px] whitespace-pre-wrap [overflow-wrap:anywhere] ${collapsed ? 'line-clamp-6' : ''}`}>{linkifyNodes(text, 'plain')}</p>
       )}
