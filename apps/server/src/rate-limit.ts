@@ -12,6 +12,8 @@ export class RateLimiter {
     if (!bucket || bucket.reset <= now || bucket.count < limit) return undefined;
     return Math.max(1, Math.ceil((bucket.reset - now) / 1000));
   }
+  /** RHEA-190 m50: an admin clears a key's bucket (e.g. a room code locked by wrong guesses). */
+  forget(key: string) { this.buckets.delete(key); }
   consume(key: string, limit: number, now: number): number | undefined {
     for (const [key, bucket] of this.buckets) if (bucket.reset <= now) this.buckets.delete(key);
     let bucket = this.buckets.get(key);

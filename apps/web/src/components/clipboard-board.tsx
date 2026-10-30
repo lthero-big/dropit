@@ -48,7 +48,8 @@ export function ClipboardBoard({
   sender,
   canEdit,
   canRetract,
-  canShare,
+  canShare: canShareProp,
+  readOnly = false,
   onActivity,
   onAuthLost,
   onStatus,
@@ -71,6 +72,8 @@ export function ClipboardBoard({
   canEdit: (item: Item) => boolean
   canRetract: (item: Item) => boolean
   canShare: (item: Item) => boolean
+  /** RHEA-190 m50: a read-only member (view and copy only): no composer, drop, paste, edit, pin, share or retract. */
+  readOnly?: boolean
   onActivity?: () => void
   onAuthLost?: () => void
   onStatus?: (status: ConnectionStatus) => void
@@ -91,7 +94,8 @@ export function ClipboardBoard({
   const [editDraft, setEditDraft] = useState('')
   const [savingEdit, setSavingEdit] = useState(false)
   const [shareFor, setShareFor] = useState<string | null>(null)
-  const uploads = useBoardUploads({ base, channel, maxFileBytes, upload, chunkBytes, resumeStore, transport, onActivity, onAuthLost, onBusyChange, onBindCancel })
+  const canShare = readOnly ? () => false : canShareProp
+  const uploads = useBoardUploads({ base, readOnly, channel, maxFileBytes, upload, chunkBytes, resumeStore, transport, onActivity, onAuthLost, onBusyChange, onBindCancel })
   const { rows, dragOver, uploadBusy, localIds, uploadedIds, resumeRef, sendFiles, pasteShot, onResumePicked, cancelAll, previewFor, uploadActions } = uploads
   const [sending, setSending] = useState(false)
   const [openId, setOpenId] = useState<string | null>(null)
@@ -583,8 +587,8 @@ export function ClipboardBoard({
         gesture={gesture}
         reduced={reduced}
         sender={sender(item)}
-        canEdit={canEdit(item)}
-        canRetract={canRetract(item)}
+        canEdit={!readOnly && canEdit(item)}
+        canRetract={!readOnly && canRetract(item)}
         canShare={canShare(item)}
         open={openCard === item.id}
         onOpen={(next) => setOpenCard(next ? item.id : null)}
@@ -811,7 +815,11 @@ export function ClipboardBoard({
       <div className="flex flex-col gap-4">
         <BoardHeader title={title} subtitle={subtitle} deadlineLeft={deadline ? deadline - now : null} usedBytes={usedBytes} roomUsed={roomUsed} quotaBytes={quotaBytes} ratio={ratio} tone={tone} quotaBar={quotaBar} trailing={slot ? null : presence} />
         {slot ? createPortal(presence, slot) : null}
-        {docked ? null : composer}
+        {readOnly ? (
+          <p className="rounded-md border border-[var(--line-1)] bg-[var(--surface-2)] px-3 py-2 text-sm text-[var(--fg-3)]" data-read-only="">
+            你是这个空间的只读成员：可以查看和复制，不能发送、编辑或删除。
+          </p>
+        ) : docked ? null : composer}
         <MotionConfig reducedMotion="user">
           <LayoutGroup>
             <div ref={boardRef} className="dd-board flex flex-col gap-4" data-gesture={gesture} data-reduced={reduced || undefined}>
@@ -840,6 +848,7 @@ export function ClipboardBoard({
                   onCreate={createGroup}
                   onRename={renameGroup}
                   onDelete={deleteGroup}
+                  readOnly={readOnly}
                 />
               ) : null}
               <BoardToolbar
@@ -929,7 +938,7 @@ export function ClipboardBoard({
           {gesture === 'pin-drag' ? <TrashBin handle={trashRef} anchor={trash?.anchor ?? null} gulp={trash?.gulp ?? false} reduced={reduced} /> : null}
         </MotionConfig>
       </div>
-      {docked ? (
+      {docked && !readOnly ? (
         <div className="pointer-events-none fixed inset-x-0 bottom-[calc(44px+env(safe-area-inset-bottom))] z-30 flex justify-center px-3 pb-2 md:bottom-0 md:pb-[max(12px,env(safe-area-inset-bottom))]">{composer}</div>
       ) : null}
       <CommandPalette

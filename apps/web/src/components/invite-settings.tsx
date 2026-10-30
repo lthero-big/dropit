@@ -66,10 +66,10 @@ export function InviteSettings() {
   return (
     <Panel
       id="invites"
-      title="邀请"
+      title="注册邀请"
       description={
         view.limit === null
-          ? '生成一次性邀请链接，让别人注册自己的账号。对方不会加入你的空间。'
+          ? '仅管理员：生成一次性邀请链接，让别人注册自己的账号。对方不会加入你的空间。'
           : `生成一次性邀请链接，让别人注册自己的账号。对方不会加入你的空间。已用 ${view.used} / ${view.limit}（有效或已使用的邀请都算；撤销未使用的邀请可以腾出名额）。`
       }
       actions={

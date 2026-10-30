@@ -143,11 +143,13 @@ type BarProps = {
   onCreate: (name: string) => boolean
   onRename: (from: string, to: string) => boolean
   onDelete: (name: string) => void
+  /** RHEA-190 m50: read-only members filter by group but cannot create, rename or delete groups. */
+  readOnly?: boolean
 }
 
 /** Group filter chips: 全部 · each group · 未分组 · ＋ new; manage the active group. */
 export function GroupBar(props: BarProps) {
-  const { groups, filter, counts, total, reduced, dragging, dropHover, pulse, chipRef, onFilter, onCreate, onRename, onDelete } = props
+  const { groups, filter, counts, total, reduced, dragging, dropHover, pulse, chipRef, onFilter, onCreate, onRename, onDelete, readOnly = false } = props
   const [adding, setAdding] = useState(false)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [menu, setMenu] = useState<HTMLElement | null>(null)
@@ -237,7 +239,7 @@ export function GroupBar(props: BarProps) {
         )
       })}
       <AnimatePresence initial={false} mode="popLayout">
-        {adding ? (
+        {readOnly ? null : adding ? (
           <NameInput key="new" onDone={(v) => { if (v === null || onCreate(v)) setAdding(false) }} />
         ) : (
           <motion.button
@@ -257,7 +259,7 @@ export function GroupBar(props: BarProps) {
         )}
       </AnimatePresence>
       <AnimatePresence initial={false}>
-        {active && renaming === null ? (
+        {active && renaming === null && !readOnly ? (
           <motion.button
             key="mgr"
             type="button"

@@ -79,6 +79,8 @@ export function HomePage() {
   if (!me) return <LoginPage />
 
   const current = spaces.find((space) => space.id === spaceId) ?? null
+  // RHEA-190 m50: invited read-only members view and copy only
+  const readOnly = current?.role === 'viewer'
 
   return (
     <Shell spaces={spaces} spaceId={current?.id} onSpace={onSpace}>
@@ -86,7 +88,7 @@ export function HomePage() {
         <ClipboardBoard
           base={`/api/spaces/${current.id}`}
           title={spaceLabel(current, me.user.id, spaces)}
-          subtitle="文本、文件和截图会同步到这个空间里的其他设备。"
+          subtitle={readOnly ? `${current.ownerName ?? '空间所有者'} 邀请你只读查看这个空间。` : '文本、文件和截图会同步到这个空间里的其他设备。'}
           quotaBytes={me.quotaBytes}
           usedBytes={me.usedBytes}
           maxFileBytes={me.maxFileBytes}
@@ -95,6 +97,7 @@ export function HomePage() {
           canEdit={(item) => item.kind === 'text' && item.userId === me.user.id}
           canRetract={(item) => item.userId === me.user.id || current.ownerId === me.user.id}
           canShare={(item) => item.userId === me.user.id || current.ownerId === me.user.id}
+          readOnly={readOnly}
           onActivity={() => void refresh()}
           onAuthLost={onAuthLost}
           onStatus={onStatus}

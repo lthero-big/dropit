@@ -99,22 +99,32 @@ describe('room codes', () => {
     expect(screen.getByText(`${window.location.origin}/r/k7Rm2x`)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '复制房间码' }))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('k7Rm2x'))
-    fireEvent.click(screen.getByRole('button', { name: '房间码与 PIN' }))
-    const codeForm = screen.getByRole('form', { name: '修改房间码' })
-    fireEvent.change(within(codeForm).getByRole('textbox'), { target: { value: 'team-red' } })
+    // RHEA-190 m50: the owner changes the code in a popup; exactly 6 letters/digits
+    fireEvent.click(screen.getByRole('button', { name: '修改房间码' }))
+    const dialog = screen.getByRole('dialog', { name: '修改房间码' })
+    const codeForm = within(dialog).getByRole('form', { name: '修改房间码' })
+    const codeInput = within(codeForm).getByRole('textbox') as HTMLInputElement
+    fireEvent.change(codeInput, { target: { value: 'team-red' } })
+    // '-' is dropped and the code is cut to 6 characters
+    expect(codeInput.value).toBe('teamre')
+    fireEvent.change(codeInput, { target: { value: 'Tea' } })
+    expect((within(codeForm).getByRole('button', { name: '保存房间码' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(codeInput, { target: { value: 'TeamRd' } })
     fireEvent.click(within(codeForm).getByRole('button', { name: '保存房间码' }))
-    await waitFor(() => expect(window.location.pathname).toBe('/r/team-red'))
-    expect(await screen.findByText('team-red')).toBeTruthy()
-    // PIN on its own (the panel stays open after saving)
-    expect(screen.getByRole('button', { name: '收起' })).toBeTruthy()
+    await waitFor(() => expect(window.location.pathname).toBe('/r/TeamRd'))
+    expect((await screen.findAllByText('TeamRd')).length).toBeGreaterThan(0)
+    // PIN on its own (the popup stays open after saving)
+    expect(screen.getByRole('dialog', { name: '修改房间码' })).toBeTruthy()
     const pinForm = screen.getByRole('form', { name: '设置 PIN' })
     fireEvent.change(pinForm.querySelector('input[type=password]')!, { target: { value: '4821' } })
     fireEvent.click(within(pinForm).getByRole('button', { name: '设置 PIN' }))
-    expect(await screen.findByText('已设置 PIN')).toBeTruthy()
+    expect((await screen.findAllByText('已设置 PIN')).length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: '移除 PIN' }))
     await waitFor(() => expect(screen.queryByText('已设置 PIN')).toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByRole('dialog', { name: '修改房间码' })).toBeNull()
     const puts = calls.filter((call) => call.url === `/api/rooms/${ACCESS}/code`).map((call) => JSON.parse(String(call.init?.body)) as Record<string, unknown>)
-    expect(puts.map(({ deviceKey: _key, ...rest }) => rest)).toEqual([{ code: 'team-red' }, { pin: '4821' }, { pin: null }])
+    expect(puts.map(({ deviceKey: _key, ...rest }) => rest)).toEqual([{ code: 'TeamRd' }, { pin: '4821' }, { pin: null }])
     expect(puts[0]!.deviceKey).toMatch(/^[A-Za-z0-9_-]{32,128}$/)
   })
 
@@ -148,7 +158,7 @@ describe('room codes', () => {
     // no second PIN prompt on the room page: the browser kept the access token for that code
     expect(calls.filter((call) => call.url === '/api/rooms/enter')).toHaveLength(4)
     // someone who entered by code is not the owner, and shares the same /r/<code> link
-    expect(screen.queryByRole('button', { name: '房间码与 PIN' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '修改房间码' })).toBeNull()
     expect(screen.getByText(`${window.location.origin}/r/team-red`)).toBeTruthy()
   })
 
@@ -212,7 +222,8 @@ describe('room codes', () => {
   })
 })
 
-describe('personal invites', () => {
+describe('personal invites (admin-only since RHEA-190 m50)', () => {
+  const admin = { ...member, user: { ...member.user, role: 'admin' as const } }
   const view = (extra: Record<string, unknown> = {}) => ({
     enabled: true,
     limit: 2,
@@ -228,7 +239,7 @@ describe('personal invites', () => {
     vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(writeText)
     let current = view()
     stubFetch((url, init) => {
-      if (url === '/api/me') return json(member)
+      if (url === '/api/me') return json(admin)
       if (url === '/api/tokens') return json({ tokens: [] })
       if (url === '/api/me/invites' && init?.method === 'POST') {
         current = view({ used: 2, remaining: 0, invites: [...current.invites, { id: 'i2', maxUses: 1, uses: 0, expiresAt: Date.now() + 7_200_000, revoked: 0, createdAt: 2, status: 'open' }] })
@@ -251,16 +262,20 @@ describe('personal invites', () => {
     expect(screen.getByText(/邀请名额已用完/)).toBeTruthy()
   })
 
-  it('tells members when the admin switched invites off', async () => {
+  it('normal users no longer get registration invites; they see space invites (off when the admin switched them off)', async () => {
     stubFetch((url) => {
       if (url === '/api/me') return json(member)
       if (url === '/api/tokens') return json({ tokens: [] })
-      if (url === '/api/me/invites') return json({ enabled: false, limit: 5, used: 0, remaining: 5, registration: 'invite', invites: [] })
+      if (url === '/api/spaces') return json({ spaces: [{ id: 's1', name: 'Private space', ownerId: 'u1', expiresAt: null, role: 'owner' }] })
+      if (url === '/api/spaces/s1/invites') return json({ enabled: false, limit: 5, active: 0, remaining: 5, invites: [] })
+      if (url === '/api/spaces/s1/members') return json({ members: [] })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
     renderAt('/settings')
-    expect(await screen.findByText(/管理员暂时关闭了普通用户的邀请功能/)).toBeTruthy()
-    expect((screen.getByRole('button', { name: '生成邀请' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(await screen.findByText(/管理员暂时关闭了普通用户的空间邀请/)).toBeTruthy()
+    expect((screen.getByRole('button', { name: '生成空间邀请' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.queryByRole('button', { name: '生成邀请' })).toBeNull()
+    expect(calls.some((call) => call.url === '/api/me/invites')).toBe(false)
   })
 
   it('explains a personal invite on the invite page', async () => {

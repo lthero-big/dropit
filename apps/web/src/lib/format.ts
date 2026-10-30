@@ -51,9 +51,9 @@ export function useClock(offset: number): number {
 
 export function spaceLabel(space: SpaceSummary, meId: string, spaces: SpaceSummary[]): string {
   const own = space.ownerId === meId
-  const base = own ? '私人空间' : space.name === 'Private space' ? '受邀空间' : space.name
+  const base = own ? '私人空间' : space.name === 'Private space' ? (space.ownerName ? `${space.ownerName} 的空间` : '受邀空间') : space.name
   if (own) return base
-  const same = spaces.filter((item) => item.ownerId !== meId && item.name === space.name)
+  const same = spaces.filter((item) => item.ownerId !== meId && item.name === space.name && item.ownerName === space.ownerName)
   return same.length > 1 ? `${base} ${space.id.slice(0, 4)}` : base
 }
 

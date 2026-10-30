@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { Config } from './config.js';
-import { ApiError, MAX_GROUPS, cleanFilename, cleanGroupName, hash, isShortToken, publicItem, publicShareItem, randomRoomCode, shortToken, token, type Invite, type Item, type ItemMeta, type Session, type SharePublic, type Space } from './domain.js';
+import { ApiError, MAX_GROUPS, cleanFilename, cleanGroupName, hash, isShortToken, publicItem, publicShareItem, randomRoomCode, shortToken, token, type Invite, type Item, type ItemMeta, type MemberRole, type Session, type SharePublic, type Space } from './domain.js';
 import type { FileStorage } from './files.js';
 import type { Broadcaster } from './events.js';
 import type { Repository } from './repository.js';
@@ -42,6 +42,8 @@ export class ClipboardService {
     if (!entry) throw new ApiError(404, 'NOT_FOUND');
     const space = this.repo.roomById(entry.spaceId, this.now());
     if (!space || !space.roomKey || entryToken(space) !== roomToken) throw new ApiError(404, 'NOT_FOUND');
+    // RHEA-190 m50: 最近活跃 for the admin room list (written at most once a minute per room)
+    this.repo.touchRoom(space.id, this.now());
     return space;
   }
   /**
@@ -69,13 +71,13 @@ export class ClipboardService {
    * and is bound to that browser. Its code is a random 6-character one, or the custom code the caller chose
    * (refused with CODE_TAKEN when a live room already has it); the PIN is optional either way.
    */
-  createRoom(deviceKey?: string, origin = this.config.origin, options: { code?: string; pinHash?: string | null } = {}) {
+  createRoom(deviceKey?: string, origin = this.config.origin, options: { code?: string; pinHash?: string | null; createdBy?: string | null } = {}) {
     const id = randomUUID();
     for (let attempt = 0; attempt < 12; attempt++) {
       // the room's internal secret: never shown (clients get the access token derived from it)
       const space: Space = { id, name: 'Temporary room', ownerId: null,
         expiresAt: this.now() + this.config.roomRetentionMs, roomKey: token(),
-        roomCode: options.code ?? randomRoomCode(), pinHash: options.pinHash ?? null };
+        roomCode: options.code ?? randomRoomCode(), pinHash: options.pinHash ?? null, createdBy: options.createdBy ?? null };
       try {
         this.repo.createRoom(space, deviceKey ? deviceRoomHash(deviceKey) : null, this.now());
       } catch (error) {
@@ -193,7 +195,9 @@ export class ClipboardService {
   createPersonalInvite(session: Session | undefined, settings: UserInviteSettings, hours: number, origin = this.config.origin) {
     const auth = this.requireSession(session);
     const admin = auth.user.role === 'admin';
-    if (!admin && !settings.enabled) throw new ApiError(403, 'INVITES_DISABLED');
+    // RHEA-190 m50: inviting someone to register is for admins only; users invite people into their space instead.
+    if (!admin) throw new ApiError(403, 'INVITES_ADMIN_ONLY');
+    void settings;
     const spaceId = this.repo.personalSpaceId(auth.user.id);
     if (!spaceId) throw new ApiError(404, 'NOT_FOUND');
     const inviteToken = token();
@@ -203,6 +207,91 @@ export class ClipboardService {
     const { tokenHash: _hash, spaceId: _space, ...publicInvite } = invite;
     return { ...publicInvite, token: inviteToken, url: `${origin}/invite/${inviteToken}` };
   }
+  /** RHEA-190 m50: the caller's own private space (owner only). Members, viewers and rooms get NOT_FOUND / FORBIDDEN. */
+  ownedSpace(spaceId: string, session: Session | undefined) {
+    const auth = this.requireSession(session);
+    const space = this.space(spaceId, auth);
+    if (space.ownerId !== auth.user.id) throw new ApiError(403, 'FORBIDDEN');
+    return { auth, space };
+  }
+  /** How many open space invites the user may have at once (null = unlimited); INVITES_DISABLED when off. */
+  spaceInviteLimit(session: Session, settings: UserInviteSettings) {
+    if (session.user.role === 'admin') return null;
+    if (!settings.enabled) throw new ApiError(403, 'INVITES_DISABLED');
+    return this.inviteLimitFor(session.user.id, settings);
+  }
+  spaceInvites(session: Session | undefined, spaceId: string, settings: UserInviteSettings) {
+    const { auth } = this.ownedSpace(spaceId, session);
+    const now = this.now();
+    const admin = auth.user.role === 'admin';
+    const limit = admin ? null : this.inviteLimitFor(auth.user.id, settings);
+    const active = this.repo.activeSpaceInvitesByUser(now).get(auth.user.id) ?? 0;
+    return {
+      enabled: admin || settings.enabled, limit, active, remaining: limit === null ? null : Math.max(0, limit - active),
+      invites: this.repo.spaceInvites(spaceId).map(({ spaceId: _space, createdBy: _by, joinSpace: _join, ...invite }) => ({
+        ...invite, role: invite.role ?? 'editor', status: inviteStatus(invite, now),
+      })),
+    };
+  }
+  /** RHEA-190 m50: an owner invites people into their private space; read-only (viewer) unless they choose editor. */
+  createSpaceInvite(session: Session | undefined, spaceId: string, settings: UserInviteSettings,
+    input: { maxUses: number; hours: number; role: MemberRole }, origin = this.config.origin) {
+    const { auth } = this.ownedSpace(spaceId, session);
+    const limit = this.spaceInviteLimit(auth, settings);
+    const inviteToken = token();
+    const invite: Invite = { id: randomUUID(), tokenHash: hash(inviteToken), spaceId, maxUses: input.maxUses, uses: 0,
+      expiresAt: this.now() + input.hours * 3600000, revoked: 0, createdBy: auth.user.id, joinSpace: 1, createdAt: this.now(), role: input.role };
+    this.repo.createSpaceInvite(invite, limit, this.now());
+    const { tokenHash: _hash, spaceId: _space, createdBy: _by, joinSpace: _join, ...publicInvite } = invite;
+    return { ...publicInvite, status: 'active' as const, token: inviteToken, url: `${origin}/invite/${inviteToken}` };
+  }
+  revokeSpaceInvite(session: Session | undefined, spaceId: string, id: string) {
+    this.ownedSpace(spaceId, session);
+    this.repo.revokeSpaceInvite(id, spaceId);
+  }
+  members(session: Session | undefined, spaceId: string) {
+    this.ownedSpace(spaceId, session);
+    return this.repo.members(spaceId);
+  }
+  setMemberRole(session: Session | undefined, spaceId: string, userId: string, role: MemberRole) {
+    this.ownedSpace(spaceId, session);
+    this.repo.setMemberRole(spaceId, userId, role);
+  }
+  /** Removes a member; their open sockets close on the next revalidation (isMember is false now). */
+  removeMember(session: Session | undefined, spaceId: string, userId: string) {
+    this.ownedSpace(spaceId, session);
+    this.repo.removeMember(spaceId, userId);
+    this.events.revalidate();
+  }
+  /** A member leaves a space they were invited to (the owner cannot leave their own). */
+  leaveSpace(session: Session | undefined, spaceId: string) {
+    const auth = this.requireSession(session);
+    const space = this.space(spaceId, auth);
+    if (space.ownerId === auth.user.id) throw new ApiError(409, 'OWNER_CANNOT_LEAVE');
+    this.repo.removeMember(spaceId, auth.user.id);
+    this.events.revalidate();
+  }
+  /** RHEA-190 m50 admin 临时房间: metadata only (never the room's items or their contents). */
+  adminRooms(session: Session | undefined, locked: (id: string) => number | undefined) {
+    this.admin(session);
+    const now = this.now();
+    return this.repo.adminRooms(now).map(row => ({
+      id: row.id, code: row.roomCode, owner: row.ownerEmail, anonymous: !row.ownerEmail,
+      createdAt: row.createdAt ?? row.expiresAt - this.config.roomRetentionMs, createdAtEstimated: row.createdAt === null,
+      lastActiveAt: row.lastActiveAt, expiresAt: row.expiresAt, itemCount: row.itemCount, bytes: row.bytes,
+      hasPin: Boolean(row.hasPin), closed: row.closedAt !== null, closedAt: row.closedAt, lockedFor: locked(row.id) ?? null,
+    }));
+  }
+  setRoomClosed(session: Session | undefined, id: string, closed: boolean) {
+    this.admin(session);
+    this.repo.setRoomClosed(id, closed, this.now());
+    if (closed) this.events.revalidate();
+  }
+  async deleteRoom(session: Session | undefined, id: string) {
+    this.admin(session);
+    this.repo.endRoom(id, this.now());
+    await this.cleanup();
+  }
   inviteLimitFor(userId: string, settings: UserInviteSettings) { return this.repo.inviteLimit(userId) ?? settings.defaultLimit; }
   personalInvites(session: Session | undefined, settings: UserInviteSettings) {
     const auth = this.requireSession(session);
@@ -211,7 +300,7 @@ export class ClipboardService {
     const limit = admin ? null : this.inviteLimitFor(auth.user.id, settings);
     const used = this.repo.inviteUsage(auth.user.id, now);
     return {
-      enabled: admin || settings.enabled, limit, used, remaining: limit === null ? null : Math.max(0, limit - used),
+      enabled: admin, adminOnly: true, limit, used, remaining: limit === null ? null : Math.max(0, limit - used),
       invites: this.repo.personalInvites(auth.user.id).map(({ spaceId: _space, createdBy: _by, joinSpace: _join, ...invite }) => ({
         ...invite, status: inviteStatus(invite, now) })),
     };

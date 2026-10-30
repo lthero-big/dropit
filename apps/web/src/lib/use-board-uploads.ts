@@ -17,6 +17,8 @@ const EXPIRED = '会话已过期，请重新上传'
 
 export interface BoardUploadOptions {
   base: string | null
+  /** RHEA-190 m50: read-only members: no window-wide drop / paste upload. */
+  readOnly?: boolean
   channel: ReturnType<typeof useChannel>
   maxFileBytes: number
   upload: typeof uploadFile
@@ -50,7 +52,7 @@ export interface BoardUploads {
  * Everything upload-shaped on the board: the window drag/drop and paste listeners, the upload
  * queue (chunked + resumable), cross-tab claims, local previews and the resume prompts.
  */
-export function useBoardUploads({ base, channel, maxFileBytes, upload, chunkBytes, resumeStore, transport, onActivity, onAuthLost, onBusyChange, onBindCancel }: BoardUploadOptions): BoardUploads {
+export function useBoardUploads({ base, readOnly = false, channel, maxFileBytes, upload, chunkBytes, resumeStore, transport, onActivity, onAuthLost, onBusyChange, onBindCancel }: BoardUploadOptions): BoardUploads {
   const [rows, setRows] = useState<UploadRow[]>([])
   const [dragOver, setDragOver] = useState(false)
   const localIds = useRef(new Set<string>())
@@ -74,6 +76,7 @@ export function useBoardUploads({ base, channel, maxFileBytes, upload, chunkByte
   const chunkBytesRef = useRef(chunkBytes)
 
   useEffect(() => {
+    if (readOnly) return
     let depth = 0
     const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files')
     const onDrag = (event: DragEvent) => {
@@ -121,7 +124,7 @@ export function useBoardUploads({ base, channel, maxFileBytes, upload, chunkByte
       window.removeEventListener('drop', onDrop)
       window.removeEventListener('paste', onPaste)
     }
-  }, [])
+  }, [readOnly])
 
   /** 粘贴截图: read an image straight off the system clipboard. */
   async function pasteShot() {

@@ -34,6 +34,60 @@ export interface SpaceSummary {
   name: string
   ownerId: string | null
   expiresAt: number | null
+  /** RHEA-190 m50: the caller's role here. viewer = read-only (view and copy). */
+  role?: SpaceRole
+  ownerName?: string | null
+}
+
+export type MemberRole = 'viewer' | 'editor'
+export type SpaceRole = MemberRole | 'owner'
+
+/** RHEA-190 m50: an invite into the owner's private space. */
+export interface SpaceInvite {
+  id: string
+  maxUses: number
+  uses: number
+  expiresAt: number
+  revoked: number
+  createdAt: number | null
+  role: MemberRole
+  status: 'open' | 'used' | 'expired' | 'revoked' | 'active'
+  token?: string
+  url?: string
+}
+
+export interface SpaceInvites {
+  enabled: boolean
+  limit: number | null
+  active: number
+  remaining: number | null
+  invites: SpaceInvite[]
+}
+
+export interface SpaceMember {
+  userId: string
+  email: string
+  name: string
+  role: SpaceRole
+}
+
+/** RHEA-190 m50: 管理 → 临时房间 (metadata only). */
+export interface AdminRoom {
+  id: string
+  code: string | null
+  owner: string | null
+  anonymous: boolean
+  createdAt: number
+  createdAtEstimated: boolean
+  lastActiveAt: number | null
+  expiresAt: number
+  itemCount: number
+  bytes: number
+  hasPin: boolean
+  closed: boolean
+  closedAt: number | null
+  /** Seconds until the PIN lockout ends; null = not locked. */
+  lockedFor: number | null
 }
 
 export interface ScopeInfo {
@@ -117,6 +171,11 @@ export interface InvitePreview {
   spaceName: string | null
   expiresAt: number
   remainingUses: number
+  /** RHEA-190 m50 (space invites). */
+  role?: MemberRole
+  canRegister?: boolean
+  member?: boolean
+  spaceId?: string | null
 }
 
 export interface AdminUser extends User {
@@ -127,6 +186,9 @@ export interface AdminUser extends User {
   inviteLimit?: number | null
   inviteLimitEffective?: number
   invitesUsed?: number
+  /** RHEA-190 m50: 空间邀请 column. */
+  spaceInvitesEnabled?: boolean
+  activeSpaceInvites?: number
   hasPassword?: boolean
   mustChangePassword?: boolean
   providers?: string[]
