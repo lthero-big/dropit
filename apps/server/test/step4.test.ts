@@ -74,7 +74,7 @@ test('migration 16 from production schema 14: backup first, a 6-character code p
 
   const db = new Database(join(f.dir, 'dropit.sqlite'), { readonly: true });
   t.after(() => db.close());
-  assert.equal(db.pragma('user_version', { simple: true }), 16);
+  assert.equal(db.pragma('user_version', { simple: true }), 17);
   const columns = (db.prepare('PRAGMA table_info(spaces)').all() as { name: string }[]).map(c => c.name);
   assert.equal(columns.includes('roomHash'), false);
   assert.deepEqual(db.pragma('foreign_key_check'), []);
@@ -139,13 +139,13 @@ test('migration 16 from step-3 schema 15: random 5-character codes are replaced,
   assert.equal((await f.enter(code('22222222-2222-4222-8222-222222222222'))).status, 200);
 });
 
-test('a fresh database is created at schema 16 without a backup and without roomHash', async t => {
+test('a fresh database is created at schema 17 without a backup and without roomHash', async t => {
   const f = await setup();
   t.after(() => f.close());
   assert.deepEqual((await readdir(f.dir)).filter(name => name.endsWith('.bak')), []);
   const db = new Database(join(f.dir, 'dropit.sqlite'), { readonly: true });
   t.after(() => db.close());
-  assert.equal(db.pragma('user_version', { simple: true }), 16);
+  assert.equal(db.pragma('user_version', { simple: true }), 17);
   assert.equal((db.prepare('PRAGMA table_info(spaces)').all() as { name: string }[]).some(c => c.name === 'roomHash'), false);
   const room = await (await f.request('/api/rooms', { method: 'POST' })).json();
   assert.match(room.code, RANDOM_CODE);

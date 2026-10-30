@@ -163,33 +163,37 @@ test('a browser changes the code and PIN of its own room separately; others cann
   const key = 'k'.repeat(43);
   const room = await (await f.request('/api/rooms', { method: 'POST', body: { deviceKey: key } })).json();
   const put = (body: Record<string, unknown>, token = room.token) => f.request(`/api/rooms/${token}/code`, { method: 'PUT', body: { deviceKey: key, ...body } });
-  const set = await put({ code: 'my-room', pin: '7777' });
+  // RHEA-190 m50: a changed code is exactly 6 letters/digits
+  for (const bad of ['my-room', 'abc', 'abcdefg', 'abc de', 'abc_de']) assert.equal(await f.errorCode(await put({ code: bad })), 'INVALID_CODE', bad);
+  const set = await put({ code: 'MyRoom', pin: '7777' });
   assert.equal(set.status, 200);
-  assert.deepEqual(await set.json(), { code: 'my-room', hasPin: true, url: `${SITE}/r/my-room` });
+  assert.deepEqual(await set.json(), { code: 'MyRoom', hasPin: true, url: `${SITE}/r/MyRoom` });
   // the old code is gone, the new one asks for the PIN
   assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: room.code } })).status, 404);
-  assert.equal(await f.errorCode(await f.request('/api/rooms/enter', { method: 'POST', body: { code: 'my-room' } })), 'PIN_REQUIRED');
+  assert.equal(await f.errorCode(await f.request('/api/rooms/enter', { method: 'POST', body: { code: 'MyRoom' } })), 'PIN_REQUIRED');
+  // case-sensitive
+  assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: 'myroom' } })).status, 404);
   // the owner keeps its access token (not asked for the PIN), and so does whoever entered before
   assert.equal((await f.request(`/api/rooms/${room.token}/items`)).status, 200);
   const again = await (await f.request('/api/rooms', { method: 'POST', body: { deviceKey: key } })).json();
   assert.equal(again.token, room.token);
-  assert.equal(again.code, 'my-room');
+  assert.equal(again.code, 'MyRoom');
   assert.equal(again.hasPin, true);
-  assert.equal((await f.request(`/api/rooms/${room.token}/code`, { method: 'PUT', body: { deviceKey: 'z'.repeat(43), code: 'steal' } })).status, 403);
+  assert.equal((await f.request(`/api/rooms/${room.token}/code`, { method: 'PUT', body: { deviceKey: 'z'.repeat(43), code: 'Steal1' } })).status, 403);
   // a second browser cannot take the code
   const other = await (await f.request('/api/rooms', { method: 'POST', body: { deviceKey: 'o'.repeat(43) } })).json();
-  const clash = await f.request(`/api/rooms/${other.token}/code`, { method: 'PUT', body: { deviceKey: 'o'.repeat(43), code: 'my-room' } });
+  const clash = await f.request(`/api/rooms/${other.token}/code`, { method: 'PUT', body: { deviceKey: 'o'.repeat(43), code: 'MyRoom' } });
   assert.equal(clash.status, 409);
   assert.equal(await f.errorCode(clash), 'CODE_TAKEN');
   // PIN only: clear it, the code stays
-  assert.deepEqual(await (await put({ pin: null })).json(), { code: 'my-room', hasPin: false, url: `${SITE}/r/my-room` });
-  assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: 'my-room' } })).status, 200);
+  assert.deepEqual(await (await put({ pin: null })).json(), { code: 'MyRoom', hasPin: false, url: `${SITE}/r/MyRoom` });
+  assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: 'MyRoom' } })).status, 200);
   assert.equal((await put({ pin: '5555' })).status, 200);
   // code null: a fresh random code, the PIN stays
   const reset = await (await put({ code: null })).json();
   assert.match(reset.code, /^[^0O1Il]{6}$/);
   assert.equal(reset.hasPin, true);
-  assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: 'my-room' } })).status, 404);
+  assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: 'MyRoom' } })).status, 404);
   assert.equal((await f.request('/api/rooms/enter', { method: 'POST', body: { code: reset.code, pin: '5555' } })).status, 200);
   // nothing to change
   assert.equal((await put({})).status, 400);
@@ -224,87 +228,48 @@ test('share links are 6 characters and unknown links of either length are 404', 
   assert.equal((await f.request('/api/s/abcde')).status, 404);
 });
 
-test('personal invites: members invite up to the default of 5, admins edit the switch, default and per-user limit', async t => {
+test('RHEA-190 m50: registration invites are admin-only; users invite into their space instead', async t => {
   const f = await setup({ rateInvite: 1000 });
   t.after(() => f.close());
   const admin = await f.admin();
   const alice = await f.member(admin, 'alice@example.com');
   const view = await (await f.request('/api/me/invites', { cookie: alice.cookie })).json();
-  assert.equal(view.enabled, true);
-  assert.equal(view.limit, 5);
-  assert.equal(view.used, 0);
+  assert.equal(view.enabled, false);
   assert.equal((await f.request('/api/me/invites')).status, 401);
-  const tokens: string[] = [];
-  for (let i = 0; i < 5; i++) {
-    const created = await f.request('/api/me/invites', { method: 'POST', cookie: alice.cookie, body: {} });
-    assert.equal(created.status, 201);
-    const invite = await created.json();
-    assert.ok(invite.url.endsWith(`/invite/${invite.token}`));
-    assert.ok(!('tokenHash' in invite));
-    tokens.push(invite.token);
-  }
-  const over = await f.request('/api/me/invites', { method: 'POST', cookie: alice.cookie, body: {} });
-  assert.equal(over.status, 403);
-  assert.equal(await f.errorCode(over), 'INVITE_LIMIT_REACHED');
-  const listed = await (await f.request('/api/me/invites', { cookie: alice.cookie })).json();
-  assert.equal(listed.used, 5);
-  assert.equal(listed.remaining, 0);
-  assert.equal(listed.invites.length, 5);
-  assert.ok(listed.invites.every((invite: { status: string }) => invite.status === 'open'));
-  // the invitee sees a personal invite and registers; the invite is spent and bound to no space
-  const preview = await (await f.request(`/api/invites/${tokens[0]}`)).json();
+  const refused = await f.request('/api/me/invites', { method: 'POST', cookie: alice.cookie, body: {} });
+  assert.equal(refused.status, 403);
+  assert.equal(await f.errorCode(refused), 'INVITES_ADMIN_ONLY');
+  // admins still invite people to register; the invite is single use and bound to no space
+  const created = await f.request('/api/me/invites', { method: 'POST', cookie: admin, body: {} });
+  assert.equal(created.status, 201);
+  const invite = await created.json();
+  assert.ok(invite.url.endsWith(`/invite/${invite.token}`));
+  assert.ok(!('tokenHash' in invite));
+  const preview = await (await f.request(`/api/invites/${invite.token}`)).json();
   assert.equal(preview.personal, true);
   assert.equal(preview.spaceName, null);
-  const joined = await f.register('bob@example.com', tokens[0]);
+  const joined = await f.register('bob@example.com', invite.token);
   assert.equal(joined.status, 201);
-  const bobCookie = cookieFrom(joined);
-  const bobSpaces = await (await f.request('/api/spaces', { cookie: bobCookie })).json();
+  const bobSpaces = await (await f.request('/api/spaces', { cookie: cookieFrom(joined) })).json();
   assert.equal(bobSpaces.spaces.length, 1);
-  assert.equal((await f.register('carol@example.com', tokens[0])).status, 403);
-  const after = await (await f.request('/api/me/invites', { cookie: alice.cookie })).json();
-  assert.equal(after.invites.find((invite: { uses: number }) => invite.uses === 1).status, 'used');
-  // a used invite counts against the limit even though it is spent
-  assert.equal((await f.request('/api/me/invites', { method: 'POST', cookie: alice.cookie, body: {} })).status, 403);
-  // revoking an open invite frees the slot; a used one cannot be revoked
-  const open = after.invites.find((invite: { status: string }) => invite.status === 'open');
-  const used = after.invites.find((invite: { status: string }) => invite.status === 'used');
-  assert.equal((await f.request(`/api/me/invites/${used.id}`, { method: 'DELETE', cookie: alice.cookie })).status, 409);
-  assert.equal((await f.request(`/api/me/invites/${open.id}`, { method: 'DELETE', cookie: alice.cookie })).status, 204);
+  assert.equal(bobSpaces.spaces[0].role, 'owner');
+  assert.equal((await f.register('carol@example.com', invite.token)).status, 403);
+  const listed = await (await f.request('/api/me/invites', { cookie: admin })).json();
+  assert.equal(listed.enabled, true);
+  assert.equal(listed.invites[0].status, 'used');
+  const open = await (await f.request('/api/me/invites', { method: 'POST', cookie: admin, body: {} })).json();
   assert.equal((await f.request(`/api/me/invites/${open.id}`, { method: 'DELETE', cookie: alice.cookie })).status, 404);
-  assert.equal((await f.request('/api/me/invites', { method: 'POST', cookie: alice.cookie, body: {} })).status, 201);
-  // another user cannot revoke Alice's invites
-  assert.equal((await f.request(`/api/me/invites/${after.invites.find((invite: { status: string }) => invite.status === 'open').id}`, { method: 'DELETE', cookie: bobCookie })).status, 404);
-
-  // admins see and revoke every invite
-  const all = await (await f.request('/api/admin/invites', { cookie: admin })).json();
-  const personal = all.invites.filter((invite: { joinSpace: number }) => invite.joinSpace === 0);
-  assert.equal(personal.length, 6);
-  assert.ok(personal.every((invite: { createdByEmail: string }) => invite.createdByEmail === 'alice@example.com'));
-  assert.deepEqual([...new Set(personal.map((invite: { status: string }) => invite.status))].sort(), ['open', 'revoked', 'used']);
-  const toRevoke = personal.find((invite: { status: string }) => invite.status === 'open');
-  assert.equal((await f.request(`/api/admin/invites/${toRevoke.id}`, { method: 'DELETE', cookie: admin })).status, 204);
-
-  // per-user limit and the default are admin controlled
+  assert.equal((await f.request(`/api/me/invites/${open.id}`, { method: 'DELETE', cookie: admin })).status, 204);
+  // per-user limit and the default stay admin controlled (they now bound open space invites)
   const users = await (await f.request('/api/admin/users', { cookie: admin })).json();
   const aliceRow = users.users.find((user: { email: string }) => user.email === 'alice@example.com');
   assert.equal(aliceRow.inviteLimit, null);
   assert.equal(aliceRow.inviteLimitEffective, 5);
-  assert.equal(aliceRow.invitesUsed, 4);
   assert.equal((await f.request(`/api/admin/users/${aliceRow.id}`, { method: 'PATCH', cookie: alice.cookie, body: { inviteLimit: 50 } })).status, 403);
   assert.equal((await f.request(`/api/admin/users/${aliceRow.id}`, { method: 'PATCH', cookie: admin, body: { inviteLimit: -1 } })).status, 400);
   assert.equal((await f.request(`/api/admin/users/${aliceRow.id}`, { method: 'PATCH', cookie: admin, body: { inviteLimit: 8 } })).status, 204);
-  assert.equal((await (await f.request('/api/me/invites', { cookie: alice.cookie })).json()).limit, 8);
-  assert.equal((await f.request('/api/me/invites', { method: 'POST', cookie: alice.cookie, body: {} })).status, 201);
-  assert.equal((await f.request(`/api/admin/users/${aliceRow.id}`, { method: 'PATCH', cookie: admin, body: { inviteLimit: null } })).status, 204);
   const registration = await f.request('/api/admin/registration', { method: 'PUT', cookie: admin, body: { userInvites: { defaultLimit: 1 } } });
   assert.deepEqual((await registration.json()).userInvites, { enabled: true, defaultLimit: 1 });
-  assert.equal((await (await f.request('/api/me/invites', { cookie: alice.cookie })).json()).limit, 1);
-  const off = await f.request('/api/admin/registration', { method: 'PUT', cookie: admin, body: { userInvites: { enabled: false } } });
-  assert.equal((await off.json()).userInvites.enabled, false);
-  const disabled = await f.request('/api/me/invites', { method: 'POST', cookie: alice.cookie, body: {} });
-  assert.equal(await f.errorCode(disabled), 'INVITES_DISABLED');
   assert.equal((await f.request('/api/admin/registration', { method: 'PUT', cookie: admin, body: { userInvites: { defaultLimit: 'x' } } })).status, 400);
-  // admins are never blocked by the switch or the limit
-  assert.equal((await f.request('/api/me/invites', { method: 'POST', cookie: admin, body: {} })).status, 201);
 });
 

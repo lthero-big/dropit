@@ -19,17 +19,28 @@ export const RANDOM_ROOM_CODE_LENGTH = 6;
 export const randomRoomCode = () => Array.from({ length: RANDOM_ROOM_CODE_LENGTH }, () => ROOM_CODE_ALPHABET[randomInt(ROOM_CODE_ALPHABET.length)]).join('');
 /** A code somebody typed: case-sensitive letters, digits, '-' and '_'. */
 export const CUSTOM_CODE_PATTERN = /^[A-Za-z0-9_-]{3,32}$/;
+/** RHEA-190 m50: a code the owner picks when changing it later (房间码 → 修改): exactly 6 letters/digits, case-sensitive. */
+export const ROOM_CODE_CHANGE_PATTERN = /^[A-Za-z0-9]{6}$/;
 export const PIN_MIN = 4;
 export const PIN_MAX = 32;
 export const hash = (value: string) => createHash('sha256').update(value).digest('base64url');
 export interface User { id: string; email: string; name: string; role: 'admin' | 'user'; disabled: number; pending: number; createdAt: number }
-export interface Space { id: string; name: string; ownerId: string | null; expiresAt: number | null; /** The room's internal secret (rooms only; NULL for private spaces). Never a link. */ roomKey: string | null; deviceHash?: string | null; roomCode?: string | null; pinHash?: string | null }
+export interface Space { id: string; name: string; ownerId: string | null; expiresAt: number | null; /** The room's internal secret (rooms only; NULL for private spaces). Never a link. */ roomKey: string | null; deviceHash?: string | null; roomCode?: string | null; pinHash?: string | null;
+  /** RHEA-190 m50 (rooms): metadata for the admin list; NULL on rooms created before migration 17. */
+  createdAt?: number | null; lastActiveAt?: number | null; closedAt?: number | null; createdBy?: string | null }
+/** RHEA-190 m50: what a member may do in a space they were invited to. The owner is always 'owner'. */
+export type MemberRole = 'viewer' | 'editor';
+export type SpaceRole = MemberRole | 'owner';
 export interface UploadSession {
   id: string; spaceId: string; userId: string | null; principal: string;
   filename: string; mime: string; size: number; chunkSize: number; createdAt: number; expiresAt: number;
 }
 export interface UploadChunk { uploadId: string; index: number; key: string; size: number; sha256: string }
-export interface Invite { id: string; tokenHash: string; spaceId: string; maxUses: number; uses: number; expiresAt: number; revoked: number; createdBy: string; joinSpace?: number; createdAt?: number | null }
+export interface Invite { id: string; tokenHash: string; spaceId: string; maxUses: number; uses: number; expiresAt: number; revoked: number; createdBy: string; joinSpace?: number; createdAt?: number | null;
+  /** RHEA-190 m50: the role a space invite grants; NULL (older invites) = editor. */
+  role?: MemberRole | null;
+  /** Set by Repository.invite(): whether the creator is (still) an admin. Only admin invites open registration. */
+  creatorAdmin?: number }
 export interface Item {
   id: string; spaceId: string; userId: string | null; kind: 'text' | 'file'; text: string | null;
   filename: string | null; mime: string | null; size: number; storedBytes: number;

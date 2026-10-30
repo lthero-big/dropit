@@ -2,14 +2,16 @@ import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ApiError, ROOM_CODE_ALPHABET, randomRoomCode, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14, migration15, migration16 } from './migrations.js';
+import { ApiError, ROOM_CODE_ALPHABET, randomRoomCode, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type MemberRole, type SpaceRole, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14, migration15, migration16, migration17 } from './migrations.js';
 import type { RegistrationPolicy } from './password.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
 type UserRow = User & { quotaBytes: number | null; passwordHash?: string | null; mustChangePassword?: number };
 type DeviceRow = Omit<DeviceAuthorization, 'scopes'> & { scopes: string };
 type TokenRow = Omit<AccessToken, 'scopes'> & { scopes: string };
+export type AdminRoomRow = { id: string; roomCode: string | null; ownerEmail: string | null; createdAt: number | null; lastActiveAt: number | null;
+  expiresAt: number; closedAt: number | null; hasPin: number; itemCount: number; bytes: number; device: number };
 type DevicePoll = { error: 'expired_token' | 'access_denied' | 'slow_down' | 'authorization_pending'; interval?: number } | { token: AccessToken };
 
 function toUser(row: UserRow): User {
@@ -111,6 +113,25 @@ export interface Repository {
   /** the live temporary room bound to this browser, if any */
   deviceRoom(deviceHash: string, now: number): Space | undefined;
   isMember(spaceId: string, userId: string): boolean;
+  /** RHEA-190 m50: 'owner' for the space's owner, the member's role otherwise, undefined for non-members. */
+  memberRole(spaceId: string, userId: string): SpaceRole | undefined;
+  members(spaceId: string): { userId: string; email: string; name: string; role: SpaceRole }[];
+  setMemberRole(spaceId: string, userId: string, role: MemberRole): void;
+  /** Removes a non-owner member (NOT_FOUND otherwise); their spent invite stays as history. */
+  removeMember(spaceId: string, userId: string): void;
+  /** Space invites (joinSpace=1) of a space that are still worth listing (not revoked-unused), newest first. */
+  spaceInvites(spaceId: string): Omit<Invite, 'tokenHash'>[];
+  /** Open space invites (usable now) per creator. */
+  activeSpaceInvitesByUser(now: number): Map<string, number>;
+  /** Atomic: refuses with INVITE_LIMIT_REACHED when the creator already has `limit` open space invites (null = unlimited). */
+  createSpaceInvite(invite: Invite, limit: number | null, now: number): void;
+  revokeSpaceInvite(id: string, spaceId: string): void;
+  /** RHEA-190 m50 admin 临时房间: room metadata only, never items. */
+  adminRooms(now: number): AdminRoomRow[];
+  setRoomClosed(id: string, closed: boolean, now: number): void;
+  /** Makes a room expire now; the caller runs cleanup, which removes its items, uploads and the room. */
+  endRoom(id: string, now: number): void;
+  touchRoom(id: string, now: number): void;
   invite(tokenHash: string, now: number): Invite | undefined;
   createInvite(invite: Invite): void;
   invites(): (Omit<Invite, 'tokenHash'> & { createdByEmail: string | null })[];
@@ -167,9 +188,9 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 16) throw new Error(`Unsupported schema version ${version}`);
+    if (version > 17) throw new Error(`Unsupported schema version ${version}`);
     // RHEA-190 auth step 4: copy the database before any migration touches it (<file>.pre-v<N>-<time>.bak, next to it).
-    if (version > 0 && version < 16 && path !== ':memory:' && existsSync(path)) {
+    if (version > 0 && version < 17 && path !== ':memory:' && existsSync(path)) {
       const backup = `${path}.pre-v${version}-${new Date().toISOString().replace(/[:.]/g, '-')}.bak`;
       this.db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
       console.info(`dropit: backed up the database (schema ${version}) to ${backup} before migrating`);
@@ -199,6 +220,7 @@ export class SqliteRepository implements Repository {
         this.db.pragma('user_version = 16');
       }
     })();
+    if (version < 17) this.db.transaction(() => { this.db.exec(migration17); })();
     this.db.pragma('foreign_keys = ON');
   }
   setting(key: string) {
@@ -337,6 +359,8 @@ export class SqliteRepository implements Repository {
         // RHEA-190 auth step 2: 管理 → 注册 decides who may create an account. ADMIN_EMAILS and
         // the empty-database bootstrap are operator decisions and bypass it.
         if (!first && !listed && policy === 'closed') throw new ApiError(403, 'REGISTRATION_CLOSED');
+        // RHEA-190 m50: only an admin's invite opens registration; a user's space invite is for existing accounts.
+        if (!first && !listed && invite && !invite.creatorAdmin && policy !== 'open') throw new ApiError(403, 'INVITE_NEEDS_ACCOUNT');
         if (!first && !listed && !invite && policy !== 'open') throw new ApiError(403, 'INVITATION_REQUIRED');
         const admin = first || listed;
         row = { id: randomUUID(), email: identity.email, name: identity.name, role: admin ? 'admin' : 'user', disabled: 0, pending: 0, createdAt: now, quotaBytes: null };
@@ -364,7 +388,7 @@ export class SqliteRepository implements Repository {
     if (this.isMember(invite.spaceId, userId)) return;
     const result = this.db.prepare('UPDATE invites SET uses=uses+1 WHERE id=? AND uses<maxUses AND revoked=0 AND expiresAt>?').run(invite.id, now);
     if (result.changes !== 1) throw new ApiError(403, 'INVITE_INVALID');
-    this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(invite.spaceId, userId);
+    this.db.prepare('INSERT INTO members (spaceId,userId,role) VALUES (?,?,?)').run(invite.spaceId, userId, invite.role ?? 'editor');
   }
   acceptInvite(inviteHash: string, userId: string, now: number) {
     this.db.transaction(() => {
@@ -409,6 +433,7 @@ export class SqliteRepository implements Repository {
         const policy = input.policy ?? 'invite';
         if (policy === 'closed') throw new ApiError(403, 'REGISTRATION_CLOSED');
         if (policy === 'invite' && !invite) throw new ApiError(403, 'INVITATION_REQUIRED');
+        if (policy === 'invite' && !invite?.creatorAdmin) throw new ApiError(403, 'INVITE_NEEDS_ACCOUNT');
       }
       // ADMIN_EMAILS is NOT honoured here: a self-chosen password does not prove the address.
       const admin = Boolean(input.firstAdmin);
@@ -584,9 +609,12 @@ export class SqliteRepository implements Repository {
     const row = this.db.prepare('SELECT quotaBytes FROM users WHERE id=?').get(userId) as { quotaBytes: number | null } | undefined;
     return row?.quotaBytes ?? null;
   }
-  spaces(userId: string) { return this.db.prepare('SELECT s.* FROM spaces s JOIN members m ON m.spaceId=s.id WHERE m.userId=?').all(userId) as Space[]; }
+  spaces(userId: string) {
+    return this.db.prepare(`SELECT s.*, CASE WHEN s.ownerId=m.userId THEN 'owner' ELSE m.role END AS role, o.name AS ownerName
+      FROM spaces s JOIN members m ON m.spaceId=s.id LEFT JOIN users o ON o.id=s.ownerId WHERE m.userId=?`).all(userId) as (Space & { role: SpaceRole; ownerName: string | null })[];
+  }
   space(id: string) { return this.db.prepare('SELECT * FROM spaces WHERE id=?').get(id) as Space | undefined; }
-  roomById(id: string, now: number) { return this.db.prepare('SELECT * FROM spaces WHERE id=? AND roomKey IS NOT NULL AND expiresAt>?').get(id, now) as Space | undefined; }
+  roomById(id: string, now: number) { return this.db.prepare('SELECT * FROM spaces WHERE id=? AND roomKey IS NOT NULL AND closedAt IS NULL AND expiresAt>?').get(id, now) as Space | undefined; }
   createRoom(space: Space, deviceHash: string | null, now: number) {
     this.db.transaction(() => {
       // an expired room that cleanup has not removed yet gives up its browser binding and its code
@@ -594,36 +622,94 @@ export class SqliteRepository implements Repository {
       if (this.db.prepare('SELECT 1 FROM spaces WHERE roomKey=?').get(space.roomKey)) throw new ApiError(409, 'TOKEN_COLLISION');
       if (space.roomCode) this.releaseExpiredCode(space.roomCode, now);
       if (space.roomCode && this.db.prepare('SELECT 1 FROM spaces WHERE roomCode=?').get(space.roomCode)) throw new ApiError(409, 'CODE_TAKEN');
-      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomKey,deviceHash,roomCode,pinHash) VALUES (?,?,?,?,?,?,?,?)')
-        .run(space.id, space.name, space.ownerId, space.expiresAt, space.roomKey, deviceHash, space.roomCode ?? null, space.pinHash ?? null);
+      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt,roomKey,deviceHash,roomCode,pinHash,createdAt,lastActiveAt,createdBy) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run(space.id, space.name, space.ownerId, space.expiresAt, space.roomKey, deviceHash, space.roomCode ?? null, space.pinHash ?? null, now, now, space.createdBy ?? null);
     }).immediate();
   }
   private releaseExpiredCode(code: string, now: number) {
     this.db.prepare('UPDATE spaces SET roomCode=NULL, pinHash=NULL WHERE roomCode=? AND expiresAt<=?').run(code, now);
   }
-  roomByCode(code: string, now: number) { return this.db.prepare('SELECT * FROM spaces WHERE roomCode=? AND expiresAt>?').get(code, now) as Space | undefined; }
+  roomByCode(code: string, now: number) { return this.db.prepare('SELECT * FROM spaces WHERE roomCode=? AND closedAt IS NULL AND expiresAt>?').get(code, now) as Space | undefined; }
   setRoomCode(spaceId: string, code: string, pinHash: string | null, now: number) {
     this.db.transaction(() => {
       this.releaseExpiredCode(code, now);
       const holder = this.db.prepare('SELECT id FROM spaces WHERE roomCode=?').get(code) as { id: string } | undefined;
       if (holder && holder.id !== spaceId) throw new ApiError(409, 'CODE_TAKEN');
-      if (!this.db.prepare('UPDATE spaces SET roomCode=?, pinHash=? WHERE id=? AND roomKey IS NOT NULL AND expiresAt>?').run(code, pinHash, spaceId, now).changes) throw new ApiError(404, 'NOT_FOUND');
+      if (!this.db.prepare('UPDATE spaces SET roomCode=?, pinHash=? WHERE id=? AND roomKey IS NOT NULL AND closedAt IS NULL AND expiresAt>?').run(code, pinHash, spaceId, now).changes) throw new ApiError(404, 'NOT_FOUND');
     }).immediate();
   }
   deviceRoom(deviceHash: string, now: number) {
-    return this.db.prepare('SELECT * FROM spaces WHERE deviceHash=? AND roomKey IS NOT NULL AND expiresAt>?').get(deviceHash, now) as Space | undefined;
+    return this.db.prepare('SELECT * FROM spaces WHERE deviceHash=? AND roomKey IS NOT NULL AND closedAt IS NULL AND expiresAt>?').get(deviceHash, now) as Space | undefined;
   }
   isMember(spaceId: string, userId: string) { return Boolean(this.db.prepare('SELECT 1 FROM members WHERE spaceId=? AND userId=?').get(spaceId, userId)); }
   invite(tokenHash: string, now: number) {
-    return this.db.prepare('SELECT * FROM invites WHERE tokenHash=? AND revoked=0 AND uses<maxUses AND expiresAt>?').get(tokenHash, now) as Invite | undefined;
+    // RHEA-190 m50: personal (registration-only) invites now need an admin creator; older ones made by users stop working.
+    return this.db.prepare(`SELECT i.*, (u.role='admin' AND u.disabled=0) AS creatorAdmin FROM invites i LEFT JOIN users u ON u.id=i.createdBy
+      WHERE i.tokenHash=? AND i.revoked=0 AND i.uses<i.maxUses AND i.expiresAt>? AND (i.joinSpace=1 OR u.role='admin')`).get(tokenHash, now) as Invite | undefined;
+  }
+  memberRole(spaceId: string, userId: string) {
+    const row = this.db.prepare('SELECT m.role, s.ownerId FROM members m JOIN spaces s ON s.id=m.spaceId WHERE m.spaceId=? AND m.userId=?').get(spaceId, userId) as { role: MemberRole; ownerId: string | null } | undefined;
+    if (!row) return undefined;
+    return row.ownerId === userId ? 'owner' as const : row.role === 'viewer' ? 'viewer' as const : 'editor' as const;
+  }
+  members(spaceId: string) {
+    return this.db.prepare(`SELECT u.id AS userId, u.email, u.name, CASE WHEN s.ownerId=u.id THEN 'owner' ELSE m.role END AS role
+      FROM members m JOIN users u ON u.id=m.userId JOIN spaces s ON s.id=m.spaceId WHERE m.spaceId=?
+      ORDER BY s.ownerId=u.id DESC, lower(u.email)`).all(spaceId) as { userId: string; email: string; name: string; role: SpaceRole }[];
+  }
+  setMemberRole(spaceId: string, userId: string, role: MemberRole) {
+    if (!this.db.prepare('UPDATE members SET role=? WHERE spaceId=? AND userId=? AND userId IS NOT (SELECT ownerId FROM spaces WHERE id=?)')
+      .run(role, spaceId, userId, spaceId).changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  removeMember(spaceId: string, userId: string) {
+    if (!this.db.prepare('DELETE FROM members WHERE spaceId=? AND userId=? AND userId IS NOT (SELECT ownerId FROM spaces WHERE id=?)')
+      .run(spaceId, userId, spaceId).changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  spaceInvites(spaceId: string) {
+    return this.db.prepare(`SELECT id,spaceId,maxUses,uses,expiresAt,revoked,createdBy,joinSpace,createdAt,role FROM invites
+      WHERE spaceId=? AND joinSpace=1 AND NOT (revoked=1 AND uses=0) ORDER BY coalesce(createdAt,0) DESC, expiresAt DESC`).all(spaceId) as Omit<Invite, 'tokenHash'>[];
+  }
+  activeSpaceInvitesByUser(now: number) {
+    const rows = this.db.prepare(`SELECT createdBy, count(*) AS n FROM invites WHERE joinSpace=1 AND revoked=0 AND uses<maxUses AND expiresAt>? GROUP BY createdBy`).all(now) as { createdBy: string; n: number }[];
+    return new Map(rows.map(row => [row.createdBy, row.n]));
+  }
+  createSpaceInvite(invite: Invite, limit: number | null, now: number) {
+    this.db.transaction(() => {
+      const open = (this.db.prepare('SELECT count(*) AS n FROM invites WHERE createdBy=? AND joinSpace=1 AND revoked=0 AND uses<maxUses AND expiresAt>?')
+        .get(invite.createdBy, now) as { n: number }).n;
+      if (limit !== null && open >= limit) throw new ApiError(403, 'INVITE_LIMIT_REACHED');
+      this.createInvite({ ...invite, joinSpace: 1 });
+    }).immediate();
+  }
+  revokeSpaceInvite(id: string, spaceId: string) {
+    if (!this.db.prepare('UPDATE invites SET revoked=1 WHERE id=? AND spaceId=? AND joinSpace=1 AND revoked=0').run(id, spaceId).changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  adminRooms(now: number) {
+    return this.db.prepare(`SELECT s.id, s.roomCode, u.email AS ownerEmail, s.createdAt, s.lastActiveAt, s.expiresAt, s.closedAt,
+      (s.pinHash IS NOT NULL) AS hasPin, (s.deviceHash IS NOT NULL) AS device,
+      (SELECT count(*) FROM items WHERE spaceId=s.id AND expiresAt>?) AS itemCount,
+      (SELECT coalesce(sum(storedBytes),0) FROM items WHERE spaceId=s.id) AS bytes
+      FROM spaces s LEFT JOIN users u ON u.id=s.createdBy WHERE s.roomKey IS NOT NULL AND s.expiresAt>?
+      ORDER BY coalesce(s.lastActiveAt, s.createdAt, 0) DESC, s.expiresAt DESC`).all(now, now) as AdminRoomRow[];
+  }
+  setRoomClosed(id: string, closed: boolean, now: number) {
+    if (!this.db.prepare('UPDATE spaces SET closedAt=? WHERE id=? AND roomKey IS NOT NULL AND expiresAt>?').run(closed ? now : null, id, now).changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  endRoom(id: string, now: number) {
+    if (!this.db.prepare('UPDATE spaces SET expiresAt=?, closedAt=coalesce(closedAt,?), deviceHash=NULL, roomCode=NULL, pinHash=NULL WHERE id=? AND roomKey IS NOT NULL AND expiresAt>?')
+      .run(now, now, id, now).changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  touchRoom(id: string, now: number) {
+    this.db.prepare('UPDATE spaces SET lastActiveAt=? WHERE id=? AND roomKey IS NOT NULL AND (lastActiveAt IS NULL OR lastActiveAt<?)').run(now, id, now - 60000);
   }
   createInvite(invite: Invite) {
-    this.db.prepare(`INSERT INTO invites (id,tokenHash,spaceId,maxUses,uses,expiresAt,revoked,createdBy,joinSpace,createdAt)
-      VALUES (@id,@tokenHash,@spaceId,@maxUses,@uses,@expiresAt,@revoked,@createdBy,@joinSpace,@createdAt)`)
-      .run({ ...invite, joinSpace: invite.joinSpace ?? 1, createdAt: invite.createdAt ?? null });
+    this.db.prepare(`INSERT INTO invites (id,tokenHash,spaceId,maxUses,uses,expiresAt,revoked,createdBy,joinSpace,createdAt,role)
+      VALUES (@id,@tokenHash,@spaceId,@maxUses,@uses,@expiresAt,@revoked,@createdBy,@joinSpace,@createdAt,@role)`)
+      .run({ id: invite.id, tokenHash: invite.tokenHash, spaceId: invite.spaceId, maxUses: invite.maxUses, uses: invite.uses, expiresAt: invite.expiresAt,
+        revoked: invite.revoked, createdBy: invite.createdBy, joinSpace: invite.joinSpace ?? 1, createdAt: invite.createdAt ?? null, role: invite.role ?? null });
   }
   invites() {
-    return this.db.prepare(`SELECT i.id,i.spaceId,i.maxUses,i.uses,i.expiresAt,i.revoked,i.createdBy,i.joinSpace,i.createdAt,u.email AS createdByEmail
+    return this.db.prepare(`SELECT i.id,i.spaceId,i.maxUses,i.uses,i.expiresAt,i.revoked,i.createdBy,i.joinSpace,i.createdAt,i.role,u.email AS createdByEmail
       FROM invites i LEFT JOIN users u ON u.id=i.createdBy ORDER BY i.expiresAt DESC`).all() as (Omit<Invite, 'tokenHash'> & { createdByEmail: string | null })[];
   }
   personalInvites(userId: string) {
@@ -681,6 +767,8 @@ export class SqliteRepository implements Repository {
     if (userId) {
       const user = this.db.prepare('SELECT disabled FROM users WHERE id=?').get(userId) as { disabled: number } | undefined;
       if (!user || user.disabled || !this.isMember(spaceId, userId)) throw new ApiError(403, 'FORBIDDEN');
+      // RHEA-190 m50: a read-only member can view and copy, never write.
+      if (this.memberRole(spaceId, userId) === 'viewer') throw new ApiError(403, 'READ_ONLY');
     }
   }
   private checkCapacity(spaceId: string, userId: string | null, bytes: number, quota: number, maxItems: number, now: number) {

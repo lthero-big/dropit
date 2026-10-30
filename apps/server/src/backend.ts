@@ -7,7 +7,7 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import { upgradeWebSocket } from '@hono/node-server';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { loadConfig, type Config } from './config.js';
-import { ApiError, CUSTOM_CODE_PATTERN, PIN_MAX, PIN_MIN, hash, parseDevice, token, type AccessToken, type BrowserSession, type Item, type ItemDevice, type ItemMeta, type Session, type TokenScope } from './domain.js';
+import { ApiError, CUSTOM_CODE_PATTERN, ROOM_CODE_CHANGE_PATTERN, PIN_MAX, PIN_MIN, hash, parseDevice, token, type AccessToken, type BrowserSession, type Item, type ItemDevice, type ItemMeta, type Session, type TokenScope } from './domain.js';
 import { parseByteRange, sniffMedia } from './media.js';
 import { SqliteRepository, type Repository } from './repository.js';
 import { DiskFileStorage, jsonFileStore, readJsonFile, type FileStorage } from './files.js';
@@ -715,15 +715,34 @@ export function createBackend(options: BackendOptions = {}) {
       return c.json({ personal: true, spaceName: null, inviterName: inviter?.name ?? null, expiresAt: invite.expiresAt, remainingUses: invite.maxUses - invite.uses });
     }
     const space = repo.space(invite.spaceId)!;
-    return c.json({ personal: false, spaceName: space.name, expiresAt: invite.expiresAt, remainingUses: invite.maxUses - invite.uses });
+    const inviter = repo.users().find(user => user.id === invite.createdBy);
+    const session = c.get('session');
+    // RHEA-190 m50: who invites, with which role, and whether the invite can open registration (only admins' can).
+    return c.json({ personal: false, spaceName: space.name, expiresAt: invite.expiresAt, remainingUses: invite.maxUses - invite.uses,
+      inviterName: inviter?.name ?? null, role: invite.role ?? 'editor', canRegister: Boolean(invite.creatorAdmin) || registrationPolicy() === 'open',
+      member: session ? repo.isMember(invite.spaceId, session.user.id) : false, spaceId: session && repo.isMember(invite.spaceId, session.user.id) ? invite.spaceId : null });
+  });
+  // RHEA-190 m50: a signed-in user accepts a space invite (joins with the invite's role).
+  app.post('/api/invites/:token/accept', c => {
+    const auth = service.requireSession(c.get('session'));
+    limit(c, 'invite', config.rateInvite);
+    const tokenHash = hash(c.req.param('token'));
+    const invite = repo.invite(tokenHash, now());
+    if (!invite || invite.joinSpace === 0) throw new ApiError(403, 'INVITE_INVALID');
+    repo.acceptInvite(tokenHash, auth.user.id, now());
+    return c.json({ spaceId: invite.spaceId, role: repo.memberRole(invite.spaceId, auth.user.id) });
   });
   const effectiveQuota = (userId: string) => repo.quotaOverride(userId) ?? config.userQuotaBytes;
   app.get('/api/admin/users', c => {
     service.admin(c.get('session'));
     const usage = repo.inviteUsageByUser(now());
+    const activeSpaceInvites = repo.activeSpaceInvitesByUser(now());
     const defaults = userInviteSettings();
     return c.json({ users: repo.users().map(user => ({
       inviteLimit: user.inviteLimit, inviteLimitEffective: user.inviteLimit ?? defaults.defaultLimit, invitesUsed: usage.get(user.id) ?? 0,
+      // RHEA-190 m50: 空间邀请 column: may this user invite people into their space, and how many invites are open now.
+      spaceInvitesEnabled: user.role === 'admin' || (defaults.enabled && (user.inviteLimit ?? defaults.defaultLimit) > 0),
+      activeSpaceInvites: activeSpaceInvites.get(user.id) ?? 0,
       id: user.id, email: user.email, name: user.name, role: user.role, disabled: user.disabled,
       pending: user.pending, createdAt: user.createdAt, usedBytes: user.usedBytes,
       quotaBytes: user.quotaBytes ?? config.userQuotaBytes, quotaOverride: user.quotaBytes,
@@ -872,7 +891,65 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.get('/api/spaces', c => {
     const auth = service.requireSession(c.get('session'));
-    return c.json({ spaces: repo.spaces(auth.user.id).map(({ roomKey: _room, deviceHash: _device, pinHash: _pin, ...space }) => space) });
+    return c.json({ spaces: repo.spaces(auth.user.id).map(({ roomKey: _room, deviceHash: _device, pinHash: _pin, roomCode: _code,
+      createdAt: _created, lastActiveAt: _active, closedAt: _closed, createdBy: _by, ...space }) => space) });
+  });
+  // RHEA-190 m50: 设置 → 空间成员. The owner of a private space invites people into it (read-only by default),
+  // lists and revokes those invites, and manages members. Nobody else can (FORBIDDEN / NOT_FOUND).
+  const memberRoleInput = (value: unknown) => {
+    if (value !== 'viewer' && value !== 'editor') throw new ApiError(400, 'INVALID_INPUT');
+    return value;
+  };
+  app.get('/api/spaces/:space/invites', c => c.json(service.spaceInvites(c.get('session'), c.req.param('space'), userInviteSettings())));
+  app.post('/api/spaces/:space/invites', async c => {
+    service.requireSession(c.get('session'));
+    limit(c, 'invite', config.rateInvite);
+    const body = c.req.header('content-type')?.startsWith('application/json') ? await json(c, 1024) : {};
+    return c.json(service.createSpaceInvite(c.get('session'), c.req.param('space'), userInviteSettings(), {
+      maxUses: integer(body.maxUses ?? 1, 1, 100), hours: integer(body.expiresInHours ?? 168, 1, 720),
+      role: body.role === undefined ? 'viewer' : memberRoleInput(body.role),
+    }, originFor(c)), 201);
+  });
+  app.delete('/api/spaces/:space/invites/:id', c => {
+    service.requireSession(c.get('session'));
+    limit(c, 'invite', config.rateInvite);
+    service.revokeSpaceInvite(c.get('session'), c.req.param('space'), c.req.param('id'));
+    return c.body(null, 204);
+  });
+  app.get('/api/spaces/:space/members', c => c.json({ members: service.members(c.get('session'), c.req.param('space')) }));
+  app.patch('/api/spaces/:space/members/:userId', async c => {
+    const body = await json(c, 1024);
+    service.setMemberRole(c.get('session'), c.req.param('space'), c.req.param('userId'), memberRoleInput(body.role));
+    return c.json({ members: service.members(c.get('session'), c.req.param('space')) });
+  });
+  app.delete('/api/spaces/:space/members/:userId', c => {
+    service.removeMember(c.get('session'), c.req.param('space'), c.req.param('userId'));
+    return c.body(null, 204);
+  });
+  app.delete('/api/spaces/:space/membership', c => {
+    service.leaveSpace(c.get('session'), c.req.param('space'));
+    return c.body(null, 204);
+  });
+  // RHEA-190 m50: 管理 → 临时房间. Metadata only: there is deliberately no admin route to a room's items.
+  app.get('/api/admin/rooms', c => {
+    adminBrowser(c);
+    return c.json({ rooms: service.adminRooms(c.get('session'), id => pinLockout.locked(id, now())) });
+  });
+  app.post('/api/admin/rooms/:id/close', c => { adminBrowser(c); service.setRoomClosed(c.get('session'), c.req.param('id'), true); return c.body(null, 204); });
+  app.post('/api/admin/rooms/:id/reopen', c => { adminBrowser(c); service.setRoomClosed(c.get('session'), c.req.param('id'), false); return c.body(null, 204); });
+  app.post('/api/admin/rooms/:id/unlock', c => {
+    adminBrowser(c);
+    const room = repo.adminRooms(now()).find(row => row.id === c.req.param('id'));
+    if (!room) throw new ApiError(404, 'NOT_FOUND');
+    pinLockout.clear(room.id);
+    if (room.roomCode) limiter.forget(`guess:code:${hash(room.roomCode).slice(0, 24)}`);
+    return c.body(null, 204);
+  });
+  app.delete('/api/admin/rooms/:id', async c => {
+    adminBrowser(c);
+    await service.deleteRoom(c.get('session'), c.req.param('id'));
+    pinLockout.clear(c.req.param('id'));
+    return c.body(null, 204);
   });
   // RHEA-190 auth step 3: short codes are guessable, so every wrong guess (unknown code, wrong PIN, a
   // custom code that is already taken, a share link that does not exist) is charged to the caller's IP.
@@ -888,6 +965,10 @@ export function createBackend(options: BackendOptions = {}) {
   };
   const roomCodeInput = (value: unknown) => {
     if (typeof value !== 'string' || !CUSTOM_CODE_PATTERN.test(value)) throw new ApiError(400, 'INVALID_CODE');
+    return value;
+  };
+  const changedCodeInput = (value: unknown) => {
+    if (typeof value !== 'string' || !ROOM_CODE_CHANGE_PATTERN.test(value)) throw new ApiError(400, 'INVALID_CODE');
     return value;
   };
   const pinInput = (value: unknown) => {
@@ -908,7 +989,8 @@ export function createBackend(options: BackendOptions = {}) {
   const roomCodeChange = async (body: Record<string, unknown>) => {
     if (!('code' in body) && !('pin' in body)) throw new ApiError(400, 'INVALID_INPUT');
     const options: { code?: string | null; pinHash?: string | null } = {};
-    if ('code' in body) options.code = has(body.code) ? roomCodeInput(body.code) : null;
+    // RHEA-190 m50: a code chosen when changing it is exactly 6 letters/digits (case-sensitive).
+    if ('code' in body) options.code = has(body.code) ? changedCodeInput(body.code) : null;
     if ('pin' in body) options.pinHash = has(body.pin) ? await hashPassword(pinInput(body.pin)) : null;
     return options;
   };
@@ -937,7 +1019,7 @@ export function createBackend(options: BackendOptions = {}) {
       return c.json(service.deviceRoom(deviceKey!, originFor(c)), 200);
     }
     limit(c, 'room-create', config.rateRoom);
-    try { return c.json(service.createRoom(deviceKey, originFor(c), options), 201); }
+    try { return c.json(service.createRoom(deviceKey, originFor(c), { ...options, createdBy: c.get('session')?.user.id ?? null }), 201); }
     catch (error) { if (error instanceof ApiError && error.code === 'CODE_TAKEN') guessFailed(c); throw error; }
   });
   // Enter a room by its code (and PIN when it has one) without signing in. Opening the link /r/<code> does
@@ -1067,7 +1149,10 @@ export function createBackend(options: BackendOptions = {}) {
       if (!chunk) limit(c, 'room-access', config.rateUpload);
       return service.room(c.req.param('room')!);
     }
-    return service.space(c.req.param('space')!, c.get('session'));
+    const space = service.space(c.req.param('space')!, c.get('session'));
+    // RHEA-190 m50: read-only members may view and copy (GET) but never write.
+    if (c.req.method !== 'GET' && c.req.method !== 'HEAD' && repo.memberRole(space.id, c.get('session')!.user.id) === 'viewer') throw new ApiError(403, 'READ_ONLY');
+    return space;
   };
   // Optional item metadata a client may attach: which device sent it and which
   // demo-style group it belongs to. Headers so binary uploads can carry them too.

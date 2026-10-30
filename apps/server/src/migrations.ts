@@ -223,3 +223,18 @@ CREATE UNIQUE INDEX personal_space ON spaces(ownerId) WHERE ownerId IS NOT NULL;
 CREATE UNIQUE INDEX room_device ON spaces(deviceHash) WHERE deviceHash IS NOT NULL;
 CREATE UNIQUE INDEX room_code ON spaces(roomCode) WHERE roomCode IS NOT NULL;
 `;
+
+// RHEA-190 m50: space invites are read-only by default, and admins see temporary rooms (metadata only).
+// Additive only, safe on a live database: existing members stay editors (the default), existing invites
+// keep role NULL (= editor, as before). Rooms get created/last-active/closed timestamps and who created them
+// (a signed-in user, else NULL); rooms from before this migration have NULL there and the admin list derives
+// their creation time from expiresAt - roomRetentionMs.
+export const migration17 = `
+ALTER TABLE members ADD COLUMN role TEXT NOT NULL DEFAULT 'editor';
+ALTER TABLE invites ADD COLUMN role TEXT;
+ALTER TABLE spaces ADD COLUMN createdAt INTEGER;
+ALTER TABLE spaces ADD COLUMN lastActiveAt INTEGER;
+ALTER TABLE spaces ADD COLUMN closedAt INTEGER;
+ALTER TABLE spaces ADD COLUMN createdBy TEXT;
+PRAGMA user_version=17;
+`;
