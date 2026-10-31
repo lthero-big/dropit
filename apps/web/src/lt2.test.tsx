@@ -114,6 +114,20 @@ describe('RHEA-190 lt2: long text reader', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: '全文' })).toBeNull())
   })
 
+  it('RHEA-190 lt3: tapping the preview text does not open the reader; only 展开 does', async () => {
+    await renderBoard()
+    const preview = document.querySelector('[data-text-preview]') as HTMLElement
+    expect(preview.className).not.toContain('cursor-zoom-in')
+    const text = preview.firstElementChild as HTMLElement
+    fireEvent.pointerDown(text, { pointerId: 1, button: 0, isPrimary: true })
+    fireEvent.pointerUp(text, { pointerId: 1, button: 0, isPrimary: true })
+    fireEvent.click(text)
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.queryByRole('dialog', { name: '全文' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '展开' }))
+    expect(await screen.findByRole('dialog', { name: '全文' })).toBeTruthy()
+  })
+
   it('leaves short text cards without an expander', async () => {
     await renderBoard()
     expect(screen.getAllByRole('button', { name: '展开' })).toHaveLength(1)
