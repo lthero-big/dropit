@@ -125,7 +125,9 @@ describe('RHEA-190 lt2: long text reader', () => {
     await new Promise((r) => setTimeout(r, 50))
     expect(screen.queryByRole('dialog', { name: '全文' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '展开' }))
-    expect(await screen.findByRole('dialog', { name: '全文' })).toBeTruthy()
+    const dialog = await screen.findByRole('dialog', { name: '全文' })
+    // the board stays no-select (step 7), but the full text in the reader can be selected/copied
+    expect(dialog.querySelector('[data-text-reader-scroll]')?.className).toContain('dd-selectable')
   })
 
   it('leaves short text cards without an expander', async () => {
