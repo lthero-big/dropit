@@ -328,9 +328,9 @@ export function BoardCard(props: BoardCardProps) {
     const long = textOverflows(text)
     if (variant === 'row' && !long && displayable(text)) return <p className="dd-display truncate text-[15px] font-medium">{text}</p>
     if (variant === 'grid' && displayable(text)) return <p className="dd-display text-[20px] font-medium leading-[1.35] tracking-[-0.01em] break-words text-[var(--fg)]">{text}</p>
-    // RHEA-190 lt2: long text always stays a collapsed preview on the board; 展开 (or a click on the card) opens the reader.
+    // RHEA-190 lt3: long text stays a collapsed preview on the board; only the 展开 button opens the reader.
     return (
-      <div className={`flex min-w-0 flex-col text-[var(--fg)] ${long ? 'cursor-zoom-in' : ''}`} data-text-preview={long ? '' : undefined}>
+      <div className="flex min-w-0 flex-col text-[var(--fg)]" data-text-preview={long ? '' : undefined}>
         <MarkdownText text={text} collapsed={long} />
         {long ? (
           <button
@@ -461,10 +461,6 @@ export function BoardCard(props: BoardCardProps) {
           onTap={(event) => {
             if (dragged.current || isInteractive(event.target)) return
             if (window.getSelection?.()?.toString()) return
-            if (longText && !editing && event.target instanceof Element && event.target.closest('.dd-card-body')) {
-              setReading(true)
-              return
-            }
             onOpen(!open)
           }}
         >

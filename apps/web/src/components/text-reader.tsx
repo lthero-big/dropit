@@ -103,7 +103,7 @@ function Reader({ text, meta, reduced, onClose }: { text: string; meta?: string;
             <XIcon className="size-4" />
           </button>
         </header>
-        <div data-text-reader-scroll="" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 text-[var(--fg)] sm:px-8 sm:py-6">
+        <div data-text-reader-scroll="" className="dd-selectable min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 text-[var(--fg)] sm:px-8 sm:py-6">
           <MarkdownText text={text} defaultRendered />
         </div>
       </motion.article>
