@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>dropit</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #fafafa; color: #111; }
+  h1 { font-size: 22px; } input { width: 100%; box-sizing: border-box; padding: 12px; font-size: 16px; }
+  button { margin-top: 12px; padding: 12px 16px; font-size: 16px; width: 100%; }
+  .err { color: #b00020; } .code { font: 600 28px ui-monospace, monospace; letter-spacing: 2px; text-align: center; }
+  section[hidden] { display: none; }
+</style>
+</head>
+<body>
+<h1>dropit</h1>
+<section id="setup">
+  <p>首次使用：请输入你自己的 dropit 服务器地址（必须是 https）。</p>
+  <input id="url" type="url" inputmode="url" autocomplete="url" placeholder="https://drop.example.com">
+  <button id="check">连接</button>
+  <p id="setup-msg" class="err"></p>
+</section>
+<section id="login" hidden>
+  <p>在浏览器里确认这个验证码，然后回到这里：</p>
+  <p id="user-code" class="code"></p>
+  <button id="open">打开浏览器确认</button>
+  <p id="login-msg"></p>
+  <button id="reset1">更换服务器</button>
+</section>
+<section id="ready" hidden>
+  <p id="ready-msg"></p>
+  <button id="enter">进入 dropit</button>
+  <button id="logout">退出登录并更换服务器</button>
+</section>
+<script type="module" src="app.js"></script>
+</body>
+</html>

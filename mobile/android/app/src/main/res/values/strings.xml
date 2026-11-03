@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">dropit</string>
+    <string name="title_activity_main">dropit</string>
+    <string name="package_name">dev.dropit.app</string>
+    <string name="custom_url_scheme">dev.dropit.app</string>
+</resources>
