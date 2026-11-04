@@ -30,9 +30,10 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           VERSION=$(sed -n 's/.*versionName "\(.*\)".*/\1/p' android/app/build.gradle)
+          CODE=$(sed -n 's/.*versionCode \([0-9]*\).*/\1/p' android/app/build.gradle)
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "SHORT=${SHA:0:7}" >> "$GITHUB_ENV"
-          printf "export const BUILD = { version: '%s', commit: '%s', date: '%s' };\n" "$VERSION" "$SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > www/build-info.js
+          printf "export const BUILD = { version: '%s', code: %s, commit: '%s', date: '%s' };\n" "$VERSION" "$CODE" "$SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > www/build-info.js
           cat www/build-info.js
       - run: npx cap sync android
       # Same signing key for every build (repo secret), so a new APK installs over the previous one.

@@ -7,15 +7,19 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Environment;
+import android.provider.Settings;
 import android.provider.OpenableColumns;
 import android.webkit.CookieManager;
 import android.webkit.MimeTypeMap;
 import android.webkit.URLUtil;
 import android.webkit.WebView;
 import android.widget.Toast;
+import androidx.core.content.FileProvider;
 import androidx.webkit.JavaScriptReplyProxy;
 import androidx.webkit.WebMessageCompat;
 import androidx.webkit.WebViewCompat;
@@ -28,12 +32,15 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.WebViewListener;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Locale;
@@ -201,6 +208,9 @@ public class DropitSharePlugin extends Plugin {
             reply.postMessage(out.toString());
         } else if ("settings".equals(type)) {
             view.loadUrl(getBridge().getLocalUrl() + "/#settings");
+        } else if ("update".equals(type)) {
+            // RHEA-190 au: 「检查更新」 in the web UI's app menu.
+            view.loadUrl(getBridge().getLocalUrl() + "/#update");
         }
     }
 
@@ -393,6 +403,107 @@ public class DropitSharePlugin extends Plugin {
                 if (conn != null) conn.disconnect();
             }
         });
+    }
+
+    // ---- RHEA-190 au: in-app updates ----
+
+    /** Installed versionCode / versionName, for comparing with GET /api/app/android/latest. */
+    @PluginMethod
+    public void appInfo(PluginCall call) {
+        try {
+            PackageInfo info = getContext().getPackageManager().getPackageInfo(getContext().getPackageName(), 0);
+            long code = Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
+            JSObject result = new JSObject();
+            result.put("versionCode", code);
+            result.put("versionName", info.versionName);
+            call.resolve(result);
+        } catch (Exception e) {
+            call.reject(String.valueOf(e.getMessage()));
+        }
+    }
+
+    /**
+     * Downloads the update APK from the configured server (https, /api/app/android/download/ only) into the
+     * app cache, checks size and SHA-256 against the manifest and hands it to the system installer through
+     * the FileProvider. Android itself refuses an update signed with another key. Without the 「安装未知应用」
+     * permission it opens that settings page first and resolves { needsPermission: true }.
+     */
+    @PluginMethod
+    public void installUpdate(PluginCall call) {
+        final String url = call.getString("url", "");
+        final String sha256 = call.getString("sha256", "");
+        final long size = call.getData().optLong("size", -1);
+        if (!UpdateFiles.isUpdateUrl(serverOrigin, url)) {
+            call.reject("更新只能从当前 https 服务器下载");
+            return;
+        }
+        if (!UpdateFiles.isSha256(sha256) || size <= 0 || size > UpdateFiles.MAX_BYTES) {
+            call.reject("更新信息无效");
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 26 && !getContext().getPackageManager().canRequestPackageInstalls()) {
+            try {
+                Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getContext().getPackageName()));
+                getActivity().startActivity(settings);
+            } catch (Exception ignored) {
+                // Some ROMs hide the per-app page; the message in the app explains what to allow.
+            }
+            JSObject result = new JSObject();
+            result.put("needsPermission", true);
+            call.resolve(result);
+            return;
+        }
+        new Thread(() -> {
+            HttpURLConnection conn = null;
+            File dir = new File(getContext().getCacheDir(), "updates");
+            File apk = new File(dir, "dropit-update.apk");
+            try {
+                if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("cannot create cache directory");
+                File[] old = dir.listFiles();
+                if (old != null) for (File f : old) f.delete();
+                conn = (HttpURLConnection) new URL(url).openConnection();
+                conn.setInstanceFollowRedirects(false);
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(60000);
+                int status = conn.getResponseCode();
+                if (status != 200) throw new IOException("HTTP " + status);
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                long received = 0;
+                long reported = 0;
+                try (InputStream in = conn.getInputStream(); OutputStream out = new FileOutputStream(apk)) {
+                    byte[] buffer = new byte[64 * 1024];
+                    int read;
+                    while ((read = in.read(buffer)) != -1) {
+                        received += read;
+                        if (received > size) throw new IOException("安装包比服务器说明的大");
+                        digest.update(buffer, 0, read);
+                        out.write(buffer, 0, read);
+                        if (received - reported >= 256 * 1024 || received == size) {
+                            reported = received;
+                            JSObject progress = new JSObject();
+                            progress.put("received", received);
+                            progress.put("total", size);
+                            notifyListeners("updateProgress", progress);
+                        }
+                    }
+                }
+                if (received != size) throw new IOException("下载不完整");
+                if (!UpdateFiles.hex(digest.digest()).equals(sha256)) throw new IOException("安装包校验失败（SHA-256 不一致）");
+                Uri content = FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".fileprovider", apk);
+                Intent install = new Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(content, "application/vnd.android.package-archive")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                getActivity().startActivity(install);
+                JSObject result = new JSObject();
+                result.put("started", true);
+                call.resolve(result);
+            } catch (Exception e) {
+                apk.delete();
+                call.reject(String.valueOf(e.getMessage()));
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        }, "dropit-update").start();
     }
 
     private static String readAll(InputStream in) throws IOException {

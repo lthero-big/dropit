@@ -96,6 +96,11 @@
     } finally { sending = false; }
   };
   item('从剪贴板发送', sendClipboard);
+  // RHEA-190 au
+  item('检查更新', () => {
+    if (bridge) bridge.postMessage(JSON.stringify({ type: 'update' }));
+    else location.href = 'https://localhost/#update';
+  });
   item('应用设置（服务器 / 退出）', () => {
     if (bridge) bridge.postMessage(JSON.stringify({ type: 'settings' }));
     else location.href = 'https://localhost/#settings';
@@ -104,8 +109,13 @@
   const mount = () => {
     if (!document.body) return;
     if (!root.isConnected) document.body.append(root, toastEl);
-    root.style.display = hiddenOn.test(location.pathname) ? 'none' : 'flex';
+    // RHEA-190 au: step aside while the web UI shows a dialog (account sheet, room code …), so the
+    // button never sits on top of 「退出」 or other sheet buttons.
+    const dialog = document.querySelector('[role="dialog"]');
+    root.style.display = hiddenOn.test(location.pathname) || dialog ? 'none' : 'flex';
+    if (dialog) open(false);
   };
   mount();
   setInterval(mount, 800);
+  if (document.body) new MutationObserver(mount).observe(document.body, { childList: true });
 })();

@@ -45,3 +45,18 @@ version change; only 「退出登录并更换服务器」, an uninstall or 「�
 The setup, login and settings pages show `版本 <versionName> · <commit> · <date>`; the workflow writes
 `www/build-info.js` and names the file `dropit-android-<version>-<commit>.apk`. Bump `versionCode` and
 `versionName` in `android/app/build.gradle` (and `www/build-info.js`) for each release to the phone.
+
+## App updates (RHEA-190 au)
+
+- The app asks its own server `GET /api/app/android/latest` once per start (5 s at most, before the web UI
+  opens) and from 「应用设置 → 检查更新」 or the web UI's app button → 「检查更新」. If the published
+  `versionCode` is higher than the installed one it shows version, size and notes with
+  「下载并安装 / 稍后 / 跳过这个版本」 (跳过 only on the automatic prompt, remembered per versionCode).
+- 「下载并安装」 downloads `/api/app/android/download/<file>.apk` natively (same https origin as the
+  configured server only, no redirects), checks size and SHA-256 against the manifest and opens the system
+  installer through the FileProvider (`REQUEST_INSTALL_PACKAGES`). The first time Android sends the user to
+  「安装未知应用」 for dropit; after allowing it, tap 「下载并安装」 again. The installer only accepts an APK
+  signed with the same key, and an update keeps the login (see below).
+- The operator publishes an APK on the server (copy + `latest.json` with versionCode, versionName, notes,
+  size, sha256): `node scripts/publish-android-apk.mjs app.apk --code 5 --name 0.3.2 --notes "…"`
+  (see the script header for Docker). Without a published APK the endpoint answers `404 NO_RELEASE`.

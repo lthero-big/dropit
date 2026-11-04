@@ -4,6 +4,7 @@
 import {
   normalizeServerUrl, isDropitVersion, deviceName, pollOutcome, pickSpace, sharedText,
   newDeviceId, deviceHeaders, apiError, webEntry, LOGIN_SCOPES, LEGACY_SCOPES, versionLabel,
+  updateOffer, shouldPrompt, formatSize,
 } from './core.js';
 import { BUILD } from './build-info.js';
 const cap = window.Capacitor;
@@ -14,7 +15,7 @@ const Share = cap?.Plugins?.DropitShare;
 const Device = { model: navigator.userAgent.match(/;\s*([^;)]+)\sBuild/)?.[1] };
 const $ = id => document.getElementById(id);
 $('version').textContent = versionLabel(BUILD);
-const show = id => { for (const s of ['setup', 'login', 'boot']) $(s).hidden = s !== id; };
+const show = id => { for (const s of ['setup', 'login', 'boot', 'update']) $(s).hidden = s !== id; };
 
 async function get(key) { return Prefs ? (await Prefs.get({ key })).value : localStorage.getItem(key); }
 async function set(key, value) { return Prefs ? Prefs.set({ key, value }) : localStorage.setItem(key, value); }
@@ -114,6 +115,81 @@ async function sendShares(server, token) {
 
 const wait = ms => new Promise(r => setTimeout(r, ms));
 
+// ---- RHEA-190 au: app updates published on the dropit server (GET /api/app/android/latest) ----
+let installedName = BUILD.version;
+async function installedCode() {
+  try {
+    const info = await Share?.appInfo?.();
+    if (typeof info?.versionName === 'string' && info.versionName) installedName = info.versionName;
+    if (Number.isSafeInteger(info?.versionCode)) return info.versionCode;
+  } catch { /* old shell without appInfo: use the build file */ }
+  return BUILD.code || 0;
+}
+async function checkUpdate(server) {
+  const r = await request('GET', `${server}/api/app/android/latest`);
+  return updateOffer(server, await installedCode(), r.status, r.body);
+}
+let progressHooked = false;
+async function installUpdate(offer) {
+  const msg = $('upd-msg');
+  if (!Share?.installUpdate) {
+    // Not inside the Android shell (or an old one): let the browser download it.
+    if (Browser) await Browser.open({ url: offer.url }); else window.open(offer.url, '_blank');
+    return;
+  }
+  if (!progressHooked) {
+    progressHooked = true;
+    Share.addListener?.('updateProgress', ({ received, total }) => {
+      if (total > 0) $('upd-msg').textContent = `正在下载… ${Math.min(100, Math.floor((received / total) * 100))}%`;
+    });
+  }
+  $('upd-install').disabled = true;
+  msg.className = '';
+  msg.textContent = '正在下载…';
+  try {
+    const r = await Share.installUpdate({ url: offer.url, sha256: offer.sha256, size: offer.size });
+    msg.textContent = r?.needsPermission
+      ? '请在打开的系统设置里允许 dropit「安装未知应用」，然后回到这里再点一次「下载并安装」。'
+      : '已打开系统安装程序，确认「更新」即可；装好后重新打开 dropit，登录会保留。';
+  } catch (e) {
+    msg.className = 'err';
+    msg.textContent = `更新失败：${e?.message || e}`;
+  } finally { $('upd-install').disabled = false; }
+}
+/** Shows the update page; resolves when the user picks 稍后 / 跳过这个版本. */
+function offerUpdate(offer, { auto }) {
+  show('update');
+  $('upd-title').textContent = `发现新版本 ${offer.versionName}`;
+  $('upd-meta').textContent = `当前 ${installedName} · 安装包 ${formatSize(offer.size)}`;
+  $('upd-notes').textContent = offer.notes || '';
+  $('upd-msg').textContent = '';
+  $('upd-skip').hidden = !auto;
+  $('upd-install').onclick = () => installUpdate(offer);
+  return new Promise(resolve => {
+    $('upd-later').onclick = () => resolve();
+    $('upd-skip').onclick = async () => { await set('skipUpdate', String(offer.versionCode)); resolve(); };
+  });
+}
+/** Once per app start (sessionStorage survives the trips to the web UI and back). Never blocks for long. */
+async function autoCheckUpdate(server) {
+  if (sessionStorage.getItem('dropit-update-checked')) return;
+  sessionStorage.setItem('dropit-update-checked', '1');
+  const offer = await Promise.race([checkUpdate(server).catch(() => null), wait(5000).then(() => null)]);
+  if (shouldPrompt(offer, await get('skipUpdate'))) await offerUpdate(offer, { auto: true });
+}
+async function manualCheckUpdate() {
+  const server = await get('server');
+  if (!server) return;
+  const line = $('update-line');
+  line.textContent = '正在检查更新…';
+  try {
+    const offer = await checkUpdate(server);
+    if (offer.kind === 'update') { await offerUpdate(offer, { auto: false }); return enter(server, { stay: true }); }
+    line.textContent = offer.kind === 'latest' ? `已是最新版本（${installedName}）`
+      : offer.kind === 'none' ? '这个服务器还没有发布 Android 安装包（管理员可用 scripts/publish-android-apk.mjs 发布）' : offer.note;
+  } catch (e) { line.textContent = `检查更新失败：${e?.message || e}`; }
+}
+
 async function enter(server, { stay = false } = {}) {
   clearTimeout(polling);
   const token = await get('token');
@@ -129,6 +205,9 @@ async function enter(server, { stay = false } = {}) {
       const { ok, failed, msg } = shared;
       status(failed ? (ok ? `已发送 ${ok} 项，${failed} 项失败：${msg}` : `发送失败：${msg}`) : (ok > 1 ? `已发送 ${ok} 项到 dropit` : '已发送到 dropit'));
       await wait(failed ? 2500 : 1000);
+    } else {
+      await autoCheckUpdate(server);
+      status('正在打开 dropit…');
     }
     const r = await request('POST', `${server}/api/app-session/ticket`, null, token);
     const next = webEntry(server, r.status, r.body);
@@ -160,11 +239,13 @@ $('reset1').onclick = reset;
 $('logout').onclick = reset;
 $('retry').onclick = async () => enter(await get('server'));
 $('web').onclick = async () => enter(await get('server'));
+$('check-update').onclick = manualCheckUpdate;
 Share?.addListener?.('share', async () => { const server = await get('server'); if (server && await get('token')) enter(server); });
 
 (async () => {
   const server = await get('server');
   if (!server) return show('setup');
   if (!(await get('token'))) return startLogin(server);
+  if (location.hash === '#update') { await enter(server, { stay: true }); return manualCheckUpdate(); }
   return enter(server, { stay: location.hash === '#settings' });
 })();

@@ -74,3 +74,38 @@ test('versionLabel shows version, short commit and date', async () => {
   assert.equal(versionLabel({ version: '0.3.0', commit: 'dev', date: '' }), '版本 0.3.0 · dev');
   assert.equal(versionLabel(null), '版本 ?');
 });
+
+test('RHEA-190 au: update offer from /api/app/android/latest', async () => {
+  const { updateOffer, shouldPrompt, formatSize } = await import('../www/core.js');
+  const sha = 'b'.repeat(64);
+  const body = { versionCode: 5, versionName: '0.3.2', notes: '自动检查更新', size: 5_400_000, sha256: sha, url: '/api/app/android/download/dropit-android-0.3.2.apk' };
+  assert.deepEqual(updateOffer('https://d.x', 4, 200, body), { kind: 'update', versionCode: 5, versionName: '0.3.2', notes: '自动检查更新', size: 5_400_000, sha256: sha, url: 'https://d.x/api/app/android/download/dropit-android-0.3.2.apk' });
+  assert.deepEqual(updateOffer('https://d.x', 5, 200, body), { kind: 'latest', versionName: '0.3.2' });
+  assert.equal(updateOffer('https://d.x', 6, 200, body).kind, 'latest');
+  assert.deepEqual(updateOffer('https://d.x', 4, 404, { error: { code: 'NO_RELEASE' } }), { kind: 'none' });
+  assert.match(updateOffer('https://d.x', 4, 429, { error: { code: 'RATE_LIMITED' } }).note, /太频繁/);
+  // never follow a download somewhere else, never accept a broken manifest
+  for (const bad of [{ url: 'https://evil.example/x.apk' }, { url: '//evil.example/api/app/android/download/x.apk' }, { url: '/api/app/android/download/../x.apk' },
+    { url: '/api/app/android/download/x.apk?y' }, { sha256: 'abc' }, { versionCode: '5' }, { size: 0 }]) {
+    assert.equal(updateOffer('https://d.x', 4, 200, { ...body, ...bad }).kind, 'error', JSON.stringify(bad));
+  }
+  assert.equal(updateOffer('https://d.x', 4, 200, null).kind, 'error');
+  assert.equal(updateOffer('https://d.x', 4, 200, { ...body, notes: 7 }).notes, '');
+  const offer = updateOffer('https://d.x', 4, 200, body);
+  assert.ok(shouldPrompt(offer, null));
+  assert.ok(!shouldPrompt(offer, '5'));
+  assert.ok(shouldPrompt(offer, '4'));
+  assert.ok(!shouldPrompt({ kind: 'latest' }, null));
+  assert.equal(formatSize(5_400_000), '5.1 MB');
+  assert.equal(formatSize(2048), '2 KB');
+});
+
+test('RHEA-190 au: build info carries the versionCode that matches build.gradle', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { BUILD } = await import('../www/build-info.js');
+  const gradle = await readFile(new URL('../android/app/build.gradle', import.meta.url), 'utf8');
+  assert.equal(BUILD.code, Number(/versionCode (\d+)/.exec(gradle)[1]));
+  assert.equal(BUILD.version, /versionName "([^"]+)"/.exec(gradle)[1]);
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(pkg.version, BUILD.version);
+});
