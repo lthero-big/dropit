@@ -5,11 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>dropit</title>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #fafafa; color: #111; }
-  h1 { font-size: 22px; } input { width: 100%; box-sizing: border-box; padding: 12px; font-size: 16px; }
-  button { margin-top: 12px; padding: 12px 16px; font-size: 16px; width: 100%; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 20px 16px 40px; background: #fafafa; color: #111; }
+  h1 { font-size: 22px; margin: 4px 0 12px; } input { width: 100%; box-sizing: border-box; padding: 12px; font-size: 16px; }
+  button { margin-top: 12px; padding: 12px 16px; font-size: 16px; width: 100%; border-radius: 10px; border: 1px solid #ccc; background: #fff; }
+  button.primary { background: #111; color: #fff; border-color: #111; }
   .err { color: #b00020; } .code { font: 600 28px ui-monospace, monospace; letter-spacing: 2px; text-align: center; }
   section[hidden] { display: none; }
+  .bar { display: flex; gap: 8px; align-items: center; justify-content: space-between; color: #555; font-size: 14px; }
+  .bar button { width: auto; margin: 0; padding: 6px 12px; font-size: 14px; }
+  #items { list-style: none; padding: 0; margin: 12px 0 0; }
+  #items li { background: #fff; border: 1px solid #e3e3e3; border-radius: 10px; padding: 12px; margin-bottom: 8px; display: flex; gap: 10px; align-items: center; }
+  #items li:active { background: #f0f0f0; }
+  #items .t { flex: 1; min-width: 0; word-break: break-word; }
+  #items .m { color: #777; font-size: 12px; margin-top: 4px; }
+  #items img { width: 48px; height: 48px; object-fit: cover; border-radius: 6px; flex: none; background: #eee; }
+  #toast { position: fixed; left: 16px; right: 16px; bottom: 24px; background: #222; color: #fff; padding: 12px 14px; border-radius: 10px; font-size: 15px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.on { opacity: .95; }
+  .hint { color: #777; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -17,7 +29,7 @@
 <section id="setup">
   <p>首次使用：请输入你自己的 dropit 服务器地址（必须是 https）。</p>
   <input id="url" type="url" inputmode="url" autocomplete="url" placeholder="https://drop.example.com">
-  <button id="check">连接</button>
+  <button id="check" class="primary">连接</button>
   <p id="setup-msg" class="err"></p>
 </section>
 <section id="login" hidden>
@@ -27,11 +39,16 @@
   <p id="login-msg"></p>
   <button id="reset1">更换服务器</button>
 </section>
-<section id="ready" hidden>
-  <p id="ready-msg"></p>
-  <button id="enter">进入 dropit</button>
+<section id="home" hidden>
+  <div class="bar"><span id="home-msg"></span><button id="refresh">刷新</button></div>
+  <button id="paste" class="primary">从剪贴板发送到 dropit</button>
+  <p class="hint">点一下条目即可复制文字；在其他应用里点「分享 → dropit」可以直接发送文字、链接和图片。</p>
+  <ul id="items"></ul>
+  <p id="empty" class="hint" hidden>还没有内容。</p>
+  <button id="web">在应用内打开网页版</button>
   <button id="logout">退出登录并更换服务器</button>
 </section>
+<div id="toast" role="status" aria-live="polite"></div>
 <script type="module" src="app.js"></script>
 </body>
 </html>
