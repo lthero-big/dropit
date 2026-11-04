@@ -121,7 +121,7 @@ export function asciiFilename(filename: string, fallback: string) {
   const ext = dot > 0 ? base.slice(dot) : '';
   const safeExt = /^\.[A-Za-z0-9]{1,16}$/.test(ext) ? ext : '';
   const stem = (safeExt ? base.slice(0, dot) : base).replace(/(?:[^\x20-\x7e]|["\\%;])+/g, '_')
-    .replace(/^[\s_]+|[\s_.]+$/g, '').slice(0, 120);
+    .replace(/^[\s_.]+|[\s_.]+$/g, '').slice(0, 120);
   return `${/[A-Za-z0-9]/.test(stem) ? stem : fallback}${safeExt}`;
 }
 function contentDisposition(kind: 'attachment' | 'inline', filename: string) {

@@ -16,7 +16,7 @@ test('ascii fallback filename keeps name and extension', () => {
   assert.equal(asciiFilename('archive.tar.gz', 'download'), 'archive.tar.gz');
   assert.equal(asciiFilename('README', 'download'), 'README');
   assert.equal(asciiFilename('视频', 'media'), 'media');
-  assert.equal(asciiFilename('.env', 'download'), '.env');
+  assert.equal(asciiFilename('.env', 'download'), 'env');
   assert.equal(asciiFilename('x.中文', 'download'), 'x');
   assert.ok(!/[\r\n"]/.test(asciiFilename('a\r\nb".png', 'download')));
 });
