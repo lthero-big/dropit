@@ -9,11 +9,11 @@ and stores a per-device token in Capacitor Preferences.
 
 ## Signed-in home (RHEA-190 br)
 
-- Native list of the 50 newest items of your own space (Bearer device token, );
-  tap a text item to copy it (). Image items show their thumbnail.
+- Native list of the 50 newest items of your own space (Bearer device token, `GET /api/spaces/:id/items`);
+  tap a text item to copy it (`@capacitor/clipboard`). Image items show their thumbnail.
 - 「从剪贴板发送到 dropit」 reads the clipboard only when tapped, in the foreground, and posts it as text.
-- Share target:  /  intent filters (text, images, any file).
-   captures the intent; text is posted from JS, files are streamed natively from their
-   URI to  (chunked, Bearer, only to the configured https server).
-- 「在应用内打开网页版」 loads the configured server inside the app WebView ( allows only that
+- Share target: `ACTION_SEND` / `ACTION_SEND_MULTIPLE` intent filters (text, images, any file).
+  `DropitSharePlugin` captures the intent; text is posted from JS, files are streamed natively from their
+  `content://` URI to `POST /api/spaces/:id/items/file` (chunked, Bearer, only to the configured https server).
+- 「在应用内打开网页版」 loads the configured server inside the app WebView (`shouldOverrideLoad` allows only that
   host; other hosts still go to the system browser). Android back returns to the native screens.
