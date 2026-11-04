@@ -219,6 +219,17 @@ export function SettingsPage() {
     }
   }
 
+  // RHEA-190 dl: a revoked or expired token can be removed from the list for good.
+  async function purge(id: string) {
+    try {
+      await api(`/api/tokens/${id}?purge=1`, { method: 'DELETE' })
+      setPendingRevoke(null)
+      await load()
+    } catch (error) {
+      toast.error(errorText(error))
+    }
+  }
+
   async function revoke(id: string) {
     try {
       await api(`/api/tokens/${id}`, { method: 'DELETE' })
@@ -347,7 +358,17 @@ export function SettingsPage() {
                             改名
                           </Button>
                         ) : null}
-                        {token.revoked ? null : pendingRevoke === token.id ? (
+                        {!active ? (
+                          pendingRevoke === token.id ? (
+                            <Button type="button" variant="destructive" size="sm" onClick={() => void purge(token.id)}>
+                              确认删除
+                            </Button>
+                          ) : (
+                            <Button type="button" variant="outline" size="sm" onClick={() => setPendingRevoke(token.id)}>
+                              删除
+                            </Button>
+                          )
+                        ) : pendingRevoke === token.id ? (
                           <Button type="button" variant="destructive" size="sm" onClick={() => void revoke(token.id)}>
                             确认撤销
                           </Button>

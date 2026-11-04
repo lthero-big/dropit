@@ -83,9 +83,18 @@ test('AC-J1/J2/J7: one-time 256-bit PAT, hashes only, scopes, expiry, last use, 
   assert.equal((await (await f.browser(`/api/admin/tokens?userId=${f.admin.user.id}`, 'GET', undefined, f.admin.cookie)).json()).tokens.length, 0);
   assert.equal((await f.browser(`/api/admin/tokens/${readonly.id}`, 'DELETE', undefined, f.admin.cookie)).status, 204);
   assert.equal((await f.request('/api/me', 'GET', undefined, bearer(readonly.token))).status, 401);
+  // RHEA-190 dl: revoked and expired tokens can be deleted for good; live ones must be revoked first.
+  assert.equal((await f.browser(`/api/tokens/${forever.id}?purge=1`, 'DELETE')).status, 409);
+  assert.equal((await f.request(`/api/tokens/${readonly.id}?purge=1`, 'DELETE', undefined, bearer(forever.token))).status, 403);
+  assert.equal((await f.browser(`/api/tokens/${readonly.id}?purge=1`, 'DELETE', undefined, f.admin.cookie)).status, 404);
+  assert.equal((await f.browser(`/api/tokens/${readonly.id}?purge=1`, 'DELETE')).status, 204);
+  assert.equal((await f.browser(`/api/tokens/${readonly.id}?purge=1`, 'DELETE')).status, 404);
+  assert.deepEqual((await (await f.browser('/api/tokens')).json()).tokens.map((entry: AccessToken) => entry.id), [forever.id]);
   const expiring = await f.pat({ expiresInDays: 1 });
   f.advance(86400000);
   assert.equal((await f.request('/api/me', 'GET', undefined, bearer(expiring.token))).status, 401);
+  f.repo.deleteAccessToken(expiring.id, f.member.user.id, f.time());
+  assert.equal(f.repo.accessTokens(f.member.user.id).some(entry => entry.id === expiring.id), false);
   assert.equal((await f.request('/api/me', 'GET', undefined, bearer(forever.token))).status, 200);
 });
 

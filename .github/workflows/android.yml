@@ -50,7 +50,7 @@ jobs:
           else
             echo "No ANDROID_KEYSTORE_B64 secret: using a throwaway debug key"
           fi
-      - run: chmod +x android/gradlew && cd android && ./gradlew assembleDebug --no-daemon
+      - run: chmod +x android/gradlew && cd android && ./gradlew testDebugUnitTest assembleDebug --no-daemon
       - name: Name the APK
         run: |
           mkdir -p out

@@ -112,10 +112,20 @@ function ipSummary(ip: string) {
   return 'unknown';
 }
 const maxQuotaBytes = limitRanges.userQuotaBytes.max;
+// RHEA-190 dl: the plain filename= is what clients without RFC 5987 support use (Android's
+// URLUtil.guessFileName among them). A fixed "download" there made the app save every file as
+// download.bin, so keep the printable ASCII part of the real name and always its extension.
+export function asciiFilename(filename: string, fallback: string) {
+  const base = filename.replace(/^.*[\\/]/, '');
+  const dot = base.lastIndexOf('.');
+  const ext = dot > 0 ? base.slice(dot) : '';
+  const safeExt = /^\.[A-Za-z0-9]{1,16}$/.test(ext) ? ext : '';
+  const stem = (safeExt ? base.slice(0, dot) : base).replace(/[^\x20-\x7e]|["\\%;]/g, '_').trim().slice(0, 120);
+  return `${/[A-Za-z0-9]/.test(stem) ? stem : fallback}${safeExt}`;
+}
 function contentDisposition(kind: 'attachment' | 'inline', filename: string) {
   const encoded = encodeURIComponent(filename).replace(/['()*]/g, ch => '%' + ch.charCodeAt(0).toString(16));
-  const fallback = kind === 'inline' ? 'media' : 'download';
-  return `${kind}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+  return `${kind}; filename="${asciiFilename(filename, kind === 'inline' ? 'media' : 'download')}"; filename*=UTF-8''${encoded}`;
 }
 function attachmentDisposition(filename: string) {
   return contentDisposition('attachment', filename);
@@ -330,6 +340,11 @@ export function createBackend(options: BackendOptions = {}) {
     return c.body(null, 204);
   });
   app.delete('/api/tokens/:id', c => {
+    // RHEA-190 dl: ?purge=1 removes an already revoked or expired token from the list for good.
+    if (c.req.query('purge') === '1') {
+      repo.deleteAccessToken(c.req.param('id'), browserSession(c).user.id, now());
+      return c.body(null, 204);
+    }
     repo.revokeAccessToken(c.req.param('id'), service.requireSession(c.get('session')).user.id);
     events.revalidate();
     return c.body(null, 204);

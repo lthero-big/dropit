@@ -24,6 +24,8 @@ and stores a per-device token in Capacitor Preferences.
 - Share target: `ACTION_SEND` / `ACTION_SEND_MULTIPLE` (text, images, any file). A share opens the app page,
   which sends it (files are streamed natively, Bearer, https only) and then returns to the web UI.
 - Web downloads (`Content-Disposition: attachment`) go to Downloads via `DownloadManager` with the session cookie.
+  The name comes from `filename*=` (RFC 5987) and the type from the extension when the server sends
+  `application/octet-stream` (`DownloadName.java`, unit tested); `blob:`/`data:` downloads show a hint.
 - 「退出登录并更换服务器」 revokes the device token and clears the WebView cookies.
 
 ## Signing and versions
@@ -32,6 +34,13 @@ The APK workflow signs every build with one fixed key from the repository secret
 `ANDROID_KEYSTORE_B64` (base64 PKCS12, alias `dropit`) and `ANDROID_KEYSTORE_PASSWORD`, so a new APK
 installs over the previous one. Builds signed with the older throwaway CI keys (0.2.0 and before)
 must be uninstalled once. Without the secrets (forks, local builds) Gradle uses a normal debug key.
+
+Upgrades keep the login: the server URL and device token live in Capacitor Preferences
+(SharedPreferences `CapacitorStorage`), the server origin for the native side in SharedPreferences
+`dropit_app`, and the web session in the WebView cookie store. Android keeps all app data on an
+in-place update with the same `applicationId` and signing key, and the app never clears them on a
+version change; only 「退出登录并更换服务器」, an uninstall or 「清除数据」 do. A revoked or expired token
+(401) leads back to the device-code page; network errors keep the token and offer 重试.
 
 The setup, login and settings pages show `版本 <versionName> · <commit> · <date>`; the workflow writes
 `www/build-info.js` and names the file `dropit-android-<version>-<commit>.apk`. Bump `versionCode` and

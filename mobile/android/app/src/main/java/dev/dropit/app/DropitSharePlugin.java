@@ -12,6 +12,7 @@ import android.net.Uri;
 import android.os.Environment;
 import android.provider.OpenableColumns;
 import android.webkit.CookieManager;
+import android.webkit.MimeTypeMap;
 import android.webkit.URLUtil;
 import android.webkit.WebView;
 import android.widget.Toast;
@@ -216,20 +217,40 @@ public class DropitSharePlugin extends Plugin {
         view.evaluateJavascript(injectScript, null);
     }
 
-    /** File downloads from the web UI (Content-Disposition: attachment) go to Downloads with the session cookie. */
+    /**
+     * File downloads from the web UI (Content-Disposition: attachment) go to Downloads with the session cookie.
+     * RHEA-190 dl: the name comes from filename*= (RFC 5987, UTF-8, e.g. Chinese names) and the type from the
+     * extension when the server only says application/octet-stream; before, everything became download.bin.
+     */
     private void download(String url, String userAgent, String contentDisposition, String mimeType, long contentLength) {
+        if (url.startsWith("blob:") || url.startsWith("data:")) {
+            Toast.makeText(getContext(), "这种下载应用里暂不支持，请在浏览器里打开 dropit 下载", Toast.LENGTH_LONG).show();
+            return;
+        }
         Uri uri = Uri.parse(url);
         if (!isServer(uri)) {
             shouldOverrideLoad(uri);
             return;
         }
         try {
-            String name = URLUtil.guessFileName(url, contentDisposition, mimeType);
+            String name = DownloadName.fromContentDisposition(contentDisposition);
+            if (name == null) name = DownloadName.sanitize(URLUtil.guessFileName(url, contentDisposition, mimeType));
+            if (name == null) name = "dropit-download";
+            MimeTypeMap types = MimeTypeMap.getSingleton();
+            String ext = DownloadName.extension(name);
+            String mime = DownloadName.baseMime(mimeType);
+            if (DownloadName.genericMime(mime)) {
+                String guessed = ext == null ? null : types.getMimeTypeFromExtension(ext);
+                mime = guessed != null ? guessed : "application/octet-stream";
+            } else if (ext == null) {
+                String guessedExt = types.getExtensionFromMimeType(mime);
+                if (guessedExt != null) name = name + "." + guessedExt;
+            }
             DownloadManager.Request request = new DownloadManager.Request(uri);
             String cookie = CookieManager.getInstance().getCookie(url);
             if (cookie != null) request.addRequestHeader("Cookie", cookie);
             request.addRequestHeader("User-Agent", userAgent);
-            request.setMimeType(mimeType);
+            request.setMimeType(mime);
             request.setTitle(name);
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name);
