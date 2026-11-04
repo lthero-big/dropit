@@ -10,7 +10,7 @@ import { loadConfig, type Config } from './config.js';
 import { ApiError, CUSTOM_CODE_PATTERN, ROOM_CODE_CHANGE_PATTERN, PIN_MAX, PIN_MIN, hash, parseDevice, token, type AccessToken, type BrowserSession, type Item, type ItemDevice, type ItemMeta, type Session, type TokenScope } from './domain.js';
 import { parseByteRange, sniffMedia } from './media.js';
 import { SqliteRepository, type Repository } from './repository.js';
-import { DiskFileStorage, jsonFileStore, readJsonFile, type FileStorage } from './files.js';
+import { DiskFileStorage, apkStream, jsonFileStore, readAndroidRelease, readJsonFile, type FileStorage } from './files.js';
 import { MemoryBroadcaster, type Broadcaster } from './events.js';
 import { checkOAuthCredentials, createOAuthProvider, envOAuthApps, isSupportedProvider, providerInfo, supportedProviders, type OAuthProvider } from './oauth.js';
 import { ClipboardService, deviceRoomHash, inviteStatus, roomCodeInfo, roomUrl } from './service.js';
@@ -19,6 +19,7 @@ import { limitRanges, RuntimeLimits } from './limits.js';
 import { describeAgent } from './agent.js';
 import { loadUpdateSettings, UpdateChecker } from './update-check.js';
 import { buildInfoPath, loadBuildInfo } from './version.js';
+import { androidReleaseDir } from './app-release.js';
 import { ORIGIN_SETTING, parseOrigin, requestOriginResolver, sameOrigin } from './origin.js';
 import { DEFAULT_SPACE_INVITE_LIMIT, MAX_INVITE_LIMIT } from './invites.js';
 import { PASSWORD_MAX, REGISTRATION_SETTING, checkPassword, hashPassword, hashPasswordSync, parsePolicy, sameSetupCode, setupCode, temporaryPassword, verifyPassword, type RegistrationPolicy } from './password.js';
@@ -303,6 +304,27 @@ export function createBackend(options: BackendOptions = {}) {
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND' } }, 404));
   app.get('/healthz', c => c.json({ status: 'ok' }));
   app.get('/api/version', c => c.json(update.build));
+  // RHEA-190 au: Android app update check and APK download. Public on purpose (the app checks before
+  // sign-in, and the APK is the AGPL app itself); the app only installs it after the SHA-256 matches.
+  app.get('/api/app/android/latest', async c => {
+    limit(c, 'app-update', config.rateGeneral, false);
+    const release = await readAndroidRelease(androidReleaseDir(config.dataDir));
+    if (!release) throw new ApiError(404, 'NO_RELEASE');
+    c.header('Cache-Control', 'no-store');
+    const { versionCode, versionName, notes, size, sha256, publishedAt, file } = release;
+    return c.json({ versionCode, versionName, notes, size, sha256, publishedAt, url: `/api/app/android/download/${encodeURIComponent(file)}` });
+  });
+  app.get('/api/app/android/download/:file', async c => {
+    limit(c, 'app-download', config.rateUpload, false);
+    const dir = androidReleaseDir(config.dataDir);
+    const release = await readAndroidRelease(dir);
+    if (!release || c.req.param('file') !== release.file) throw new ApiError(404, 'NO_RELEASE');
+    c.header('Content-Type', 'application/vnd.android.package-archive');
+    c.header('Content-Length', String(release.size));
+    c.header('Content-Disposition', `attachment; filename="${release.file}"`);
+    c.header('Cache-Control', 'no-store');
+    return c.body(apkStream(dir, release), 200);
+  });
   app.get('/api/admin/update', c => {
     service.admin(c.get('session'));
     return c.json(update.report());
