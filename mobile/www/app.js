@@ -3,8 +3,9 @@
 // (POST /api/app-session/ticket with the device token, then GET /api/app-session?ticket=…).
 import {
   normalizeServerUrl, isDropitVersion, deviceName, pollOutcome, pickSpace, sharedText,
-  newDeviceId, deviceHeaders, apiError, webEntry, LOGIN_SCOPES, LEGACY_SCOPES,
+  newDeviceId, deviceHeaders, apiError, webEntry, LOGIN_SCOPES, LEGACY_SCOPES, versionLabel,
 } from './core.js';
+import { BUILD } from './build-info.js';
 const cap = window.Capacitor;
 const Http = cap?.Plugins?.CapacitorHttp;
 const Prefs = cap?.Plugins?.Preferences;
@@ -12,6 +13,7 @@ const Browser = cap?.Plugins?.Browser;
 const Share = cap?.Plugins?.DropitShare;
 const Device = { model: navigator.userAgent.match(/;\s*([^;)]+)\sBuild/)?.[1] };
 const $ = id => document.getElementById(id);
+$('version').textContent = versionLabel(BUILD);
 const show = id => { for (const s of ['setup', 'login', 'boot']) $(s).hidden = s !== id; };
 
 async function get(key) { return Prefs ? (await Prefs.get({ key })).value : localStorage.getItem(key); }

@@ -111,3 +111,12 @@ export function webEntry(server, status, body) {
   if (status === 404) return { kind: 'plain', url: `${server}/` };
   return { kind: 'error', note: `无法打开网页版：${apiError(status, body)}` };
 }
+
+// RHEA-190 fx: 「版本 0.3.0 · a1b2c3d · 2026-11-04」 for the setup/login/settings pages.
+export function versionLabel(build) {
+  const parts = [`版本 ${build?.version || '?'}`];
+  const commit = String(build?.commit || '');
+  if (commit) parts.push(/^[0-9a-f]{7,40}$/.test(commit) ? commit.slice(0, 7) : commit);
+  if (build?.date) parts.push(String(build.date).slice(0, 10));
+  return parts.join(' · ');
+}

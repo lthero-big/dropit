@@ -7,8 +7,8 @@ android {
         applicationId "dev.dropit.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2
-        versionName "0.2.0"
+        versionCode 3
+        versionName "0.3.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,7 +16,25 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    // RHEA-190 fx: sign every CI build with the same key (GitHub secret ANDROID_KEYSTORE_B64, decoded by
+    // the workflow into DROPIT_KEYSTORE). Without it each runner made a fresh random debug key, so a new
+    // APK could not be installed over the previous one and the old app silently stayed on the phone.
+    // Local builds without the variable keep the normal per-machine debug key.
+    signingConfigs {
+        if (System.getenv("DROPIT_KEYSTORE")) {
+            dropit {
+                storeFile file(System.getenv("DROPIT_KEYSTORE"))
+                storeType "pkcs12"
+                storePassword System.getenv("DROPIT_KEYSTORE_PASSWORD")
+                keyAlias "dropit"
+                keyPassword System.getenv("DROPIT_KEYSTORE_PASSWORD")
+            }
+        }
+    }
     buildTypes {
+        debug {
+            if (System.getenv("DROPIT_KEYSTORE")) signingConfig signingConfigs.dropit
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'

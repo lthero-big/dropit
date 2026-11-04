@@ -67,3 +67,10 @@ test('web entry: one-time ticket, old servers, old tokens', () => {
   assert.equal(webEntry('https://d.x', 403, { error: { code: 'BEARER_REQUIRED' } }).kind, 'error');
   assert.match(webEntry('https://d.x', 429, { error: { code: 'RATE_LIMITED' } }).note, /太频繁/);
 });
+
+test('versionLabel shows version, short commit and date', async () => {
+  const { versionLabel } = await import('../www/core.js');
+  assert.equal(versionLabel({ version: '0.3.0', commit: '0123456789abcdef0123456789abcdef01234567', date: '2026-11-04T04:00:00Z' }), '版本 0.3.0 · 0123456 · 2026-11-04');
+  assert.equal(versionLabel({ version: '0.3.0', commit: 'dev', date: '' }), '版本 0.3.0 · dev');
+  assert.equal(versionLabel(null), '版本 ?');
+});

@@ -24,10 +24,40 @@ jobs:
           java-version: 21
       - run: npm install --no-audit --no-fund
       - run: npm test
+      # RHEA-190 fx: stamp the commit into the app (shown on its setup/settings pages).
+      - name: Build info
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          VERSION=$(sed -n 's/.*versionName "\(.*\)".*/\1/p' android/app/build.gradle)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "SHORT=${SHA:0:7}" >> "$GITHUB_ENV"
+          printf "export const BUILD = { version: '%s', commit: '%s', date: '%s' };\n" "$VERSION" "$SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > www/build-info.js
+          cat www/build-info.js
       - run: npx cap sync android
+      # Same signing key for every build (repo secret), so a new APK installs over the previous one.
+      # Without the secret (forks) Gradle falls back to the runner's throwaway debug key.
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/dropit.p12"
+            echo "DROPIT_KEYSTORE=$RUNNER_TEMP/dropit.p12" >> "$GITHUB_ENV"
+            echo "::add-mask::$KEYSTORE_PASSWORD"
+            echo "DROPIT_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          else
+            echo "No ANDROID_KEYSTORE_B64 secret: using a throwaway debug key"
+          fi
       - run: chmod +x android/gradlew && cd android && ./gradlew assembleDebug --no-daemon
+      - name: Name the APK
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/debug/app-debug.apk "out/dropit-android-$VERSION-$SHORT.apk"
+          rm -f "$RUNNER_TEMP/dropit.p12"
       - uses: actions/upload-artifact@v4
         with:
           name: dropit-android-debug-apk
-          path: mobile/android/app/build/outputs/apk/debug/*.apk
+          path: mobile/out/*.apk
           retention-days: 30

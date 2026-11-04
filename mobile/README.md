@@ -25,3 +25,14 @@ and stores a per-device token in Capacitor Preferences.
   which sends it (files are streamed natively, Bearer, https only) and then returns to the web UI.
 - Web downloads (`Content-Disposition: attachment`) go to Downloads via `DownloadManager` with the session cookie.
 - 「退出登录并更换服务器」 revokes the device token and clears the WebView cookies.
+
+## Signing and versions
+
+The APK workflow signs every build with one fixed key from the repository secrets
+`ANDROID_KEYSTORE_B64` (base64 PKCS12, alias `dropit`) and `ANDROID_KEYSTORE_PASSWORD`, so a new APK
+installs over the previous one. Builds signed with the older throwaway CI keys (0.2.0 and before)
+must be uninstalled once. Without the secrets (forks, local builds) Gradle uses a normal debug key.
+
+The setup, login and settings pages show `版本 <versionName> · <commit> · <date>`; the workflow writes
+`www/build-info.js` and names the file `dropit-android-<version>-<commit>.apk`. Bump `versionCode` and
+`versionName` in `android/app/build.gradle` (and `www/build-info.js`) for each release to the phone.
