@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { CheckIcon, ChevronDownIcon, LogOutIcon, MoonIcon, PaletteIcon, SettingsIcon, ShieldIcon, SunIcon } from 'lucide-react'
 import { toast } from 'sonner'
@@ -297,8 +298,12 @@ function AccountDrawer({
   const ratio = quotaBytes > 0 ? Math.min(100, Math.round((usedBytes / quotaBytes) * 100)) : 0
   const tone = quotaTone(usedBytes, quotaBytes)
   const bar = tone === 'over' ? 'bg-destructive' : tone === 'warn' ? 'bg-[#b45309]' : 'bg-primary'
-  return (
-    <div className="fixed inset-0 z-50 flex items-end pb-16">
+  // RHEA-190 au: portalled to <body>. The sticky header has backdrop-blur, and an element with
+  // backdrop-filter is the containing block of its `position: fixed` children, so `fixed inset-0`
+  // inside the header meant "the 56px header", not the screen: the sheet was laid out above the top
+  // edge (top ≈ -288px) and a tap on the avatar only dimmed the header — on every phone, in the app too.
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-end pb-[calc(4rem+env(safe-area-inset-bottom,0px))]" data-account-drawer="">
       <button type="button" aria-label="关闭账户菜单" className="absolute inset-0 bg-foreground/30" onClick={onClose} />
       <div role="dialog" aria-label="账户" className="relative w-full border-t border-line-1 bg-popover p-3 pb-4">
         <div className="px-3 py-3">
@@ -339,7 +344,8 @@ function AccountDrawer({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
