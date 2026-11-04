@@ -1,15 +1,30 @@
 package dev.dropit.app;
 
+import android.app.DownloadManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ContentResolver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Environment;
 import android.provider.OpenableColumns;
+import android.webkit.CookieManager;
+import android.webkit.URLUtil;
+import android.webkit.WebView;
+import android.widget.Toast;
+import androidx.webkit.JavaScriptReplyProxy;
+import androidx.webkit.WebMessageCompat;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.WebViewListener;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -19,33 +34,211 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Locale;
 import java.util.Iterator;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import org.json.JSONObject;
 
 /**
  * RHEA-190: makes dropit an Android share target. The activity's ACTION_SEND(_MULTIPLE) intent is
  * captured here; JS takes it with take() (take-and-clear, so a share is handled once) and gets a
  * "share" event when a new one arrives while the app is running. Shared files are streamed straight
  * from their content:// URI to POST /api/spaces/:id/items/file, so large images never go through JS.
+ *
+ * RHEA-190 ui: after login the WebView shows the configured server's full web UI. Only that origin
+ * stays inside the app (shouldOverrideLoad); every other http(s) link goes to the system browser.
+ * On that origin, and only there, a small script (assets public/inject.js) adds the app button, and
+ * an origin-restricted bridge object (DropitApp, WebViewCompat.addWebMessageListener) lets it read the
+ * clipboard when the user taps 「从剪贴板发送」 and return to the app's own settings page.
  */
 @CapacitorPlugin(name = "DropitShare")
 public class DropitSharePlugin extends Plugin {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final ArrayList<Uri> files = new ArrayList<>();
     private JSObject pending;
+    private static final String PREFS = "dropit_app";
+    private static final String BRIDGE_NAME = "DropitApp";
+    /** scheme://host[:port] of the configured server, or null before setup. */
+    private String serverOrigin;
+    private boolean bridgeRegistered;
+    private String injectScript;
 
     @Override
     public void load() {
         Intent intent = getActivity().getIntent();
         // Re-opening from recents replays the original launch intent; do not send it twice.
         if (intent != null && (intent.getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0) capture(intent);
+        serverOrigin = getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("origin", null);
+        registerBridge();
+        WebView webView = getBridge().getWebView();
+        webView.setDownloadListener(this::download);
+        getBridge().addWebViewListener(new WebViewListener() {
+            @Override
+            public void onPageLoaded(WebView view) {
+                inject(view);
+            }
+        });
     }
 
     @Override
     protected void handleOnNewIntent(Intent intent) {
         super.handleOnNewIntent(intent);
-        if (capture(intent)) notifyListeners("share", new JSObject(), false);
+        if (!capture(intent)) return;
+        WebView webView = getBridge().getWebView();
+        String current = webView.getUrl();
+        if (current != null && isServer(Uri.parse(current))) {
+            // The web UI is showing: hand the share to the app page, which sends it and returns to the web UI.
+            webView.loadUrl(getBridge().getLocalUrl() + "/#share");
+        } else {
+            notifyListeners("share", new JSObject(), false);
+        }
+    }
+
+    @Override
+    protected void handleOnPause() {
+        super.handleOnPause();
+        CookieManager.getInstance().flush();
+    }
+
+    static String originOf(Uri uri) {
+        if (uri == null || uri.getScheme() == null || uri.getHost() == null) return null;
+        String scheme = uri.getScheme().toLowerCase(Locale.ROOT);
+        if (!scheme.equals("https") && !scheme.equals("http")) return null;
+        int port = uri.getPort();
+        boolean defaultPort = port == -1 || (scheme.equals("https") && port == 443) || (scheme.equals("http") && port == 80);
+        return scheme + "://" + uri.getHost().toLowerCase(Locale.ROOT) + (defaultPort ? "" : ":" + port);
+    }
+
+    private boolean isServer(Uri uri) {
+        String origin = originOf(uri);
+        return origin != null && origin.equals(serverOrigin);
+    }
+
+    /** Keeps the configured server inside the app; other web links open in the system browser. */
+    @Override
+    public Boolean shouldOverrideLoad(Uri url) {
+        String origin = originOf(url);
+        if (origin == null) return null; // mailto:, tel:, intent: … use Capacitor's default handling
+        if (origin.equals(serverOrigin)) return false;
+        Uri app = Uri.parse(getBridge().getAppUrl());
+        if (url.getHost() != null && url.getHost().equalsIgnoreCase(app.getHost()) && origin.startsWith(String.valueOf(app.getScheme()))) return null;
+        try {
+            getContext().startActivity(new Intent(Intent.ACTION_VIEW, url).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (Exception ignored) {
+            // No browser installed.
+        }
+        return true;
+    }
+
+    @PluginMethod
+    public void setServer(PluginCall call) {
+        String url = call.getString("url", "");
+        String origin = url == null || url.isEmpty() ? null : originOf(Uri.parse(url));
+        if (origin != null && !origin.startsWith("https://")) {
+            call.reject("only https:// servers are supported");
+            return;
+        }
+        boolean changed = origin == null ? serverOrigin != null : !origin.equals(serverOrigin);
+        serverOrigin = origin;
+        getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("origin", origin).apply();
+        if (origin == null) {
+            // Signed out / switching servers: drop the web session cookie this WebView holds.
+            CookieManager.getInstance().removeAllCookies(null);
+            CookieManager.getInstance().flush();
+        }
+        if (changed) getActivity().runOnUiThread(this::registerBridge);
+        call.resolve();
+    }
+
+    private void registerBridge() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return;
+        WebView webView = getBridge().getWebView();
+        if (bridgeRegistered) {
+            WebViewCompat.removeWebMessageListener(webView, BRIDGE_NAME);
+            bridgeRegistered = false;
+        }
+        if (serverOrigin == null) return;
+        try {
+            WebViewCompat.addWebMessageListener(webView, BRIDGE_NAME, Collections.singleton(serverOrigin), this::onWebMessage);
+            bridgeRegistered = true;
+        } catch (Exception ignored) {
+            // Invalid origin rule: the web UI still works, only the app button has no bridge.
+        }
+    }
+
+    private void onWebMessage(WebView view, WebMessageCompat message, Uri sourceOrigin, boolean isMainFrame, JavaScriptReplyProxy reply) {
+        if (!isMainFrame || !isServer(sourceOrigin) || message.getData() == null) return;
+        String type;
+        try {
+            type = new JSONObject(message.getData()).optString("type");
+        } catch (Exception e) {
+            return;
+        }
+        if ("clipboard".equals(type)) {
+            // Only ever called from a tap on 「从剪贴板发送」 while the app is in the foreground.
+            JSONObject out = new JSONObject();
+            try {
+                out.put("type", "clipboard");
+                ClipboardManager clipboard = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+                ClipData clip = clipboard == null ? null : clipboard.getPrimaryClip();
+                StringBuilder text = new StringBuilder();
+                if (clip != null) {
+                    for (int i = 0; i < clip.getItemCount(); i++) {
+                        CharSequence part = clip.getItemAt(i).coerceToText(getContext());
+                        if (part != null && part.length() > 0) {
+                            if (text.length() > 0) text.append('\n');
+                            text.append(part);
+                        }
+                    }
+                }
+                out.put("text", text.toString());
+            } catch (Exception e) {
+                try { out.put("error", String.valueOf(e.getMessage())); } catch (Exception ignored) { /* unreachable */ }
+            }
+            reply.postMessage(out.toString());
+        } else if ("settings".equals(type)) {
+            view.loadUrl(getBridge().getLocalUrl() + "/#settings");
+        }
+    }
+
+    private void inject(WebView view) {
+        String url = view.getUrl();
+        if (url == null || !isServer(Uri.parse(url))) return;
+        if (injectScript == null) {
+            try (InputStream in = getContext().getAssets().open("public/inject.js")) {
+                injectScript = readAll(in);
+            } catch (IOException e) {
+                return;
+            }
+        }
+        view.evaluateJavascript(injectScript, null);
+    }
+
+    /** File downloads from the web UI (Content-Disposition: attachment) go to Downloads with the session cookie. */
+    private void download(String url, String userAgent, String contentDisposition, String mimeType, long contentLength) {
+        Uri uri = Uri.parse(url);
+        if (!isServer(uri)) {
+            shouldOverrideLoad(uri);
+            return;
+        }
+        try {
+            String name = URLUtil.guessFileName(url, contentDisposition, mimeType);
+            DownloadManager.Request request = new DownloadManager.Request(uri);
+            String cookie = CookieManager.getInstance().getCookie(url);
+            if (cookie != null) request.addRequestHeader("Cookie", cookie);
+            request.addRequestHeader("User-Agent", userAgent);
+            request.setMimeType(mimeType);
+            request.setTitle(name);
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name);
+            DownloadManager manager = (DownloadManager) getContext().getSystemService(Context.DOWNLOAD_SERVICE);
+            manager.enqueue(request);
+            Toast.makeText(getContext(), "正在下载 " + name, Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Toast.makeText(getContext(), "下载失败：" + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 
     @SuppressWarnings("deprecation")

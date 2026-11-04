@@ -1,5 +1,10 @@
 // Pure logic for the dropit Android shell (RHEA-190). No built-in server:
 // the user types their own https URL on first run.
+
+/** Device-login scopes. 'web' lets the app open the web UI already signed in (RHEA-190 ui). */
+export const LOGIN_SCOPES = ['read', 'write', 'web'];
+/** For servers that do not know the 'web' scope yet. */
+export const LEGACY_SCOPES = ['read', 'write'];
 const INSTALL_KINDS = ['docker', 'docker-build', 'source'];
 const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]{1,40})?$/;
 
@@ -47,33 +52,6 @@ export function pickSpace(spaces, userId) {
   return list.find(s => s && s.ownerId === userId && s.expiresAt == null) ?? list[0] ?? null;
 }
 
-/** One-line label for an item in the recent list. */
-export function itemTitle(item, max = 140) {
-  if (!item) return '';
-  const raw = item.kind === 'text' ? String(item.text ?? '') : String(item.filename ?? '文件');
-  const line = raw.replace(/\s+/g, ' ').trim();
-  const chars = [...line];
-  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : line;
-}
-
-export function formatSize(bytes) {
-  const n = Number(bytes);
-  if (!Number.isFinite(n) || n < 0) return '';
-  if (n < 1024) return `${n} B`;
-  const units = ['KB', 'MB', 'GB'];
-  let v = n / 1024, i = 0;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
-}
-
-export function timeAgo(ms, now = Date.now()) {
-  const s = Math.max(0, Math.round((now - ms) / 1000));
-  if (s < 60) return '刚刚';
-  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
-  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
-  return `${Math.floor(s / 86400)} 天前`;
-}
-
 /** Text to send for an Android share: many apps put the page title in EXTRA_SUBJECT and the link in EXTRA_TEXT. */
 export function sharedText(payload) {
   const text = String(payload?.text ?? '').trim();
@@ -117,4 +95,19 @@ export function apiError(status, body) {
   if (status === 413) return known.FILE_TOO_LARGE;
   if (status === 429) return known.RATE_LIMITED;
   return `请求失败（${code || status}）`;
+}
+
+/**
+ * What to do with the answer of POST /api/app-session/ticket:
+ * ticket → open the one-time sign-in URL in the app WebView; plain → server predates in-app sign-in,
+ * open the web UI and let it show its own login; relogin → device token is gone or lacks 'web'.
+ */
+export function webEntry(server, status, body) {
+  const path = typeof body?.path === 'string' ? body.path : '';
+  if (status === 200 && /^\/api\/app-session\?ticket=[A-Za-z0-9_-]{43}$/.test(path)) return { kind: 'ticket', url: `${server}${path}` };
+  const code = body?.error?.code ?? body?.error ?? '';
+  if (status === 401) return { kind: 'relogin', note: '登录已失效，请在浏览器里重新确认' };
+  if (status === 403 && code === 'INSUFFICIENT_SCOPE') return { kind: 'relogin', note: '新版应用需要再确认一次登录（这次包含「在 dropit 应用里打开网页版」权限）' };
+  if (status === 404) return { kind: 'plain', url: `${server}/` };
+  return { kind: 'error', note: `无法打开网页版：${apiError(status, body)}` };
 }

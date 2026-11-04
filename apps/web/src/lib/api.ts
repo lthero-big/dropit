@@ -33,6 +33,7 @@ const labels: Record<string, string> = {
   INVALID_FILENAME: '文件名无效',
   OAUTH_STATE_INVALID: '登录状态已失效，请重试',
   OAUTH_DENIED: '登录被取消',
+  APP_SESSION_EXPIRED: '应用自动登录已失效，请在这里登录，或在 dropit 应用里重新连接',
   OAUTH_PROVIDER_ERROR: '登录服务暂时不可用',
   UNAUTHENTICATED: '请先登录',
   FORBIDDEN: '没有权限',
@@ -101,6 +102,7 @@ const labels: Record<string, string> = {
 const oauthLoginErrors = new Set([
   'OAUTH_STATE_INVALID',
   'OAUTH_DENIED',
+  'APP_SESSION_EXPIRED',
   'OAUTH_PROVIDER_ERROR',
   'INVITE_INVALID',
   'INVITATION_REQUIRED',

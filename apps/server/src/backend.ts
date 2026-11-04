@@ -67,7 +67,7 @@ const oauthBrowserErrors = new Set([
 ]);
 // RHEA-190 auth step 2: while a temporary password is in use, a browser session may only
 // read who it is, change the password or sign out.
-const openWhileChangingPassword = new Set(['/api/me', '/api/me/password', '/api/auth/logout', '/api/auth/providers', '/api/site', '/api/version', '/api/setup']);
+const openWhileChangingPassword = new Set(['/api/me', '/api/me/password', '/api/auth/logout', '/api/auth/providers', '/api/site', '/api/version', '/api/setup', '/api/app-session']);
 /** Shows that a secret is stored without revealing it (last 4 chars only for long secrets). */
 function maskSecret(secret: string) {
   return secret.length >= 16 ? `••••••••${secret.slice(-4)}` : '••••••••';
@@ -93,11 +93,14 @@ function personName(value: unknown): string {
   if (!name) throw new ApiError(400, 'INVALID_INPUT');
   return name;
 }
-function tokenOptions(body: Record<string, unknown>) {
+function tokenOptions(body: Record<string, unknown>, allowWeb = false) {
   const name = personName(body.name);
   const scopes = body.scopes === undefined ? ['read', 'write'] : body.scopes;
-  if (!Array.isArray(scopes) || !scopes.length || scopes.length > 2 ||
-      scopes.some(scope => scope !== 'read' && scope !== 'write') || new Set(scopes).size !== scopes.length) throw new ApiError(400, 'INVALID_INPUT');
+  const allowed = allowWeb ? ['read', 'write', 'web'] : ['read', 'write'];
+  if (!Array.isArray(scopes) || !scopes.length || scopes.length > allowed.length ||
+      scopes.some(scope => !allowed.includes(scope)) || new Set(scopes).size !== scopes.length) throw new ApiError(400, 'INVALID_INPUT');
+  // A web session can do everything, so the 'web' scope only comes together with read and write.
+  if (scopes.includes('web') && !(scopes.includes('read') && scopes.includes('write'))) throw new ApiError(400, 'INVALID_INPUT');
   const days = body.expiresInDays === null ? null : integer(body.expiresInDays ?? 90, 1, 3650);
   return { name, scopes: scopes as TokenScope[], lifetimeMs: days === null ? null : days * 86400000 };
 }
@@ -343,7 +346,7 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.post('/api/auth/device/authorize', async c => {
     limit(c, 'device-authorize', config.rateAuth, false);
-    const input = tokenOptions(await json(c, 2048));
+    const input = tokenOptions(await json(c, 2048), true);
     const deviceCode = token();
     const chars = Array.from({ length: 8 }, () => userCodeAlphabet[randomInt(userCodeAlphabet.length)]).join('');
     const userCode = `${chars.slice(0, 4)}-${chars.slice(4)}`;
@@ -466,6 +469,36 @@ export function createBackend(options: BackendOptions = {}) {
       { userAgent: c.req.header('user-agent') ?? null, ipSummary: ipSummary(c.get('ip')) });
     setCookie(c, sessionCookieName(c), session, { ...cookieFor(c), maxAge: Math.floor(config.sessionMs / 1000) });
   };
+  // RHEA-190 ui: the Android app shows the full web UI inside its own WebView. A device token that was
+  // approved with the 'web' scope can be traded for a one-time ticket (60 s, kept in memory, hashed);
+  // opening /api/app-session?ticket=… in the app's WebView sets a normal browser session cookie,
+  // so the user does not have to sign in a second time. An existing browser session is kept as is
+  // (same or another account), so a ticket link cannot swap a signed-in browser to another account.
+  const appTickets = new Map<string, { userId: string; tokenId: string; expiresAt: number }>();
+  app.post('/api/app-session/ticket', c => {
+    const auth = service.requireSession(c.get('session'));
+    if (!auth.bearer) throw new ApiError(403, 'BEARER_REQUIRED');
+    if (!auth.bearer.scopes.includes('web')) throw new ApiError(403, 'INSUFFICIENT_SCOPE');
+    limit(c, 'app-session', config.rateAuth);
+    for (const [key, entry] of appTickets) if (entry.expiresAt <= now()) appTickets.delete(key);
+    if (appTickets.size >= 10000) throw new ApiError(429, 'RATE_LIMITED');
+    const raw = token();
+    appTickets.set(hash(raw), { userId: auth.user.id, tokenId: auth.bearer.id, expiresAt: now() + 60000 });
+    return c.json({ ticket: raw, path: `/api/app-session?${new URLSearchParams({ ticket: raw })}`, expires_in: 60 });
+  });
+  app.get('/api/app-session', c => {
+    limit(c, 'auth', config.rateAuth, false);
+    const raw = c.req.query('ticket') ?? '';
+    const key = /^[A-Za-z0-9_-]{43}$/.test(raw) ? hash(raw) : null;
+    const entry = key ? appTickets.get(key) : undefined;
+    if (key) appTickets.delete(key);
+    const live = entry && entry.expiresAt > now() && repo.accessTokens(entry.userId)
+      .some(t => t.id === entry.tokenId && !t.revoked && t.scopes.includes('web') && (t.expiresAt === null || t.expiresAt > now()));
+    if (!entry || !live) return c.redirect('/login?error=APP_SESSION_EXPIRED');
+    const current = c.get('session');
+    if (!current || current.bearer) startSession(c, entry.userId);
+    return c.redirect('/');
+  });
   const optionalInvite = (value: unknown) => {
     if (value === undefined || value === null || value === '') return null;
     return hash(string(value, 128));

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeServerUrl, isDropitVersion, deviceName, pollOutcome,
-  pickSpace, itemTitle, formatSize, timeAgo, sharedText, newDeviceId, deviceHeaders, apiError,
+  pickSpace, sharedText, newDeviceId, deviceHeaders, apiError, webEntry, LOGIN_SCOPES, LEGACY_SCOPES,
 } from '../www/core.js';
 
 test('https only, bare host gets https', () => {
@@ -31,16 +31,6 @@ test('pick own private space', () => {
   assert.equal(pickSpace([], 'u1'), null);
   assert.equal(pickSpace(undefined, 'u1'), null);
 });
-test('item titles and sizes', () => {
-  assert.equal(itemTitle({ kind: 'text', text: ' a\n\n b ' }), 'a b');
-  assert.equal([...itemTitle({ kind: 'text', text: '字'.repeat(500) }, 10)].length, 10);
-  assert.equal(itemTitle({ kind: 'file', filename: 'p.png' }), 'p.png');
-  assert.equal(formatSize(512), '512 B');
-  assert.equal(formatSize(1536), '1.5 KB');
-  assert.equal(formatSize(50 * 1024 * 1024), '50 MB');
-  assert.equal(timeAgo(1000, 1000 + 30e3), '刚刚');
-  assert.equal(timeAgo(0, 3 * 3600e3), '3 小时前');
-});
 test('shared text combines subject and link', () => {
   assert.equal(sharedText({ text: 'https://x.y/a', subject: 'Title' }), 'Title\nhttps://x.y/a');
   assert.equal(sharedText({ text: 'Title https://x.y', subject: 'Title' }), 'Title https://x.y');
@@ -60,4 +50,20 @@ test('api error messages', () => {
   assert.equal(apiError(413, { error: { code: 'FILE_TOO_LARGE' } }), '文件太大，超过服务器限制');
   assert.equal(apiError(401, null), '登录已失效，请重新登录');
   assert.match(apiError(500, { error: { code: 'INTERNAL_ERROR' } }), /INTERNAL_ERROR/);
+});
+test('device login asks for the web scope, legacy fallback does not', () => {
+  assert.deepEqual(LOGIN_SCOPES, ['read', 'write', 'web']);
+  assert.deepEqual(LEGACY_SCOPES, ['read', 'write']);
+});
+test('web entry: one-time ticket, old servers, old tokens', () => {
+  const t = 'A'.repeat(43);
+  assert.deepEqual(webEntry('https://d.x', 200, { ticket: t, path: `/api/app-session?ticket=${t}` }), { kind: 'ticket', url: `https://d.x/api/app-session?ticket=${t}` });
+  // never follow a path the server did not mean
+  assert.equal(webEntry('https://d.x', 200, { path: '//evil.example/x' }).kind, 'error');
+  assert.equal(webEntry('https://d.x', 200, { path: `/api/app-session?ticket=${t}&next=//evil` }).kind, 'error');
+  assert.deepEqual(webEntry('https://d.x', 404, { error: { code: 'NOT_FOUND' } }), { kind: 'plain', url: 'https://d.x/' });
+  assert.equal(webEntry('https://d.x', 401, null).kind, 'relogin');
+  assert.equal(webEntry('https://d.x', 403, { error: { code: 'INSUFFICIENT_SCOPE' } }).kind, 'relogin');
+  assert.equal(webEntry('https://d.x', 403, { error: { code: 'BEARER_REQUIRED' } }).kind, 'error');
+  assert.match(webEntry('https://d.x', 429, { error: { code: 'RATE_LIMITED' } }).note, /太频繁/);
 });

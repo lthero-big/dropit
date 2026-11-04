@@ -2,6 +2,7 @@
   "appId": "dev.dropit.app",
   "appName": "dropit",
   "webDir": "www",
+  "appendUserAgent": "dropit-android/0.2.0",
   "plugins": { "CapacitorHttp": { "enabled": true } },
-  "android": { "allowMixedContent": false }
+  "android": { "allowMixedContent": false, "adjustMarginsForEdgeToEdge": "auto" }
 }
