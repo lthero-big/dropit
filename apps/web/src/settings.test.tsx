@@ -141,6 +141,27 @@ describe('settings and device confirmation', () => {
     await waitFor(() => expect(calls.some((call) => call.url === '/api/tokens/t1' && call.init?.method === 'DELETE')).toBe(true))
   })
 
+  it('deletes a revoked token for good after confirmation (RHEA-190 dl)', async () => {
+    let live = tokens.map((token) => ({ ...token }))
+    stubFetch((url, init) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/tokens' && (!init?.method || init.method === 'GET')) return json({ tokens: live })
+      if (url === '/api/tokens/t2?purge=1' && init?.method === 'DELETE') {
+        live = live.filter((token) => token.id !== 't2')
+        return new Response(null, { status: 204 })
+      }
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/settings')
+    expect(await screen.findByText('old')).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: '删除' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: '删除' }))
+    fireEvent.click(await screen.findByRole('button', { name: '确认删除' }))
+    await waitFor(() => expect(screen.queryByText('old')).toBeNull())
+    expect(screen.getByText('laptop')).toBeTruthy()
+    expect(calls.some((call) => call.url === '/api/tokens/t1?purge=1')).toBe(false)
+  })
+
   it('shows a created token once and drops it when the dialog closes', async () => {
     const secret = 'sekret-value-once'
     const created = { ...tokens[0], id: 't3', name: 'ci', scopes: ['read'] as ('read' | 'write')[], expiresAt: null, revoked: 0 }

@@ -243,7 +243,7 @@ export interface AccessToken {
   id: string
   userId: string
   name: string
-  scopes: ('read' | 'write')[]
+  scopes: ('read' | 'write' | 'web')[]
   createdAt: number
   lastUsedAt: number | null
   expiresAt: number | null
@@ -253,7 +253,7 @@ export interface AccessToken {
 export interface DeviceRequest {
   name: string
   ipSummary: string
-  scopes: ('read' | 'write')[]
+  scopes: ('read' | 'write' | 'web')[]
   expiresAt: number
   tokenExpiresInDays: number | null
 }

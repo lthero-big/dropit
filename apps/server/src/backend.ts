@@ -10,7 +10,7 @@ import { loadConfig, type Config } from './config.js';
 import { ApiError, CUSTOM_CODE_PATTERN, ROOM_CODE_CHANGE_PATTERN, PIN_MAX, PIN_MIN, hash, parseDevice, token, type AccessToken, type BrowserSession, type Item, type ItemDevice, type ItemMeta, type Session, type TokenScope } from './domain.js';
 import { parseByteRange, sniffMedia } from './media.js';
 import { SqliteRepository, type Repository } from './repository.js';
-import { DiskFileStorage, jsonFileStore, readJsonFile, type FileStorage } from './files.js';
+import { DiskFileStorage, apkStream, jsonFileStore, readAndroidRelease, readJsonFile, type FileStorage } from './files.js';
 import { MemoryBroadcaster, type Broadcaster } from './events.js';
 import { checkOAuthCredentials, createOAuthProvider, envOAuthApps, isSupportedProvider, providerInfo, supportedProviders, type OAuthProvider } from './oauth.js';
 import { ClipboardService, deviceRoomHash, inviteStatus, roomCodeInfo, roomUrl } from './service.js';
@@ -19,6 +19,7 @@ import { limitRanges, RuntimeLimits } from './limits.js';
 import { describeAgent } from './agent.js';
 import { loadUpdateSettings, UpdateChecker } from './update-check.js';
 import { buildInfoPath, loadBuildInfo } from './version.js';
+import { androidReleaseDir } from './app-release.js';
 import { ORIGIN_SETTING, parseOrigin, requestOriginResolver, sameOrigin } from './origin.js';
 import { DEFAULT_SPACE_INVITE_LIMIT, MAX_INVITE_LIMIT } from './invites.js';
 import { PASSWORD_MAX, REGISTRATION_SETTING, checkPassword, hashPassword, hashPasswordSync, parsePolicy, sameSetupCode, setupCode, temporaryPassword, verifyPassword, type RegistrationPolicy } from './password.js';
@@ -67,7 +68,7 @@ const oauthBrowserErrors = new Set([
 ]);
 // RHEA-190 auth step 2: while a temporary password is in use, a browser session may only
 // read who it is, change the password or sign out.
-const openWhileChangingPassword = new Set(['/api/me', '/api/me/password', '/api/auth/logout', '/api/auth/providers', '/api/site', '/api/version', '/api/setup']);
+const openWhileChangingPassword = new Set(['/api/me', '/api/me/password', '/api/auth/logout', '/api/auth/providers', '/api/site', '/api/version', '/api/setup', '/api/app-session']);
 /** Shows that a secret is stored without revealing it (last 4 chars only for long secrets). */
 function maskSecret(secret: string) {
   return secret.length >= 16 ? `••••••••${secret.slice(-4)}` : '••••••••';
@@ -93,11 +94,14 @@ function personName(value: unknown): string {
   if (!name) throw new ApiError(400, 'INVALID_INPUT');
   return name;
 }
-function tokenOptions(body: Record<string, unknown>) {
+function tokenOptions(body: Record<string, unknown>, allowWeb = false) {
   const name = personName(body.name);
   const scopes = body.scopes === undefined ? ['read', 'write'] : body.scopes;
-  if (!Array.isArray(scopes) || !scopes.length || scopes.length > 2 ||
-      scopes.some(scope => scope !== 'read' && scope !== 'write') || new Set(scopes).size !== scopes.length) throw new ApiError(400, 'INVALID_INPUT');
+  const allowed = allowWeb ? ['read', 'write', 'web'] : ['read', 'write'];
+  if (!Array.isArray(scopes) || !scopes.length || scopes.length > allowed.length ||
+      scopes.some(scope => !allowed.includes(scope)) || new Set(scopes).size !== scopes.length) throw new ApiError(400, 'INVALID_INPUT');
+  // A web session can do everything, so the 'web' scope only comes together with read and write.
+  if (scopes.includes('web') && !(scopes.includes('read') && scopes.includes('write'))) throw new ApiError(400, 'INVALID_INPUT');
   const days = body.expiresInDays === null ? null : integer(body.expiresInDays ?? 90, 1, 3650);
   return { name, scopes: scopes as TokenScope[], lifetimeMs: days === null ? null : days * 86400000 };
 }
@@ -109,10 +113,21 @@ function ipSummary(ip: string) {
   return 'unknown';
 }
 const maxQuotaBytes = limitRanges.userQuotaBytes.max;
+// RHEA-190 dl: the plain filename= is what clients without RFC 5987 support use (Android's
+// URLUtil.guessFileName among them). A fixed "download" there made the app save every file as
+// download.bin, so keep the printable ASCII part of the real name and always its extension.
+export function asciiFilename(filename: string, fallback: string) {
+  const base = filename.replace(/^.*[\\/]/, '');
+  const dot = base.lastIndexOf('.');
+  const ext = dot > 0 ? base.slice(dot) : '';
+  const safeExt = /^\.[A-Za-z0-9]{1,16}$/.test(ext) ? ext : '';
+  const stem = (safeExt ? base.slice(0, dot) : base).replace(/(?:[^\x20-\x7e]|["\\%;])+/g, '_')
+    .replace(/^[\s_.]+|[\s_.]+$/g, '').slice(0, 120);
+  return `${/[A-Za-z0-9]/.test(stem) ? stem : fallback}${safeExt}`;
+}
 function contentDisposition(kind: 'attachment' | 'inline', filename: string) {
   const encoded = encodeURIComponent(filename).replace(/['()*]/g, ch => '%' + ch.charCodeAt(0).toString(16));
-  const fallback = kind === 'inline' ? 'media' : 'download';
-  return `${kind}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+  return `${kind}; filename="${asciiFilename(filename, kind === 'inline' ? 'media' : 'download')}"; filename*=UTF-8''${encoded}`;
 }
 function attachmentDisposition(filename: string) {
   return contentDisposition('attachment', filename);
@@ -289,6 +304,27 @@ export function createBackend(options: BackendOptions = {}) {
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND' } }, 404));
   app.get('/healthz', c => c.json({ status: 'ok' }));
   app.get('/api/version', c => c.json(update.build));
+  // RHEA-190 au: Android app update check and APK download. Public on purpose (the app checks before
+  // sign-in, and the APK is the AGPL app itself); the app only installs it after the SHA-256 matches.
+  app.get('/api/app/android/latest', async c => {
+    limit(c, 'app-update', config.rateGeneral, false);
+    const release = await readAndroidRelease(androidReleaseDir(config.dataDir));
+    if (!release) throw new ApiError(404, 'NO_RELEASE');
+    c.header('Cache-Control', 'no-store');
+    const { versionCode, versionName, notes, size, sha256, publishedAt, file } = release;
+    return c.json({ versionCode, versionName, notes, size, sha256, publishedAt, url: `/api/app/android/download/${encodeURIComponent(file)}` });
+  });
+  app.get('/api/app/android/download/:file', async c => {
+    limit(c, 'app-download', config.rateUpload, false);
+    const dir = androidReleaseDir(config.dataDir);
+    const release = await readAndroidRelease(dir);
+    if (!release || c.req.param('file') !== release.file) throw new ApiError(404, 'NO_RELEASE');
+    c.header('Content-Type', 'application/vnd.android.package-archive');
+    c.header('Content-Length', String(release.size));
+    c.header('Content-Disposition', `attachment; filename="${release.file}"`);
+    c.header('Cache-Control', 'no-store');
+    return c.body(apkStream(dir, release), 200);
+  });
   app.get('/api/admin/update', c => {
     service.admin(c.get('session'));
     return c.json(update.report());
@@ -327,6 +363,11 @@ export function createBackend(options: BackendOptions = {}) {
     return c.body(null, 204);
   });
   app.delete('/api/tokens/:id', c => {
+    // RHEA-190 dl: ?purge=1 removes an already revoked or expired token from the list for good.
+    if (c.req.query('purge') === '1') {
+      repo.deleteAccessToken(c.req.param('id'), browserSession(c).user.id, now());
+      return c.body(null, 204);
+    }
     repo.revokeAccessToken(c.req.param('id'), service.requireSession(c.get('session')).user.id);
     events.revalidate();
     return c.body(null, 204);
@@ -343,7 +384,7 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.post('/api/auth/device/authorize', async c => {
     limit(c, 'device-authorize', config.rateAuth, false);
-    const input = tokenOptions(await json(c, 2048));
+    const input = tokenOptions(await json(c, 2048), true);
     const deviceCode = token();
     const chars = Array.from({ length: 8 }, () => userCodeAlphabet[randomInt(userCodeAlphabet.length)]).join('');
     const userCode = `${chars.slice(0, 4)}-${chars.slice(4)}`;
@@ -466,6 +507,36 @@ export function createBackend(options: BackendOptions = {}) {
       { userAgent: c.req.header('user-agent') ?? null, ipSummary: ipSummary(c.get('ip')) });
     setCookie(c, sessionCookieName(c), session, { ...cookieFor(c), maxAge: Math.floor(config.sessionMs / 1000) });
   };
+  // RHEA-190 ui: the Android app shows the full web UI inside its own WebView. A device token that was
+  // approved with the 'web' scope can be traded for a one-time ticket (60 s, kept in memory, hashed);
+  // opening /api/app-session?ticket=… in the app's WebView sets a normal browser session cookie,
+  // so the user does not have to sign in a second time. An existing browser session is kept as is
+  // (same or another account), so a ticket link cannot swap a signed-in browser to another account.
+  const appTickets = new Map<string, { userId: string; tokenId: string; expiresAt: number }>();
+  app.post('/api/app-session/ticket', c => {
+    const auth = service.requireSession(c.get('session'));
+    if (!auth.bearer) throw new ApiError(403, 'BEARER_REQUIRED');
+    if (!auth.bearer.scopes.includes('web')) throw new ApiError(403, 'INSUFFICIENT_SCOPE');
+    limit(c, 'app-session', config.rateAuth);
+    for (const [key, entry] of appTickets) if (entry.expiresAt <= now()) appTickets.delete(key);
+    if (appTickets.size >= 10000) throw new ApiError(429, 'RATE_LIMITED');
+    const raw = token();
+    appTickets.set(hash(raw), { userId: auth.user.id, tokenId: auth.bearer.id, expiresAt: now() + 60000 });
+    return c.json({ ticket: raw, path: `/api/app-session?${new URLSearchParams({ ticket: raw })}`, expires_in: 60 });
+  });
+  app.get('/api/app-session', c => {
+    limit(c, 'auth', config.rateAuth, false);
+    const raw = c.req.query('ticket') ?? '';
+    const key = /^[A-Za-z0-9_-]{43}$/.test(raw) ? hash(raw) : null;
+    const entry = key ? appTickets.get(key) : undefined;
+    if (key) appTickets.delete(key);
+    const live = entry && entry.expiresAt > now() && repo.accessTokens(entry.userId)
+      .some(t => t.id === entry.tokenId && !t.revoked && t.scopes.includes('web') && (t.expiresAt === null || t.expiresAt > now()));
+    if (!entry || !live) return c.redirect('/login?error=APP_SESSION_EXPIRED');
+    const current = c.get('session');
+    if (!current || current.bearer) startSession(c, entry.userId);
+    return c.redirect('/');
+  });
   const optionalInvite = (value: unknown) => {
     if (value === undefined || value === null || value === '') return null;
     return hash(string(value, 128));

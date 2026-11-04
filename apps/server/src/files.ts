@@ -4,6 +4,7 @@ import { createReadStream, mkdirSync, readFileSync, renameSync, writeFileSync } 
 import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { ApiError } from './domain.js';
+import { parseAndroidRelease, type AndroidRelease } from './app-release.js';
 
 export interface FileStorage {
   write(body: ReadableStream<Uint8Array>, limit: number, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<{ key: string; size: number; sha256: string }>;
@@ -131,4 +132,22 @@ export function jsonFileStore(path: string) {
       renameSync(temp, path);
     },
   };
+}
+
+// RHEA-190 au: the published Android APK (DATA_DIR/app/android/latest.json + the file it names).
+/** The published release, or null when there is none or the APK on disk does not match the manifest size. */
+export async function readAndroidRelease(dir: string): Promise<AndroidRelease | null> {
+  let raw: unknown;
+  try { raw = JSON.parse(await readFile(join(dir, 'latest.json'), 'utf8')); }
+  catch { return null; }
+  const release = parseAndroidRelease(raw);
+  if (!release) return null;
+  try {
+    const info = await stat(join(dir, release.file));
+    if (!info.isFile() || info.size !== release.size) return null;
+  } catch { return null; }
+  return release;
+}
+export function apkStream(dir: string, release: AndroidRelease) {
+  return Readable.toWeb(createReadStream(join(dir, release.file))) as ReadableStream<Uint8Array>;
 }

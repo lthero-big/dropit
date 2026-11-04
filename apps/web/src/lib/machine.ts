@@ -28,8 +28,8 @@ export function parseDeviceEntry(value: string): { code: string; verificationId?
   return { code: normalizeUserCode(value) }
 }
 
-export function scopeLabel(scope: 'read' | 'write'): string {
-  return scope === 'read' ? '读取' : '写入'
+export function scopeLabel(scope: 'read' | 'write' | 'web'): string {
+  return scope === 'read' ? '读取' : scope === 'write' ? '写入' : '在 dropit 应用里打开网页版'
 }
 
 export function formatStamp(ms: number): string {

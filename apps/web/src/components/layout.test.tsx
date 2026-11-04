@@ -120,7 +120,10 @@ describe('account menu', () => {
     }))
     renderShell()
     fireEvent.click(await screen.findByRole('button', { name: '账户菜单' }))
-    expect(await screen.findByRole('dialog', { name: '账户' })).toBeTruthy()
+    const sheet = await screen.findByRole('dialog', { name: '账户' })
+    // RHEA-190 au: never inside the blurred sticky header (it would be positioned off screen there).
+    expect(sheet.closest('header')).toBeNull()
+    expect(sheet.closest('[data-account-drawer]')?.parentElement).toBe(document.body)
     expect(screen.getByRole('button', { name: '设置' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '退出' })).toBeTruthy()
     fireEvent.keyDown(document, { key: 'Escape' })

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>dropit</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 20px 16px 40px; background: #fafafa; color: #111; }
+  h1 { font-size: 22px; margin: 4px 0 12px; } input { width: 100%; box-sizing: border-box; padding: 12px; font-size: 16px; }
+  button { margin-top: 12px; padding: 12px 16px; font-size: 16px; width: 100%; border-radius: 10px; border: 1px solid #ccc; background: #fff; }
+  button.primary { background: #111; color: #fff; border-color: #111; }
+  .err { color: #b00020; } .code { font: 600 28px ui-monospace, monospace; letter-spacing: 2px; text-align: center; }
+  section[hidden], button[hidden] { display: none; }
+  .hint { color: #777; font-size: 13px; }
+  h2 { font-size: 19px; margin: 8px 0; } pre { white-space: pre-wrap; font: 15px/1.5 system-ui, sans-serif; background: #fff; border: 1px solid #e3e3e3; border-radius: 10px; padding: 10px 12px; }
+  pre:empty { display: none; } button:disabled { opacity: .55; }
+</style>
+</head>
+<body>
+<h1>dropit</h1>
+<section id="setup">
+  <p>首次使用：请输入你自己的 dropit 服务器地址（必须是 https）。</p>
+  <input id="url" type="url" inputmode="url" autocomplete="url" placeholder="https://drop.example.com">
+  <button id="check" class="primary">连接</button>
+  <p id="setup-msg" class="err"></p>
+</section>
+<section id="login" hidden>
+  <p>在浏览器里确认这个验证码，然后回到这里：</p>
+  <p id="user-code" class="code"></p>
+  <button id="open">打开浏览器确认</button>
+  <p id="login-msg"></p>
+  <button id="reset1">更换服务器</button>
+</section>
+<section id="boot" hidden>
+  <p id="boot-msg">正在打开 dropit…</p>
+  <button id="retry" class="primary" hidden>重试</button>
+  <div id="settings" hidden>
+    <p class="hint" id="server-line"></p>
+    <button id="web" class="primary">返回网页版</button>
+    <button id="check-update">检查更新</button>
+    <p class="hint" id="update-line"></p>
+    <button id="logout">退出登录并更换服务器</button>
+    <p class="hint">在其他应用里点「分享 → dropit」可以直接发送文字、链接、图片和文件；网页版右下角的按钮里有「从剪贴板发送」。</p>
+  </div>
+</section>
+<section id="update" hidden>
+  <h2 id="upd-title">发现新版本</h2>
+  <p class="hint" id="upd-meta"></p>
+  <pre id="upd-notes"></pre>
+  <p id="upd-msg"></p>
+  <button id="upd-install" class="primary">下载并安装</button>
+  <button id="upd-later">稍后</button>
+  <button id="upd-skip">跳过这个版本</button>
+</section>
+<p class="hint" id="version"></p>
+<script type="module" src="app.js"></script>
+</body>
+</html>

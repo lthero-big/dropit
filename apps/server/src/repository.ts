@@ -93,6 +93,8 @@ export interface Repository {
   tokenSession(tokenHash: string, now: number, touch?: boolean): Session | undefined;
   renameAccessToken(id: string, userId: string, name: string): void;
   revokeAccessToken(id: string, userId?: string): void;
+  /** Removes a token that is already revoked or expired (404 if missing, 409 TOKEN_ACTIVE if still usable). */
+  deleteAccessToken(id: string, userId: string | undefined, now: number): void;
   createDevice(record: DeviceAuthorization): void;
   deviceForUserCode(userCodeHash: string, verificationId: string | undefined, now: number): DeviceAuthorization | undefined;
   decideDevice(id: string, userId: string, approve: boolean, now: number): void;
@@ -504,6 +506,14 @@ export class SqliteRepository implements Repository {
     const result = userId === undefined ? this.db.prepare('UPDATE access_tokens SET revoked=1 WHERE id=?').run(id) :
       this.db.prepare('UPDATE access_tokens SET revoked=1 WHERE id=? AND userId=?').run(id, userId);
     if (!result.changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  deleteAccessToken(id: string, userId: string | undefined, now: number) {
+    const row = (userId === undefined ? this.db.prepare('SELECT revoked, expiresAt FROM access_tokens WHERE id=?').get(id) :
+      this.db.prepare('SELECT revoked, expiresAt FROM access_tokens WHERE id=? AND userId=?').get(id, userId)) as
+      { revoked: number; expiresAt: number | null } | undefined;
+    if (!row) throw new ApiError(404, 'NOT_FOUND');
+    if (!row.revoked && (row.expiresAt === null || row.expiresAt > now)) throw new ApiError(409, 'TOKEN_ACTIVE');
+    this.db.prepare('DELETE FROM access_tokens WHERE id=?').run(id);
   }
   createDevice(record: DeviceAuthorization) {
     this.db.prepare(`INSERT INTO device_authorizations

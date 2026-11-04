@@ -8,6 +8,7 @@ import type { Server } from 'node:http';
 import Database from 'better-sqlite3';
 import { serve } from '@hono/node-server';
 import WebSocket from 'ws';
+import sharp from 'sharp';
 import { createBackend } from '../src/backend.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { hash, token, type AccessToken } from '../src/domain.js';
@@ -82,9 +83,18 @@ test('AC-J1/J2/J7: one-time 256-bit PAT, hashes only, scopes, expiry, last use, 
   assert.equal((await (await f.browser(`/api/admin/tokens?userId=${f.admin.user.id}`, 'GET', undefined, f.admin.cookie)).json()).tokens.length, 0);
   assert.equal((await f.browser(`/api/admin/tokens/${readonly.id}`, 'DELETE', undefined, f.admin.cookie)).status, 204);
   assert.equal((await f.request('/api/me', 'GET', undefined, bearer(readonly.token))).status, 401);
+  // RHEA-190 dl: revoked and expired tokens can be deleted for good; live ones must be revoked first.
+  assert.equal((await f.browser(`/api/tokens/${forever.id}?purge=1`, 'DELETE')).status, 409);
+  assert.equal((await f.request(`/api/tokens/${readonly.id}?purge=1`, 'DELETE', undefined, bearer(forever.token))).status, 403);
+  assert.equal((await f.browser(`/api/tokens/${readonly.id}?purge=1`, 'DELETE', undefined, f.admin.cookie)).status, 404);
+  assert.equal((await f.browser(`/api/tokens/${readonly.id}?purge=1`, 'DELETE')).status, 204);
+  assert.equal((await f.browser(`/api/tokens/${readonly.id}?purge=1`, 'DELETE')).status, 404);
+  assert.deepEqual((await (await f.browser('/api/tokens')).json()).tokens.map((entry: AccessToken) => entry.id), [forever.id]);
   const expiring = await f.pat({ expiresInDays: 1 });
   f.advance(86400000);
   assert.equal((await f.request('/api/me', 'GET', undefined, bearer(expiring.token))).status, 401);
+  f.repo.deleteAccessToken(expiring.id, f.member.user.id, f.time());
+  assert.equal(f.repo.accessTokens(f.member.user.id).some(entry => entry.id === expiring.id), false);
   assert.equal((await f.request('/api/me', 'GET', undefined, bearer(forever.token))).status, 200);
 });
 
@@ -371,4 +381,35 @@ test('schema v5 upgrades to machine auth without losing users, cookies or clips;
   assert.equal(repo.tokenSession(hash(raw), 3)?.user.id, 'u');
   assert(!(await readFile(path)).includes(Buffer.from(raw)));
   assert(!(await readFile(`${path}-wal`)).includes(Buffer.from(raw)));
+});
+
+test('RHEA-190 br: Android app flow - device-code token lists spaces/items, sends text and streams a shared file without Origin', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const d = await f.device({ name: 'dropit Android · Pixel', scopes: ['read', 'write'], expiresInDays: 365 });
+  const query = new URLSearchParams({ user_code: d.user_code, verification_id: d.verification_id });
+  assert.equal((await f.browser('/api/auth/device/approve', 'POST', Object.fromEntries(query))).status, 204);
+  f.advance(5000);
+  const issued = await (await f.request('/api/auth/device/token', 'POST', { device_code: d.device_code })).json();
+  const auth = bearer(issued.access_token);
+  const device = { 'x-dropit-device': 'and-abcdef123456', 'x-dropit-device-name': encodeURIComponent('dropit Android · Pixel'), 'x-dropit-device-kind': 'phone' };
+  const spaces = (await (await f.request('/api/spaces', 'GET', undefined, auth)).json()).spaces;
+  assert(spaces.some((space: { id: string }) => space.id === f.member.space.id));
+  const base = `/api/spaces/${f.member.space.id}`;
+  const sent = await f.request(`${base}/items/text`, 'POST', { text: '来自手机剪贴板' }, { ...auth, ...device });
+  assert.equal(sent.status, 201);
+  // Shared image, streamed by the native plugin with chunked encoding (no Content-Length, no Origin).
+  const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: '#f00' } }).png().toBuffer();
+  const stream = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(png)); controller.close(); } });
+  const file = await f.app.request(`${base}/items/file`, { method: 'POST', body: stream, duplex: 'half',
+    headers: { ...auth, ...device, 'content-type': 'image/png', 'x-file-name': encodeURIComponent('截图.png') } } as RequestInit);
+  assert.equal(file.status, 201);
+  const items = (await (await f.request(`${base}/items`, 'GET', undefined, auth)).json()).items;
+  const text = items.find((item: { kind: string }) => item.kind === 'text');
+  assert.equal(text.text, '来自手机剪贴板');
+  assert.deepEqual(text.device, { id: 'and-abcdef123456', name: 'dropit Android · Pixel', kind: 'phone' });
+  const image = items.find((item: { kind: string }) => item.kind === 'file');
+  assert.equal(image.filename, '截图.png'); assert.equal(image.size, png.length);
+  // Logging out from the app revokes only this device token.
+  assert.equal((await f.request('/api/auth/logout', 'POST', undefined, auth)).status, 204);
+  assert.equal((await f.request('/api/spaces', 'GET', undefined, auth)).status, 401);
 });

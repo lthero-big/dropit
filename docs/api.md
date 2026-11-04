@@ -551,6 +551,17 @@ logout/disable explicitly revalidate immediately. Limits: 8 sockets per IP and
 account, 256 total; slow consumers close 1013, shutdown 1001. Ping/pong checks run
 every 30s. Writes/withdrawals/expiry send events to the same authorized channel.
 
+## Android app updates (RHEA-190 au)
+
+Public, no sign-in. The operator publishes an APK with `node scripts/publish-android-apk.mjs <apk> --code <versionCode> --name <versionName> [--notes …]`,
+which writes `DATA_DIR/app/android/<file>.apk` and `latest.json`.
+
+- `GET /api/app/android/latest` → `200 { versionCode, versionName, notes, size, sha256, publishedAt, url }`
+  (`url` is `/api/app/android/download/<file>.apk`), or `404 NO_RELEASE` when nothing is published or the
+  APK on disk does not match the manifest size. `Cache-Control: no-store`.
+- `GET /api/app/android/download/<file>.apk` → the published APK only (`application/vnd.android.package-archive`,
+  `Content-Disposition: attachment`); any other name is `404 NO_RELEASE`.
+
 ## Error contract
 
 ```json
