@@ -61,6 +61,14 @@ function string(value: unknown, max = 200): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > max) throw new ApiError(400, 'INVALID_INPUT');
   return value;
 }
+function shareCursor(value: string | undefined) {
+  if (!value) return undefined;
+  const match = /^(\d{1,16}):([A-Za-z0-9-]{1,64})$/.exec(value);
+  if (!match) throw new ApiError(400, 'INVALID_INPUT');
+  const createdAt = Number(match[1]);
+  if (!Number.isSafeInteger(createdAt)) throw new ApiError(400, 'INVALID_INPUT');
+  return { createdAt, id: match[2] };
+}
 const oauthBrowserErrors = new Set([
   'OAUTH_STATE_INVALID', 'OAUTH_DENIED', 'OAUTH_PROVIDER_ERROR', 'INVITE_INVALID',
   'INVITATION_REQUIRED', 'USER_DISABLED', 'VERIFIED_EMAIL_REQUIRED', 'RATE_LIMITED', 'INTERNAL_ERROR',
@@ -356,6 +364,17 @@ export function createBackend(options: BackendOptions = {}) {
     return c.json({ ...record, token: raw }, 201);
   });
   app.get('/api/tokens', c => c.json({ tokens: repo.accessTokens(service.requireSession(c.get('session')).user.id) }));
+  app.get('/api/shares', c => c.json(service.managedShares(browserSession(c), shareCursor(c.req.query('cursor')))));
+  app.post('/api/shares/:shareId/revoke', c => {
+    limit(c, 'share-manage', config.rateUpload);
+    service.revokeManagedShare(browserSession(c), c.req.param('shareId')!);
+    return c.body(null, 204);
+  });
+  app.delete('/api/shares/:shareId', c => {
+    limit(c, 'share-manage', config.rateUpload);
+    service.deleteManagedShare(browserSession(c), c.req.param('shareId')!);
+    return c.body(null, 204);
+  });
   app.patch('/api/tokens/:id', async c => {
     const auth = browserSession(c);
     const body = await json(c, 2048);

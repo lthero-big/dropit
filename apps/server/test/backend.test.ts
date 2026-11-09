@@ -85,7 +85,7 @@ async function fixture(overrides: Partial<Config> = {}, providerName = 'github')
   const upload = (base: string, cookie: string, bytes: Uint8Array | string, mime = 'application/octet-stream', filename = 'test.bin') =>
     request(`${base}/items/file`, { method: 'POST', headers: { 'content-type': mime, 'x-file-name': encodeURIComponent(filename) }, body: typeof bytes === 'string' ? bytes : new Uint8Array(bytes) }, cookie);
   return { ...backend, request, json, start, finish, login, admin, invite, upload, directory,
-    exchanges: () => exchanges, advance: (ms: number) => { time += ms; },
+    exchanges: () => exchanges, now: () => time, advance: (ms: number) => { time += ms; },
     async dispose() { await backend.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
@@ -710,7 +710,7 @@ test('share links enforce token, expiry, revocation, view limits and owner-only 
   assert.equal(revoked.status, 404);
   assert.deepEqual(await revoked.json(), { error: { code: 'NOT_FOUND' } });
   await f.service.cleanup();
-  assert.equal((await (await f.request(`${base}/items/${itemId}/shares`, {}, admin.cookie)).json()).shares.some((row: { id: string }) => row.id === day.id), false);
+  assert.equal((await (await f.request(`${base}/items/${itemId}/shares`, {}, admin.cookie)).json()).shares.some((row: { id: string }) => row.id === day.id), true);
 
   const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: 'red' } }).png().toBuffer();
   const uploaded = await (await f.upload(base, member.cookie, png, 'image/png', 'shot.png')).json();
@@ -1460,5 +1460,95 @@ test('RHEA-190 step 7: migration 10 adds the per-browser room binding to old dat
   assert.equal(repo.deviceRoom('dh', 9999999999999), undefined);
   const check = new Database(path, { readonly: true });
   t.after(() => check.close());
-  assert.equal(check.pragma('user_version', { simple: true }), 17);
+  assert.equal(check.pragma('user_version', { simple: true }), 18);
+});
+
+test('RHEA-210: account share management isolates creators and keeps revocation history', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const { item } = await (await f.json(`${base}/items/text`, { text: '管理中的文本' }, admin.cookie)).json();
+  const create = async (expiresIn = 'never', maxViews: number | null = null) =>
+    (await (await f.json(`${base}/items/${item.id}/shares`, { expiresIn, maxViews }, admin.cookie)).json());
+  const history = await create();
+  const expiring = await create('1h');
+  const exhausted = await create('never', 1);
+  assert.equal((await f.request(`/api/s/${exhausted.token}`)).status, 200);
+  f.advance(3600001);
+
+  let listed = await (await f.request('/api/shares', {}, admin.cookie)).json();
+  assert.equal(listed.shares.length, 3);
+  assert.equal(JSON.stringify(listed).includes('tokenHash'), false);
+  assert.equal(listed.shares.find((share: { id: string }) => share.id === history.id).sourceName, '管理中的文本');
+  assert.equal(listed.shares.find((share: { id: string }) => share.id === expiring.id).state, 'expired');
+  assert.equal(listed.shares.find((share: { id: string }) => share.id === exhausted.id).state, 'exhausted');
+  assert.equal((await f.request(`/api/shares/${history.id}`, { method: 'DELETE' }, admin.cookie)).status, 409);
+
+  const invitation = await f.invite(admin.cookie, admin.space.id);
+  const member = await f.login('member', invitation.token);
+  assert.equal((await f.request('/api/shares', {}, member.cookie)).status, 200);
+  assert.deepEqual((await (await f.request('/api/shares', {}, member.cookie)).json()).shares, []);
+  assert.equal((await f.request(`/api/shares/${history.id}/revoke`, { method: 'POST' }, member.cookie)).status, 404);
+  assert.equal((await f.request(`/api/shares/${history.id}`, { method: 'DELETE' }, member.cookie)).status, 404);
+
+  assert.equal((await f.request(`/api/shares/${history.id}/revoke`, { method: 'POST' }, admin.cookie)).status, 204);
+  assert.equal((await f.request(`/api/s/${history.token}`)).status, 404);
+  f.repo.expire(f.now());
+  listed = await (await f.request('/api/shares', {}, admin.cookie)).json();
+  assert.equal(listed.shares.find((share: { id: string }) => share.id === history.id).state, 'revoked');
+
+  assert.equal((await f.request(`${base}/items/${item.id}`, { method: 'DELETE' }, admin.cookie)).status, 204);
+  listed = await (await f.request('/api/shares', {}, admin.cookie)).json();
+  const invalid = listed.shares.find((share: { id: string }) => share.id === exhausted.id);
+  assert.equal(invalid.state, 'source_unavailable');
+  assert.equal(invalid.sourceName, null);
+  assert.equal((await f.request(`/api/shares/${history.id}`, { method: 'DELETE' }, admin.cookie)).status, 204);
+  listed = await (await f.request('/api/shares', {}, admin.cookie)).json();
+  assert.equal(listed.shares.some((share: { id: string }) => share.id === history.id), false);
+});
+
+test('RHEA-210: account share management uses a bounded cursor page', async t => {
+  const f = await fixture({ rateUpload: 1000 }); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const { item } = await (await f.json(`${base}/items/text`, { text: '分页分享' }, admin.cookie)).json();
+  for (let index = 0; index < 51; index += 1) {
+    assert.equal((await f.json(`${base}/items/${item.id}/shares`, { expiresIn: 'never', maxViews: null }, admin.cookie)).status, 201);
+  }
+
+  const first = await (await f.request('/api/shares', {}, admin.cookie)).json();
+  assert.equal(first.shares.length, 50);
+  assert.equal(typeof first.nextCursor, 'string');
+  const second = await (await f.request(`/api/shares?cursor=${encodeURIComponent(first.nextCursor)}`, {}, admin.cookie)).json();
+  assert.equal(second.shares.length, 1);
+  assert.equal(second.nextCursor, null);
+});
+
+test('RHEA-210: schema v17 shares migrate without losing source-deletion history', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dropit-m18-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'dropit.sqlite');
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE users (id TEXT PRIMARY KEY);
+    CREATE TABLE spaces (id TEXT PRIMARY KEY,name TEXT NOT NULL,ownerId TEXT,expiresAt INTEGER,roomKey TEXT,closedAt INTEGER);
+    CREATE TABLE members (spaceId TEXT,userId TEXT);
+    CREATE TABLE items (id TEXT PRIMARY KEY,spaceId TEXT,kind TEXT,text TEXT,filename TEXT,expiresAt INTEGER);
+    CREATE TABLE shares (id TEXT PRIMARY KEY,tokenHash TEXT UNIQUE NOT NULL,itemId TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+      spaceId TEXT NOT NULL,createdBy TEXT REFERENCES users(id),expiresAt INTEGER,maxViews INTEGER,views INTEGER NOT NULL,revoked INTEGER NOT NULL,
+      createdAt INTEGER NOT NULL,downloadTicketHash TEXT,downloadTicketExpiresAt INTEGER);
+    INSERT INTO users VALUES ('u');
+    INSERT INTO spaces VALUES ('s','个人空间','u',NULL,NULL,NULL);
+    INSERT INTO members VALUES ('s','u');
+    INSERT INTO items VALUES ('i','s','text','旧条目',NULL,9999999999999);
+    INSERT INTO shares VALUES ('share','hash','i','s','u',NULL,NULL,0,0,1,NULL,NULL);
+    PRAGMA user_version=17;
+  `);
+  db.close();
+  const repo = new SqliteRepository(path);
+  t.after(() => repo.close());
+  assert.equal(repo.managedShares('u', undefined, 2)[0]?.sourceText, '旧条目');
+  repo.deleteItem('i');
+  assert.equal(repo.managedShares('u', undefined, 2)[0]?.sourceItemId, null);
+  const check = new Database(path, { readonly: true });
+  t.after(() => check.close());
+  assert.equal(check.pragma('user_version', { simple: true }), 18);
 });

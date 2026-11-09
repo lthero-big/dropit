@@ -273,6 +273,14 @@ export interface ShareCreated extends ShareLink {
   url: string
 }
 
+export type ManagedShareState = 'active' | 'expired' | 'exhausted' | 'revoked' | 'source_unavailable'
+
+export interface ManagedShare extends ShareLink {
+  state: ManagedShareState
+  sourceName: string | null
+  spaceName: string | null
+}
+
 export interface PublicShare {
   item: {
     kind: 'text' | 'file'

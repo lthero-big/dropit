@@ -252,7 +252,7 @@ test('migration 17 upgrades a schema-16 database in place: backup, members stay 
   assert.equal(repo.adminRooms(1)[0].createdAt, null);
   const check = new Database(path, { readonly: true });
   t.after(() => check.close());
-  assert.equal(check.pragma('user_version', { simple: true }), 17);
+  assert.equal(check.pragma('user_version', { simple: true }), 18);
   // opening it again is a no-op
   repo.close();
   const again = new SqliteRepository(path);

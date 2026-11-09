@@ -238,3 +238,30 @@ ALTER TABLE spaces ADD COLUMN closedAt INTEGER;
 ALTER TABLE spaces ADD COLUMN createdBy TEXT;
 PRAGMA user_version=17;
 `;
+
+// Share history is account-managed. Keep the link record after its source item
+// is removed, but retain no source content in the share itself.
+export const migration18 = `
+ALTER TABLE shares RENAME TO shares_v17;
+CREATE TABLE shares (
+  id TEXT PRIMARY KEY,
+  tokenHash TEXT UNIQUE NOT NULL,
+  itemId TEXT NOT NULL,
+  spaceId TEXT NOT NULL,
+  createdBy TEXT REFERENCES users(id),
+  expiresAt INTEGER,
+  maxViews INTEGER CHECK (maxViews IS NULL OR maxViews > 0),
+  views INTEGER NOT NULL DEFAULT 0,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  createdAt INTEGER NOT NULL,
+  downloadTicketHash TEXT,
+  downloadTicketExpiresAt INTEGER
+);
+INSERT INTO shares (id,tokenHash,itemId,spaceId,createdBy,expiresAt,maxViews,views,revoked,createdAt,downloadTicketHash,downloadTicketExpiresAt)
+  SELECT id,tokenHash,itemId,spaceId,createdBy,expiresAt,maxViews,views,revoked,createdAt,downloadTicketHash,downloadTicketExpiresAt FROM shares_v17;
+DROP TABLE shares_v17;
+CREATE INDEX share_item ON shares(itemId);
+CREATE INDEX share_space ON shares(spaceId);
+CREATE INDEX share_creator ON shares(createdBy,createdAt DESC,id DESC);
+PRAGMA user_version=18;
+`;

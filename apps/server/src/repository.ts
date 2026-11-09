@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ApiError, ROOM_CODE_ALPHABET, randomRoomCode, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type MemberRole, type SpaceRole, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14, migration15, migration16, migration17 } from './migrations.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14, migration15, migration16, migration17, migration18 } from './migrations.js';
 import type { RegistrationPolicy } from './password.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
@@ -12,6 +12,12 @@ type DeviceRow = Omit<DeviceAuthorization, 'scopes'> & { scopes: string };
 type TokenRow = Omit<AccessToken, 'scopes'> & { scopes: string };
 export type AdminRoomRow = { id: string; roomCode: string | null; ownerEmail: string | null; createdAt: number | null; lastActiveAt: number | null;
   expiresAt: number; closedAt: number | null; hasPin: number; itemCount: number; bytes: number; device: number };
+export type ShareCursor = { createdAt: number; id: string };
+export type ManagedShareRow = SharePublic & {
+  sourceItemId: string | null; sourceKind: Item['kind'] | null; sourceText: string | null; sourceFilename: string | null;
+  sourceExpiresAt: number | null; sourceSpaceId: string | null; sourceSpaceName: string | null;
+  sourceSpaceExpiresAt: number | null; sourceSpaceClosedAt: number | null; sourceVisible: number;
+};
 type DevicePoll = { error: 'expired_token' | 'access_denied' | 'slow_down' | 'authorization_pending'; interval?: number } | { token: AccessToken };
 
 function toUser(row: UserRow): User {
@@ -167,6 +173,9 @@ export interface Repository {
   sharesForItem(itemId: string): SharePublic[];
   shareById(id: string): (SharePublic & { spaceId: string; userId: string | null }) | undefined;
   revokeShare(id: string, spaceId: string): void;
+  managedShares(userId: string, cursor: ShareCursor | undefined, limit: number): ManagedShareRow[];
+  revokeOwnedShare(id: string, userId: string): void;
+  deleteOwnedShare(id: string, userId: string): void;
   openShare(tokenHash: string, now: number, ticketHash: string, ticketExpiresAt: number): { item: Item; linkExpiresAt: number | null; maxViews: number | null; views: number } | undefined;
   readShare(tokenHash: string, now: number, accessHash: string | null): Item | undefined;
   expire(now: number): Item[];
@@ -185,7 +194,7 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 17) throw new Error(`Unsupported schema version ${version}`);
+    if (version > 18) throw new Error(`Unsupported schema version ${version}`);
     // RHEA-190 auth step 4: copy the database before any migration touches it (<file>.pre-v<N>-<time>.bak, next to it).
     if (version > 0 && version < 17 && path !== ':memory:' && existsSync(path)) {
       const backup = `${path}.pre-v${version}-${new Date().toISOString().replace(/[:.]/g, '-')}.bak`;
@@ -218,6 +227,7 @@ export class SqliteRepository implements Repository {
       }
     })();
     if (version < 17) this.db.transaction(() => { this.db.exec(migration17); })();
+    if (version < 18) this.db.transaction(() => { this.db.exec(migration18); })();
     this.db.pragma('foreign_keys = ON');
   }
   setting(key: string) {
@@ -945,7 +955,33 @@ export class SqliteRepository implements Repository {
       FROM shares s JOIN items i ON i.id=s.itemId WHERE s.id=?`).get(id) as (SharePublic & { spaceId: string; userId: string | null }) | undefined;
   }
   revokeShare(id: string, spaceId: string) {
-    if (!this.db.prepare('UPDATE shares SET revoked=1 WHERE id=? AND spaceId=?').run(id, spaceId).changes) throw new ApiError(404, 'NOT_FOUND');
+    if (!this.db.prepare('UPDATE shares SET revoked=1,downloadTicketHash=NULL,downloadTicketExpiresAt=NULL WHERE id=? AND spaceId=?').run(id, spaceId).changes) throw new ApiError(404, 'NOT_FOUND');
+  }
+  managedShares(userId: string, cursor: ShareCursor | undefined, limit: number) {
+    const after = cursor ? 'AND (s.createdAt<? OR (s.createdAt=? AND s.id<?))' : '';
+    const values: (string | number)[] = [userId];
+    if (cursor) values.push(cursor.createdAt, cursor.createdAt, cursor.id);
+    values.push(limit);
+    return this.db.prepare(`SELECT s.id,s.itemId,s.expiresAt,s.maxViews,s.views,s.revoked,s.createdAt,
+      i.id AS sourceItemId,i.kind AS sourceKind,i.text AS sourceText,i.filename AS sourceFilename,i.expiresAt AS sourceExpiresAt,
+      sp.id AS sourceSpaceId,sp.name AS sourceSpaceName,sp.expiresAt AS sourceSpaceExpiresAt,sp.closedAt AS sourceSpaceClosedAt,
+      CASE WHEN sp.ownerId=? OR EXISTS (SELECT 1 FROM members m WHERE m.spaceId=sp.id AND m.userId=?) THEN 1 ELSE 0 END AS sourceVisible
+      FROM shares s LEFT JOIN items i ON i.id=s.itemId LEFT JOIN spaces sp ON sp.id=s.spaceId
+      WHERE s.createdBy=? ${after} ORDER BY s.createdAt DESC,s.id DESC LIMIT ?`)
+      .all(userId, userId, ...values) as ManagedShareRow[];
+  }
+  revokeOwnedShare(id: string, userId: string) {
+    if (!this.db.prepare('UPDATE shares SET revoked=1,downloadTicketHash=NULL,downloadTicketExpiresAt=NULL WHERE id=? AND createdBy=?').run(id, userId).changes) {
+      throw new ApiError(404, 'NOT_FOUND');
+    }
+  }
+  deleteOwnedShare(id: string, userId: string) {
+    this.db.transaction(() => {
+      const share = this.db.prepare('SELECT revoked FROM shares WHERE id=? AND createdBy=?').get(id, userId) as { revoked: number } | undefined;
+      if (!share) throw new ApiError(404, 'NOT_FOUND');
+      if (!share.revoked) throw new ApiError(409, 'SHARE_NOT_REVOKED');
+      this.db.prepare('DELETE FROM shares WHERE id=? AND createdBy=?').run(id, userId);
+    })();
   }
   private activeShare(tokenHash: string, now: number) {
     const share = this.db.prepare('SELECT * FROM shares WHERE tokenHash=?').get(tokenHash) as ShareLink | undefined;
@@ -988,7 +1024,6 @@ export class SqliteRepository implements Repository {
       this.db.prepare('DELETE FROM device_authorizations WHERE expiresAt<=?').run(now);
       // spent invites stay: they count against their creator's invite limit and are the usage history
       this.db.prepare('DELETE FROM invites WHERE uses=0 AND (expiresAt<=? OR revoked=1)').run(now);
-      this.db.prepare('DELETE FROM shares WHERE revoked=1 OR (expiresAt IS NOT NULL AND expiresAt<=?)').run(now);
       return items;
     })();
   }
