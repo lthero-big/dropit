@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ApiError, ROOM_CODE_ALPHABET, randomRoomCode, type AccessToken, type BrowserSession, type DeviceAuthorization, type Flow, type Identity, type Invite, type LinkedIdentity, type MemberRole, type SpaceRole, type OAuthApp, type Item, type ItemDevice, type Session, type SessionMeta, type ShareLink, type SharePublic, type Space, type UploadSession, type UploadChunk, type User } from './domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14, migration15, migration16, migration17, migration18 } from './migrations.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration10, migration11, migration12, migration13, migration14, migration15, migration16, migration17, migration18, migration19 } from './migrations.js';
 import type { RegistrationPolicy } from './password.js';
 import type { LimitAudit, LimitChange, LimitKey, LimitOverrides } from './limits.js';
 
@@ -16,8 +16,9 @@ export type ShareCursor = { createdAt: number; id: string };
 export type ManagedShareRow = SharePublic & {
   sourceItemId: string | null; sourceKind: Item['kind'] | null; sourceText: string | null; sourceFilename: string | null;
   sourceExpiresAt: number | null; sourceSpaceId: string | null; sourceSpaceName: string | null;
-  sourceSpaceExpiresAt: number | null; sourceSpaceClosedAt: number | null; sourceVisible: number;
+  sourceSpaceExpiresAt: number | null; sourceSpaceClosedAt: number | null; sourceVisible: number; hasCopyToken: number;
 };
+type ManagedShareLinkRow = ManagedShareRow & { copyToken: string | null };
 type DevicePoll = { error: 'expired_token' | 'access_denied' | 'slow_down' | 'authorization_pending'; interval?: number } | { token: AccessToken };
 
 function toUser(row: UserRow): User {
@@ -174,6 +175,7 @@ export interface Repository {
   shareById(id: string): (SharePublic & { spaceId: string; userId: string | null }) | undefined;
   revokeShare(id: string, spaceId: string): void;
   managedShares(userId: string, cursor: ShareCursor | undefined, limit: number): ManagedShareRow[];
+  ownedManagedShare(id: string, userId: string): ManagedShareLinkRow | undefined;
   revokeOwnedShare(id: string, userId: string): void;
   deleteOwnedShare(id: string, userId: string): void;
   openShare(tokenHash: string, now: number, ticketHash: string, ticketExpiresAt: number): { item: Item; linkExpiresAt: number | null; maxViews: number | null; views: number } | undefined;
@@ -194,7 +196,7 @@ export class SqliteRepository implements Repository {
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version > 18) throw new Error(`Unsupported schema version ${version}`);
+    if (version > 19) throw new Error(`Unsupported schema version ${version}`);
     // RHEA-190 auth step 4: copy the database before any migration touches it (<file>.pre-v<N>-<time>.bak, next to it).
     if (version > 0 && version < 17 && path !== ':memory:' && existsSync(path)) {
       const backup = `${path}.pre-v${version}-${new Date().toISOString().replace(/[:.]/g, '-')}.bak`;
@@ -228,6 +230,7 @@ export class SqliteRepository implements Repository {
     })();
     if (version < 17) this.db.transaction(() => { this.db.exec(migration17); })();
     if (version < 18) this.db.transaction(() => { this.db.exec(migration18); })();
+    if (version < 19) this.db.transaction(() => { this.db.exec(migration19); })();
     this.db.pragma('foreign_keys = ON');
   }
   setting(key: string) {
@@ -944,8 +947,8 @@ export class SqliteRepository implements Repository {
     }).immediate();
   }
   createShare(share: ShareLink) {
-    this.db.prepare(`INSERT INTO shares (id,tokenHash,itemId,spaceId,createdBy,expiresAt,maxViews,views,revoked,createdAt,downloadTicketHash,downloadTicketExpiresAt)
-      VALUES (@id,@tokenHash,@itemId,@spaceId,@createdBy,@expiresAt,@maxViews,@views,@revoked,@createdAt,@downloadTicketHash,@downloadTicketExpiresAt)`).run(share);
+    this.db.prepare(`INSERT INTO shares (id,tokenHash,itemId,spaceId,createdBy,expiresAt,maxViews,views,revoked,createdAt,downloadTicketHash,downloadTicketExpiresAt,copyToken)
+      VALUES (@id,@tokenHash,@itemId,@spaceId,@createdBy,@expiresAt,@maxViews,@views,@revoked,@createdAt,@downloadTicketHash,@downloadTicketExpiresAt,@copyToken)`).run(share);
   }
   sharesForItem(itemId: string) {
     return this.db.prepare('SELECT id,itemId,expiresAt,maxViews,views,revoked,createdAt FROM shares WHERE itemId=? ORDER BY createdAt DESC,id DESC').all(itemId) as SharePublic[];
@@ -962,13 +965,21 @@ export class SqliteRepository implements Repository {
     const values: (string | number)[] = [userId];
     if (cursor) values.push(cursor.createdAt, cursor.createdAt, cursor.id);
     values.push(limit);
-    return this.db.prepare(`SELECT s.id,s.itemId,s.expiresAt,s.maxViews,s.views,s.revoked,s.createdAt,
+    return this.db.prepare(`SELECT s.id,s.itemId,s.expiresAt,s.maxViews,s.views,s.revoked,s.createdAt,s.copyToken IS NOT NULL AS hasCopyToken,
       i.id AS sourceItemId,i.kind AS sourceKind,i.text AS sourceText,i.filename AS sourceFilename,i.expiresAt AS sourceExpiresAt,
       sp.id AS sourceSpaceId,sp.name AS sourceSpaceName,sp.expiresAt AS sourceSpaceExpiresAt,sp.closedAt AS sourceSpaceClosedAt,
       CASE WHEN sp.ownerId=? OR EXISTS (SELECT 1 FROM members m WHERE m.spaceId=sp.id AND m.userId=?) THEN 1 ELSE 0 END AS sourceVisible
       FROM shares s LEFT JOIN items i ON i.id=s.itemId LEFT JOIN spaces sp ON sp.id=s.spaceId
       WHERE s.createdBy=? ${after} ORDER BY s.createdAt DESC,s.id DESC LIMIT ?`)
       .all(userId, userId, ...values) as ManagedShareRow[];
+  }
+  ownedManagedShare(id: string, userId: string) {
+    return this.db.prepare(`SELECT s.id,s.itemId,s.expiresAt,s.maxViews,s.views,s.revoked,s.createdAt,s.copyToken,s.copyToken IS NOT NULL AS hasCopyToken,
+      i.id AS sourceItemId,i.kind AS sourceKind,i.text AS sourceText,i.filename AS sourceFilename,i.expiresAt AS sourceExpiresAt,
+      sp.id AS sourceSpaceId,sp.name AS sourceSpaceName,sp.expiresAt AS sourceSpaceExpiresAt,sp.closedAt AS sourceSpaceClosedAt,
+      CASE WHEN sp.ownerId=? OR EXISTS (SELECT 1 FROM members m WHERE m.spaceId=sp.id AND m.userId=?) THEN 1 ELSE 0 END AS sourceVisible
+      FROM shares s LEFT JOIN items i ON i.id=s.itemId LEFT JOIN spaces sp ON sp.id=s.spaceId
+      WHERE s.id=? AND s.createdBy=?`).get(userId, userId, id, userId) as ManagedShareLinkRow | undefined;
   }
   revokeOwnedShare(id: string, userId: string) {
     if (!this.db.prepare('UPDATE shares SET revoked=1,downloadTicketHash=NULL,downloadTicketExpiresAt=NULL WHERE id=? AND createdBy=?').run(id, userId).changes) {

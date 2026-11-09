@@ -1136,7 +1136,7 @@ test('schema v3 migrates share links without dropping items', async t => {
   assert.equal(repo.item('i', Date.now())?.text, 'kept');
   repo.createShare({
     id: 'share', tokenHash: 'hash', itemId: 'i', spaceId: 's', createdBy: 'u', expiresAt: null,
-    maxViews: 1, views: 0, revoked: 0, createdAt: 50, downloadTicketHash: null, downloadTicketExpiresAt: null,
+    maxViews: 1, views: 0, revoked: 0, createdAt: 50, downloadTicketHash: null, downloadTicketExpiresAt: null, copyToken: null,
   });
   assert.equal(repo.sharesForItem('i')[0]?.maxViews, 1);
   assert.equal(repo.shareById('share')?.userId, 'u');
@@ -1460,7 +1460,7 @@ test('RHEA-190 step 7: migration 10 adds the per-browser room binding to old dat
   assert.equal(repo.deviceRoom('dh', 9999999999999), undefined);
   const check = new Database(path, { readonly: true });
   t.after(() => check.close());
-  assert.equal(check.pragma('user_version', { simple: true }), 18);
+  assert.equal(check.pragma('user_version', { simple: true }), 19);
 });
 
 test('RHEA-210: account share management isolates creators and keeps revocation history', async t => {
@@ -1478,9 +1478,14 @@ test('RHEA-210: account share management isolates creators and keeps revocation 
   let listed = await (await f.request('/api/shares', {}, admin.cookie)).json();
   assert.equal(listed.shares.length, 3);
   assert.equal(JSON.stringify(listed).includes('tokenHash'), false);
+  assert.equal(JSON.stringify(listed).includes(history.token), false);
+  assert.equal(JSON.stringify(listed).includes('copyToken'), false);
+  assert.equal(listed.shares.find((share: { id: string }) => share.id === history.id).copyStatus, 'available');
   assert.equal(listed.shares.find((share: { id: string }) => share.id === history.id).sourceName, '管理中的文本');
   assert.equal(listed.shares.find((share: { id: string }) => share.id === expiring.id).state, 'expired');
+  assert.equal(listed.shares.find((share: { id: string }) => share.id === expiring.id).copyStatus, 'unavailable');
   assert.equal(listed.shares.find((share: { id: string }) => share.id === exhausted.id).state, 'exhausted');
+  assert.equal(listed.shares.find((share: { id: string }) => share.id === exhausted.id).copyStatus, 'unavailable');
   assert.equal((await f.request(`/api/shares/${history.id}`, { method: 'DELETE' }, admin.cookie)).status, 409);
 
   const invitation = await f.invite(admin.cookie, admin.space.id);
@@ -1506,6 +1511,35 @@ test('RHEA-210: account share management isolates creators and keeps revocation 
   assert.equal(listed.shares.some((share: { id: string }) => share.id === history.id), false);
 });
 
+test('RHEA-210: an owner can copy the unchanged recoverable link without exposing it in history', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const { item } = await (await f.json(`${base}/items/text`, { text: '可再次复制的链接' }, admin.cookie)).json();
+  const created = await (await f.json(`${base}/items/${item.id}/shares`, { expiresIn: 'never', maxViews: 5 }, admin.cookie)).json();
+  const before = await (await f.request('/api/shares', {}, admin.cookie)).json();
+  const beforeShare = before.shares.find((share: { id: string }) => share.id === created.id);
+  assert.equal(beforeShare.copyStatus, 'available');
+  assert.equal(JSON.stringify(before).includes(created.token), false);
+  assert.equal((await f.request(`/api/shares/${created.id}/link`)).status, 401);
+
+  const link = await f.request(`/api/shares/${created.id}/link`, {}, admin.cookie);
+  assert.equal(link.status, 200);
+  assert.equal(link.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await link.json(), { url: created.url });
+  assert.deepEqual(await (await f.request(`/api/shares/${created.id}/link`, {}, admin.cookie)).json(), { url: created.url });
+  const after = await (await f.request('/api/shares', {}, admin.cookie)).json();
+  const afterShare = after.shares.find((share: { id: string }) => share.id === created.id);
+  assert.deepEqual({ views: afterShare.views, expiresAt: afterShare.expiresAt }, { views: beforeShare.views, expiresAt: beforeShare.expiresAt });
+
+  const invitation = await f.invite(admin.cookie, admin.space.id);
+  const member = await f.login('member', invitation.token);
+  const memberUser = f.repo.users().find(user => user.email === 'member@example.com')!;
+  f.repo.updateUser(memberUser.id, { role: 'admin' });
+  assert.equal((await f.request(`/api/shares/${created.id}/link`, {}, member.cookie)).status, 404);
+  assert.equal((await f.request(`/api/shares/${created.id}/revoke`, { method: 'POST' }, admin.cookie)).status, 204);
+  assert.equal((await f.request(`/api/shares/${created.id}/link`, {}, admin.cookie)).status, 404);
+});
+
 test('RHEA-210: account share management uses a bounded cursor page', async t => {
   const f = await fixture({ rateUpload: 1000 }); t.after(() => f.dispose());
   const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
@@ -1522,7 +1556,7 @@ test('RHEA-210: account share management uses a bounded cursor page', async t =>
   assert.equal(second.nextCursor, null);
 });
 
-test('RHEA-210: schema v17 shares migrate without losing source-deletion history', async t => {
+test('RHEA-210: schema v18 shares gain a null copy token without losing source-deletion history', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'dropit-m18-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, 'dropit.sqlite');
@@ -1540,15 +1574,16 @@ test('RHEA-210: schema v17 shares migrate without losing source-deletion history
     INSERT INTO members VALUES ('s','u');
     INSERT INTO items VALUES ('i','s','text','旧条目',NULL,9999999999999);
     INSERT INTO shares VALUES ('share','hash','i','s','u',NULL,NULL,0,0,1,NULL,NULL);
-    PRAGMA user_version=17;
+    PRAGMA user_version=18;
   `);
   db.close();
   const repo = new SqliteRepository(path);
   t.after(() => repo.close());
   assert.equal(repo.managedShares('u', undefined, 2)[0]?.sourceText, '旧条目');
+  assert.equal(repo.managedShares('u', undefined, 2)[0]?.hasCopyToken, 0);
   repo.deleteItem('i');
-  assert.equal(repo.managedShares('u', undefined, 2)[0]?.sourceItemId, null);
+  assert.equal(repo.managedShares('u', undefined, 2)[0]?.sourceItemId, undefined);
   const check = new Database(path, { readonly: true });
   t.after(() => check.close());
-  assert.equal(check.pragma('user_version', { simple: true }), 18);
+  assert.equal(check.pragma('user_version', { simple: true }), 19);
 });

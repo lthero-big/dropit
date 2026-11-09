@@ -4,7 +4,7 @@ import type { Config } from './config.js';
 import { ApiError, MAX_GROUPS, cleanFilename, cleanGroupName, hash, isShortToken, publicItem, publicShareItem, randomRoomCode, shortToken, token, type Invite, type Item, type ItemMeta, type ManagedShare, type MemberRole, type Session, type SharePublic, type Space } from './domain.js';
 import type { FileStorage } from './files.js';
 import type { Broadcaster } from './events.js';
-import type { Repository, ShareCursor } from './repository.js';
+import type { ManagedShareRow, Repository, ShareCursor } from './repository.js';
 import { sniffRaster } from './media.js';
 import { UploadService } from './uploads.js';
 import { DEFAULT_SPACE_INVITE_LIMIT } from './invites.js';
@@ -132,7 +132,7 @@ export class ClipboardService {
     const share = {
       id: randomUUID(), tokenHash: hash(raw), itemId: item.id, spaceId: space.id, createdBy: session?.user.id ?? null,
       expiresAt: this.shareExpires(expiresIn), maxViews, views: 0, revoked: 0, createdAt: this.now(),
-      downloadTicketHash: null, downloadTicketExpiresAt: null,
+      downloadTicketHash: null, downloadTicketExpiresAt: null, copyToken: raw,
     };
     for (let attempt = 0; ; attempt++) {
       try { this.repo.createShare(share); break; }
@@ -141,6 +141,7 @@ export class ClipboardService {
         if (!unique || attempt >= 12) throw error;
         raw = shortToken();
         share.tokenHash = hash(raw);
+        share.copyToken = raw;
       }
     }
     return {
@@ -164,22 +165,30 @@ export class ClipboardService {
     const auth = this.requireSession(session);
     const now = this.now();
     const rows = this.repo.managedShares(auth.user.id, cursor, 51);
-    const shares: ManagedShare[] = rows.slice(0, 50).map((share) => {
-      const sourceUnavailable = !share.sourceItemId || !share.sourceSpaceId || !share.sourceVisible ||
-        (share.sourceExpiresAt !== null && share.sourceExpiresAt <= now) ||
-        (share.sourceSpaceExpiresAt !== null && share.sourceSpaceExpiresAt <= now) || share.sourceSpaceClosedAt !== null;
-      const state = share.revoked ? 'revoked' : sourceUnavailable ? 'source_unavailable' :
-        share.expiresAt !== null && share.expiresAt <= now ? 'expired' :
-          share.maxViews !== null && share.views >= share.maxViews ? 'exhausted' : 'active';
-      const sourceName = sourceUnavailable ? null : share.sourceKind === 'file'
-        ? share.sourceFilename || '未命名文件'
-        : share.sourceText?.replace(/\s+/g, ' ').trim().slice(0, 80) || '文本条目';
-      return { id: share.id, itemId: share.itemId, expiresAt: share.expiresAt, maxViews: share.maxViews,
-        views: share.views, revoked: share.revoked, createdAt: share.createdAt, state,
-        sourceName, spaceName: share.sourceVisible && share.sourceSpaceId ? share.sourceSpaceName : null };
-    });
+    const shares = rows.slice(0, 50).map((share) => this.managedShare(share, now));
     const last = shares.at(-1);
     return { shares, nextCursor: rows.length > shares.length && last ? `${last.createdAt}:${last.id}` : null };
+  }
+  private managedShare(share: ManagedShareRow, now: number): ManagedShare {
+    const sourceUnavailable = !share.sourceItemId || !share.sourceSpaceId || !share.sourceVisible ||
+      (share.sourceExpiresAt !== null && share.sourceExpiresAt <= now) ||
+      (share.sourceSpaceExpiresAt !== null && share.sourceSpaceExpiresAt <= now) || share.sourceSpaceClosedAt !== null;
+    const state = share.revoked ? 'revoked' : sourceUnavailable ? 'source_unavailable' :
+      share.expiresAt !== null && share.expiresAt <= now ? 'expired' :
+        share.maxViews !== null && share.views >= share.maxViews ? 'exhausted' : 'active';
+    const sourceName = sourceUnavailable ? null : share.sourceKind === 'file'
+      ? share.sourceFilename || '未命名文件'
+      : share.sourceText?.replace(/\s+/g, ' ').trim().slice(0, 80) || '文本条目';
+    return { id: share.id, itemId: share.itemId, expiresAt: share.expiresAt, maxViews: share.maxViews,
+      views: share.views, revoked: share.revoked, createdAt: share.createdAt, state,
+      copyStatus: state !== 'active' ? 'unavailable' : share.hasCopyToken ? 'available' : 'legacy',
+      sourceName, spaceName: share.sourceVisible && share.sourceSpaceId ? share.sourceSpaceName : null };
+  }
+  managedShareLink(session: Session | undefined, shareId: string, origin = this.config.origin) {
+    const auth = this.requireSession(session);
+    const share = this.repo.ownedManagedShare(shareId, auth.user.id);
+    if (!share || !share.copyToken || this.managedShare(share, this.now()).state !== 'active') throw new ApiError(404, 'NOT_FOUND');
+    return { url: `${origin}/s/${share.copyToken}` };
   }
   revokeManagedShare(session: Session | undefined, shareId: string) {
     this.repo.revokeOwnedShare(shareId, this.requireSession(session).user.id);

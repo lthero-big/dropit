@@ -365,6 +365,12 @@ export function createBackend(options: BackendOptions = {}) {
   });
   app.get('/api/tokens', c => c.json({ tokens: repo.accessTokens(service.requireSession(c.get('session')).user.id) }));
   app.get('/api/shares', c => c.json(service.managedShares(browserSession(c), shareCursor(c.req.query('cursor')))));
+  app.get('/api/shares/:shareId/link', c => {
+    const auth = browserSession(c);
+    limit(c, 'share-manage', config.rateUpload);
+    c.header('Cache-Control', 'no-store');
+    return c.json(service.managedShareLink(auth, c.req.param('shareId')!, originFor(c)));
+  });
   app.post('/api/shares/:shareId/revoke', c => {
     limit(c, 'share-manage', config.rateUpload);
     service.revokeManagedShare(browserSession(c), c.req.param('shareId')!);
