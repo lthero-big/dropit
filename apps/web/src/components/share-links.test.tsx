@@ -157,11 +157,12 @@ describe('share link management', () => {
     expect(disabled(within(availableRow).getByRole('button', { name: '复制链接' }))).toBe(false)
   })
 
-  it('keeps the row retryable when clipboard and fallback copy both fail', async () => {
+  it('cleans up failed clipboard fallbacks and keeps the row retryable', async () => {
     const available = share('available')
     const clipboard = vi.fn<Clipboard['writeText']>().mockRejectedValue(new Error('clipboard denied'))
+    const fallback = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(false).mockReturnValueOnce(true)
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: clipboard } })
-    Object.defineProperty(document, 'execCommand', { configurable: true, value: vi.fn(() => false) })
+    Object.defineProperty(document, 'execCommand', { configurable: true, value: fallback })
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = requestUrl(input)
       if (url === '/api/shares') return Promise.resolve(json({ shares: [available], nextCursor: null }))
@@ -175,5 +176,38 @@ describe('share link management', () => {
     fireEvent.click(within(availableRow).getByRole('button', { name: '复制链接' }))
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('复制链接失败，请重试'))
     expect(disabled(within(availableRow).getByRole('button', { name: '复制链接' }))).toBe(false)
+    expect(document.querySelectorAll('body > textarea')).toHaveLength(0)
+    expect(toast.success).not.toHaveBeenCalled()
+
+    fireEvent.click(within(availableRow).getByRole('button', { name: '复制链接' }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(2))
+    expect(document.querySelectorAll('body > textarea')).toHaveLength(0)
+
+    fireEvent.click(within(availableRow).getByRole('button', { name: '复制链接' }))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('链接已复制'))
+    expect(fallback).toHaveBeenCalledTimes(3)
+    expect(document.querySelectorAll('body > textarea')).toHaveLength(0)
+  })
+
+  it('cleans up the fallback textarea when execCommand throws', async () => {
+    const available = share('available')
+    const clipboard = vi.fn<Clipboard['writeText']>().mockRejectedValue(new Error('clipboard denied'))
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: clipboard } })
+    Object.defineProperty(document, 'execCommand', { configurable: true, value: vi.fn(() => { throw new Error('copy unavailable') }) })
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = requestUrl(input)
+      if (url === '/api/shares') return Promise.resolve(json({ shares: [available], nextCursor: null }))
+      if (url === '/api/shares/available/link') return Promise.resolve(json({ url: 'https://dropit.example/s/Abc234' }))
+      return Promise.resolve(json({ error: { code: 'NOT_FOUND' } }, 404))
+    }))
+
+    render(<ThemeProvider><ShareLinks /></ThemeProvider>)
+    await screen.findByText('来源 available')
+    const availableRow = row('available')
+    fireEvent.click(within(availableRow).getByRole('button', { name: '复制链接' }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('复制链接失败，请重试'))
+    expect(disabled(within(availableRow).getByRole('button', { name: '复制链接' }))).toBe(false)
+    expect(toast.success).not.toHaveBeenCalled()
+    expect(document.querySelectorAll('body > textarea')).toHaveLength(0)
   })
 })

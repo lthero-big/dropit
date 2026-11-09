@@ -12,11 +12,14 @@ import WebSocket from 'ws';
 import sharp from 'sharp';
 import { createBackend } from '../src/backend.js';
 import { loadConfig, type Config } from '../src/config.js';
-import { ApiError, hash, type Identity } from '../src/domain.js';
-import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9 } from '../src/migrations.js';
+import { ApiError, hash, type Identity, type Session } from '../src/domain.js';
+import { migration1, migration2, migration3, migration4, migration5, migration6, migration7, migration8, migration9, migration18 } from '../src/migrations.js';
 import type { OAuthProvider } from '../src/oauth.js';
 import { parseByteRange, sniffMedia } from '../src/media.js';
 import { SqliteRepository } from '../src/repository.js';
+import { ClipboardService } from '../src/service.js';
+import type { FileStorage } from '../src/files.js';
+import type { Broadcaster } from '../src/events.js';
 
 const origin = 'http://localhost:3000';
 const cookieValue = (response: Response, name: string) => response.headers.getSetCookie().find(c => c.startsWith(`${name}=`))?.split(';')[0] ?? '';
@@ -1556,11 +1559,12 @@ test('RHEA-210: account share management uses a bounded cursor page', async t =>
   assert.equal(second.nextCursor, null);
 });
 
-test('RHEA-210: schema v18 shares gain a null copy token without losing source-deletion history', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'dropit-m18-'));
+test('RHEA-210: v17 share history migrates through v18 to v19 without losing legacy links', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dropit-m19-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, 'dropit.sqlite');
   const db = new Database(path);
+  const rawToken = 'Old123';
   db.exec(`
     CREATE TABLE users (id TEXT PRIMARY KEY);
     CREATE TABLE spaces (id TEXT PRIMARY KEY,name TEXT NOT NULL,ownerId TEXT,expiresAt INTEGER,roomKey TEXT,closedAt INTEGER);
@@ -1573,17 +1577,32 @@ test('RHEA-210: schema v18 shares gain a null copy token without losing source-d
     INSERT INTO spaces VALUES ('s','个人空间','u',NULL,NULL,NULL);
     INSERT INTO members VALUES ('s','u');
     INSERT INTO items VALUES ('i','s','text','旧条目',NULL,9999999999999);
-    INSERT INTO shares VALUES ('share','hash','i','s','u',NULL,NULL,0,0,1,NULL,NULL);
-    PRAGMA user_version=18;
+    PRAGMA user_version=17;
   `);
+  db.prepare(`INSERT INTO shares (id,tokenHash,itemId,spaceId,createdBy,expiresAt,maxViews,views,revoked,createdAt,downloadTicketHash,downloadTicketExpiresAt)
+    VALUES ('share',?,'i','s','u',NULL,NULL,0,0,1,NULL,NULL)`).run(hash(rawToken));
+  db.exec(migration18);
+  assert.equal(db.pragma('user_version', { simple: true }), 18);
+  assert.equal((db.prepare('PRAGMA foreign_key_list(shares)').all() as { table: string }[]).some(row => row.table === 'items'), false);
   db.close();
   const repo = new SqliteRepository(path);
   t.after(() => repo.close());
-  assert.equal(repo.managedShares('u', undefined, 2)[0]?.sourceText, '旧条目');
-  assert.equal(repo.managedShares('u', undefined, 2)[0]?.hasCopyToken, 0);
+  const service = new ClipboardService(loadConfig({}), repo, {} as FileStorage, {} as Broadcaster, () => 1);
+  const session = { user: { id: 'u', email: 'u@example.test', name: 'U', role: 'user', disabled: 0, pending: 0, createdAt: 1 }, sessionHash: 'session', expiresAt: 9999999999999 } as Session;
+  const beforeDeletion = repo.managedShares('u', undefined, 2);
+  assert.equal(beforeDeletion.length, 1);
+  assert.equal(beforeDeletion[0]?.id, 'share');
+  assert.equal(beforeDeletion[0]?.sourceText, '旧条目');
+  assert.equal(beforeDeletion[0]?.hasCopyToken, 0);
+  assert.equal(service.managedShares(session).shares[0]?.copyStatus, 'legacy');
+  assert.equal(service.readPublicShare(rawToken, undefined).id, 'i');
   repo.deleteItem('i');
-  assert.equal(repo.managedShares('u', undefined, 2)[0]?.sourceItemId, undefined);
+  const afterDeletion = repo.managedShares('u', undefined, 2);
+  assert.equal(afterDeletion.length, 1);
+  assert.equal(afterDeletion[0]?.id, 'share');
+  assert.equal(afterDeletion[0]?.sourceItemId, null);
   const check = new Database(path, { readonly: true });
   t.after(() => check.close());
   assert.equal(check.pragma('user_version', { simple: true }), 19);
+  assert.equal((check.prepare('SELECT copyToken FROM shares WHERE id=?').get('share') as { copyToken: string | null }).copyToken, null);
 });
