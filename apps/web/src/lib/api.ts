@@ -21,6 +21,7 @@ export class ApiError extends Error {
 const labels: Record<string, string> = {
   INVALID_INPUT: '输入无效',
   TOKEN_ACTIVE: '令牌仍然有效，请先撤销再删除',
+  SHARE_NOT_REVOKED: '请先撤销分享链接，再删除记录',
   INVALID_GROUP: '分组名无效（1–24 个字，不能叫“全部”或“未分组”）',
   GROUP_EXISTS: '已有同名分组',
   GROUP_LIMIT: '分组太多了（最多 24 个）',

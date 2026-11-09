@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import type { Config } from './config.js';
-import { ApiError, MAX_GROUPS, cleanFilename, cleanGroupName, hash, isShortToken, publicItem, publicShareItem, randomRoomCode, shortToken, token, type Invite, type Item, type ItemMeta, type MemberRole, type Session, type SharePublic, type Space } from './domain.js';
+import { ApiError, MAX_GROUPS, cleanFilename, cleanGroupName, hash, isShortToken, publicItem, publicShareItem, randomRoomCode, shortToken, token, type Invite, type Item, type ItemMeta, type ManagedShare, type MemberRole, type Session, type SharePublic, type Space } from './domain.js';
 import type { FileStorage } from './files.js';
 import type { Broadcaster } from './events.js';
-import type { Repository } from './repository.js';
+import type { Repository, ShareCursor } from './repository.js';
 import { sniffRaster } from './media.js';
 import { UploadService } from './uploads.js';
 import { DEFAULT_SPACE_INVITE_LIMIT } from './invites.js';
@@ -159,6 +159,33 @@ export class ClipboardService {
     if (!share || share.spaceId !== space.id) throw new ApiError(404, 'NOT_FOUND');
     this.canManage(space, share.userId, session);
     this.repo.revokeShare(shareId, space.id);
+  }
+  managedShares(session: Session | undefined, cursor?: ShareCursor) {
+    const auth = this.requireSession(session);
+    const now = this.now();
+    const rows = this.repo.managedShares(auth.user.id, cursor, 51);
+    const shares: ManagedShare[] = rows.slice(0, 50).map((share) => {
+      const sourceUnavailable = !share.sourceItemId || !share.sourceSpaceId || !share.sourceVisible ||
+        (share.sourceExpiresAt !== null && share.sourceExpiresAt <= now) ||
+        (share.sourceSpaceExpiresAt !== null && share.sourceSpaceExpiresAt <= now) || share.sourceSpaceClosedAt !== null;
+      const state = share.revoked ? 'revoked' : sourceUnavailable ? 'source_unavailable' :
+        share.expiresAt !== null && share.expiresAt <= now ? 'expired' :
+          share.maxViews !== null && share.views >= share.maxViews ? 'exhausted' : 'active';
+      const sourceName = sourceUnavailable ? null : share.sourceKind === 'file'
+        ? share.sourceFilename || '未命名文件'
+        : share.sourceText?.replace(/\s+/g, ' ').trim().slice(0, 80) || '文本条目';
+      return { id: share.id, itemId: share.itemId, expiresAt: share.expiresAt, maxViews: share.maxViews,
+        views: share.views, revoked: share.revoked, createdAt: share.createdAt, state,
+        sourceName, spaceName: share.sourceVisible && share.sourceSpaceId ? share.sourceSpaceName : null };
+    });
+    const last = shares.at(-1);
+    return { shares, nextCursor: rows.length > shares.length && last ? `${last.createdAt}:${last.id}` : null };
+  }
+  revokeManagedShare(session: Session | undefined, shareId: string) {
+    this.repo.revokeOwnedShare(shareId, this.requireSession(session).user.id);
+  }
+  deleteManagedShare(session: Session | undefined, shareId: string) {
+    this.repo.deleteOwnedShare(shareId, this.requireSession(session).user.id);
   }
   private shareToken(raw: string) {
     if (!isShortToken(raw) && !/^[A-Za-z0-9_-]{43}$/.test(raw)) throw new ApiError(404, 'NOT_FOUND');

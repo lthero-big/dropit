@@ -91,6 +91,10 @@ export interface SharePublic {
   id: string; itemId: string; expiresAt: number | null; maxViews: number | null;
   views: number; revoked: number; createdAt: number;
 }
+export type ManagedShareState = 'active' | 'expired' | 'exhausted' | 'revoked' | 'source_unavailable';
+export interface ManagedShare extends SharePublic {
+  state: ManagedShareState; sourceName: string | null; spaceName: string | null;
+}
 export interface Flow { stateHash: string; browserHash: string; provider: string; verifier: string; inviteHash: string | null; expiresAt: number; linkUserId?: string | null }
 export interface Identity { provider: string; subject: string; email: string; name: string }
 /** A login method bound to an account, as shown in 设置 → 登录方式. */
