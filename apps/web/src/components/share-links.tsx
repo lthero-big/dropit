@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { RefreshCwIcon, Trash2Icon, Undo2Icon } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { CopyIcon, RefreshCwIcon, Trash2Icon, Undo2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 import { Panel } from '@/components/settings-ui.tsx'
 import { Button } from '@/components/ui/button.tsx'
 import { api, errorText } from '@/lib/api.ts'
+import { copyText } from '@/lib/format.ts'
 import type { ManagedShare, ManagedShareState } from '@/lib/types.ts'
 
 type SharePage = { shares: ManagedShare[]; nextCursor: string | null }
+type ShareAction = 'copy' | 'revoke' | 'delete'
 
 const stateLabels: Record<ManagedShareState, string> = {
   active: '有效',
@@ -14,6 +16,13 @@ const stateLabels: Record<ManagedShareState, string> = {
   exhausted: '已用尽',
   revoked: '已撤销',
   source_unavailable: '来源已失效',
+}
+
+const unavailableCopyLabels: Partial<Record<ManagedShareState, string>> = {
+  expired: '链接已过期，无法复制。',
+  exhausted: '链接已用尽，无法复制。',
+  revoked: '链接已撤销，无法复制。',
+  source_unavailable: '来源已不可用，无法复制。',
 }
 
 const filters: { value: 'all' | ManagedShareState; label: string }[] = [
@@ -38,8 +47,9 @@ export function ShareLinks() {
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [filter, setFilter] = useState<'all' | ManagedShareState>('all')
   const [loading, setLoading] = useState(true)
-  const [working, setWorking] = useState<string | null>(null)
-  const [pendingDelete, setPendingDelete] = useState<string | null>(null)
+  const pendingRef = useRef(new Map<string, ShareAction>())
+  const [pending, setPending] = useState<Record<string, ShareAction>>({})
+  const [pendingDelete, setPendingDelete] = useState<Set<string>>(() => new Set())
 
   const load = useCallback(async (cursor?: string | null, replace = false) => {
     try {
@@ -61,32 +71,69 @@ export function ShareLinks() {
 
   const visible = useMemo(() => filter === 'all' ? shares : shares.filter((share) => share.state === filter), [filter, shares])
 
+  function begin(shareId: string, action: ShareAction) {
+    if (pendingRef.current.has(shareId)) return false
+    pendingRef.current.set(shareId, action)
+    setPending((current) => ({ ...current, [shareId]: action }))
+    return true
+  }
+
+  function finish(shareId: string) {
+    pendingRef.current.delete(shareId)
+    setPending((current) => {
+      const { [shareId]: _finished, ...remaining } = current
+      return remaining
+    })
+  }
+
+  function setDeleteConfirmation(shareId: string, open: boolean) {
+    setPendingDelete((current) => {
+      const next = new Set(current)
+      if (open) next.add(shareId)
+      else next.delete(shareId)
+      return next
+    })
+  }
+
+  async function copy(share: ManagedShare) {
+    if (!begin(share.id, 'copy')) return
+    try {
+      const { url } = await api<{ url: string }>(`/api/shares/${share.id}/link`)
+      await copyText(url)
+      toast.success('链接已复制')
+    } catch {
+      toast.error('复制链接失败，请重试')
+    } finally {
+      finish(share.id)
+    }
+  }
+
   async function revoke(share: ManagedShare) {
-    if (working) return
-    setWorking(`revoke:${share.id}`)
+    if (!begin(share.id, 'revoke')) return
     try {
       await api(`/api/shares/${share.id}/revoke`, { method: 'POST' })
-      setShares((current) => current.map((entry) => entry.id === share.id ? { ...entry, revoked: 1, state: 'revoked' } : entry))
+      setShares((current) => current.map((entry) => entry.id === share.id
+        ? { ...entry, revoked: 1, state: 'revoked', copyStatus: 'unavailable' }
+        : entry))
       toast.success('分享链接已撤销')
     } catch (error) {
       toast.error(errorText(error))
     } finally {
-      setWorking(null)
+      finish(share.id)
     }
   }
 
   async function remove(share: ManagedShare) {
-    if (working) return
-    setWorking(`delete:${share.id}`)
+    if (!begin(share.id, 'delete')) return
     try {
       await api(`/api/shares/${share.id}`, { method: 'DELETE' })
       setShares((current) => current.filter((entry) => entry.id !== share.id))
-      setPendingDelete(null)
+      setDeleteConfirmation(share.id, false)
       toast.success('记录已删除')
     } catch (error) {
       toast.error(errorText(error))
     } finally {
-      setWorking(null)
+      finish(share.id)
     }
   }
 
@@ -94,7 +141,7 @@ export function ShareLinks() {
     <Panel
       id="share-links"
       title="分享链接"
-      description="管理由你创建的链接。完整链接只会在创建时出现一次，这里不会再次显示。"
+      description="管理由你创建的链接。新创建且仍有效的链接可再次复制；旧版本链接无法恢复，请从原条目重新分享。"
       actions={
         <div className="flex items-center gap-2">
           <label className="sr-only" htmlFor="share-state-filter">状态筛选</label>
@@ -112,8 +159,12 @@ export function ShareLinks() {
       {!loading && shares.length > 0 && visible.length === 0 ? <p className="rounded-md border border-dashed border-line-2 p-4 text-sm text-muted-foreground">没有符合当前状态的分享链接。</p> : null}
       <ul className="grid gap-3">
         {visible.map((share) => {
-          const revoking = working === `revoke:${share.id}`
-          const deleting = working === `delete:${share.id}`
+          const action = pending[share.id]
+          const rowBusy = Boolean(action)
+          const deleting = action === 'delete'
+          const revoking = action === 'revoke'
+          const copying = action === 'copy'
+          const confirmingDelete = pendingDelete.has(share.id)
           return (
             <li key={share.id} className="rounded-md border border-line-1 bg-surface-0 p-4" data-share-id={share.id}>
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -127,23 +178,31 @@ export function ShareLinks() {
                 <span>{share.maxViews === null ? `${share.views} 次访问，不限次数` : `${share.views} / ${share.maxViews} 次访问`}</span>
                 <span>{expiryLabel(share)}</span>
               </div>
+              {share.state === 'active' && share.copyStatus === 'legacy' ? <p className="mt-3 text-xs text-muted-foreground">旧版本链接无法恢复，可从原条目重新分享。</p> : null}
+              {share.state !== 'active' ? <p className="mt-3 text-xs text-muted-foreground">{unavailableCopyLabels[share.state]}</p> : null}
               <div className="mt-3 flex flex-wrap items-center gap-2">
+                {share.state === 'active' && share.copyStatus === 'available' ? (
+                  <Button type="button" variant="outline" size="sm" disabled={rowBusy} onClick={() => void copy(share)}>
+                    <CopyIcon aria-hidden="true" />
+                    {copying ? '正在复制…' : '复制链接'}
+                  </Button>
+                ) : null}
                 {share.state !== 'revoked' ? (
-                  <Button type="button" variant="outline" size="sm" disabled={Boolean(working)} onClick={() => void revoke(share)}>
+                  <Button type="button" variant="outline" size="sm" disabled={rowBusy} onClick={() => void revoke(share)}>
                     <Undo2Icon aria-hidden="true" />
                     {revoking ? '正在撤回…' : '撤回'}
                   </Button>
-                ) : pendingDelete === share.id ? (
+                ) : confirmingDelete ? (
                   <div className="flex flex-wrap items-center gap-2" role="alertdialog" aria-label="删除分享记录确认">
                     <span className="text-xs text-muted-foreground">删除后无法恢复。</span>
-                    <Button type="button" variant="outline" size="sm" disabled={Boolean(working)} onClick={() => setPendingDelete(null)}>取消</Button>
-                    <Button type="button" variant="outline" size="sm" className="text-destructive" disabled={Boolean(working)} onClick={() => void remove(share)}>
+                    <Button type="button" variant="outline" size="sm" disabled={rowBusy} onClick={() => setDeleteConfirmation(share.id, false)}>取消</Button>
+                    <Button type="button" variant="outline" size="sm" className="text-destructive" disabled={rowBusy} onClick={() => void remove(share)}>
                       <Trash2Icon aria-hidden="true" />
                       {deleting ? '正在删除…' : '确认删除记录'}
                     </Button>
                   </div>
                 ) : (
-                  <Button type="button" variant="outline" size="sm" className="text-destructive" disabled={Boolean(working)} onClick={() => setPendingDelete(share.id)}>
+                  <Button type="button" variant="outline" size="sm" className="text-destructive" disabled={rowBusy} onClick={() => setDeleteConfirmation(share.id, true)}>
                     <Trash2Icon aria-hidden="true" />
                     删除记录
                   </Button>

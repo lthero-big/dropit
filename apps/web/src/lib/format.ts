@@ -65,8 +65,11 @@ export async function copyText(text: string): Promise<void> {
     area.value = text
     area.setAttribute('readonly', '')
     document.body.append(area)
-    area.select()
-    document.execCommand('copy')
-    area.remove()
+    try {
+      area.select()
+      if (!document.execCommand('copy')) throw new Error('COPY_FAILED')
+    } finally {
+      area.remove()
+    }
   }
 }

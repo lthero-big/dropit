@@ -85,15 +85,16 @@ export function parseDevice(id: unknown, rawName: unknown, kind: unknown, encode
 export interface ShareLink {
   id: string; tokenHash: string; itemId: string; spaceId: string; createdBy: string | null;
   expiresAt: number | null; maxViews: number | null; views: number; revoked: number; createdAt: number;
-  downloadTicketHash: string | null; downloadTicketExpiresAt: number | null;
+  downloadTicketHash: string | null; downloadTicketExpiresAt: number | null; copyToken: string | null;
 }
 export interface SharePublic {
   id: string; itemId: string; expiresAt: number | null; maxViews: number | null;
   views: number; revoked: number; createdAt: number;
 }
 export type ManagedShareState = 'active' | 'expired' | 'exhausted' | 'revoked' | 'source_unavailable';
+export type ManagedShareCopyStatus = 'available' | 'legacy' | 'unavailable';
 export interface ManagedShare extends SharePublic {
-  state: ManagedShareState; sourceName: string | null; spaceName: string | null;
+  state: ManagedShareState; copyStatus: ManagedShareCopyStatus; sourceName: string | null; spaceName: string | null;
 }
 export interface Flow { stateHash: string; browserHash: string; provider: string; verifier: string; inviteHash: string | null; expiresAt: number; linkUserId?: string | null }
 export interface Identity { provider: string; subject: string; email: string; name: string }

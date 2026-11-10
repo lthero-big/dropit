@@ -265,3 +265,10 @@ CREATE INDEX share_space ON shares(spaceId);
 CREATE INDEX share_creator ON shares(createdBy,createdAt DESC,id DESC);
 PRAGMA user_version=18;
 `;
+
+// New account-created links retain their short token in the private SQLite data
+// directory so the owner can copy the same URL again. Older rows stay NULL.
+export const migration19 = `
+ALTER TABLE shares ADD COLUMN copyToken TEXT;
+PRAGMA user_version=19;
+`;

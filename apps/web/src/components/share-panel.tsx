@@ -159,7 +159,7 @@ export function SharePanel({
           关闭
         </button>
       </div>
-      <p className="mt-2 text-xs text-muted-foreground">只读。知道链接的人无需登录即可查看。条目到期或撤回后链接失效。完整链接只在生成时出现一次。</p>
+      <p className="mt-2 text-xs text-muted-foreground">只读。知道链接的人无需登录即可查看。条目到期或撤回后链接失效。新创建且有效的链接可在设置的分享链接管理中再次复制；旧版本链接无法恢复。</p>
       <div className="mt-3 flex flex-wrap items-end gap-2">
         <label className="text-xs">
           有效期
