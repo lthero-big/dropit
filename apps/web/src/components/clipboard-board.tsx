@@ -9,7 +9,7 @@ import { BoardHeader, BoardToolbar } from '@/components/board-toolbar.tsx'
 import { GroupBar, GroupTarget, type GroupFilter } from '@/components/board-groups.tsx'
 import { GroupEmpty, GroupedSections, PinChip, PresencePill } from '@/components/board-parts.tsx'
 import { DeviceGlyph } from '@/components/device-glyph.tsx'
-import { onlineDeviceCount, presenceDots, useCoarsePointer, useDockedComposer, useScrollCollapse } from '@/lib/board-hooks.ts'
+import { composerTextareaMaxHeight, onlineDeviceCount, presenceDots, useCoarsePointer, useDockedComposer, useKeyboardViewport, useScrollCollapse } from '@/lib/board-hooks.ts'
 import { CommandPalette } from '@/components/command-palette.tsx'
 import { MediaViewer, type ViewerMedia } from '@/components/clip-media.tsx'
 import { UploadCard } from '@/components/upload-card.tsx'
@@ -125,6 +125,7 @@ export function ClipboardBoard({
   const chipZones = useRef<Array<readonly [string, Box]>>([])
   const groupHoverRef = useRef<string | null>(null)
   const docked = useDockedComposer()
+  const keyboard = useKeyboardViewport()
   const [composerFocus, setComposerFocus] = useState(false)
   const [collapsed, setCollapsed] = useScrollCollapse(docked, composerFocus || draft.trim().length > 0 || dragOver || sending)
   const draftRef = useRef<HTMLTextAreaElement | null>(null)
@@ -136,6 +137,7 @@ export function ClipboardBoard({
   const seenAuth = useRef(0)
   const visible = channel.items.filter((item) => item.expiresAt > now)
   const groups = channel.groups
+  const textareaMaxHeight = docked ? composerTextareaMaxHeight(keyboard.height, groups.length > 0) : undefined
   const { query, setQuery, groupFilter, setGroupFilter, shown, pinnedShown, looseAll, looseShown, groupCounts } = useBoardFilter(visible)
   const slides = base
     ? shown.flatMap((item) =>
@@ -728,23 +730,29 @@ export function ClipboardBoard({
             </span>
           </motion.button>
         ) : (
-          <motion.div key="input" layout="position" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, transition: { duration: dur.fast } }} className="flex items-end gap-1.5 p-2 sm:gap-2 sm:p-2.5">
-            <button
-              type="button"
-              aria-label="文件"
-              title="添加文件"
-              onClick={() => fileRef.current?.click()}
-              disabled={!base}
-              className="grid size-10 shrink-0 place-items-center rounded-[var(--radius-md)] text-[var(--fg-3)] hover:bg-[var(--surface-2)] hover:text-[var(--fg)] disabled:opacity-50"
-              style={touchTarget}
-            >
-              <PaperclipIcon className="size-4" aria-hidden="true" />
-            </button>
-            {groups.length > 0 ? (
-              <span className="flex min-h-10 items-center">
-                <GroupTarget groups={groups} value={target} onChange={setTarget} compact={docked} reduced={reduced} />
-              </span>
+          <motion.div key="input" layout="position" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, transition: { duration: dur.fast } }} className="px-0.5 py-1.5 sm:p-2.5">
+            {docked && groups.length > 0 ? (
+              <div className="mb-1 flex h-10 items-center">
+                <GroupTarget groups={groups} value={target} onChange={setTarget} compact reduced={reduced} />
+              </div>
             ) : null}
+            <div className="flex items-end gap-1 sm:gap-2">
+              <button
+                type="button"
+                aria-label="文件"
+                title="添加文件"
+                onClick={() => fileRef.current?.click()}
+                disabled={!base}
+                className="grid size-10 shrink-0 place-items-center rounded-[var(--radius-md)] text-[var(--fg-3)] hover:bg-[var(--surface-2)] hover:text-[var(--fg)] disabled:opacity-50"
+                style={touchTarget}
+              >
+                <PaperclipIcon className="size-4" aria-hidden="true" />
+              </button>
+              {groups.length > 0 && !docked ? (
+                <span className="flex min-h-10 items-center">
+                  <GroupTarget groups={groups} value={target} onChange={setTarget} reduced={reduced} />
+                </span>
+              ) : null}
             <label className="sr-only" htmlFor="draft">
               要发送的文本
             </label>
@@ -764,7 +772,8 @@ export function ClipboardBoard({
                 }
               }}
               placeholder={docked ? '粘贴或输入…' : '粘贴、输入，或把文件拖到这里…'}
-              className="max-h-48 min-h-10 flex-1 resize-none bg-transparent py-2.5 text-[14px] text-[var(--fg)] outline-none [field-sizing:content] placeholder:text-[var(--fg-4)]"
+              className="max-h-48 min-h-10 min-w-0 flex-1 resize-none bg-transparent py-2.5 text-base leading-5 text-[var(--fg)] outline-none [field-sizing:content] placeholder:text-[var(--fg-4)] sm:text-[14px]"
+              style={textareaMaxHeight ? { maxHeight: textareaMaxHeight } : undefined}
             />
             {!docked ? (
               <button
@@ -789,6 +798,7 @@ export function ClipboardBoard({
             >
               <ArrowUpIcon className="size-4" aria-hidden="true" />
             </motion.button>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -812,7 +822,7 @@ export function ClipboardBoard({
   const onlineIds = new Set(dots.filter((dot) => dot.online).map((dot) => dot.key))
 
   return (
-    <section className={`dd-noselect ${docked ? 'pb-[calc(76px+env(safe-area-inset-bottom))]' : ''}`} data-board-root="">
+    <section className={`dd-noselect ${docked ? groups.length > 0 ? 'pb-[calc(120px+env(safe-area-inset-bottom))]' : 'pb-[calc(76px+env(safe-area-inset-bottom))]' : ''}`} data-board-root="">
       <div className="flex flex-col gap-4">
         <BoardHeader title={title} subtitle={subtitle} deadlineLeft={deadline ? deadline - now : null} usedBytes={usedBytes} roomUsed={roomUsed} quotaBytes={quotaBytes} ratio={ratio} tone={tone} quotaBar={quotaBar} trailing={slot ? null : presence} />
         {slot ? createPortal(presence, slot) : null}
@@ -940,7 +950,13 @@ export function ClipboardBoard({
         </MotionConfig>
       </div>
       {docked && !readOnly ? (
-        <div className="pointer-events-none fixed inset-x-0 bottom-[calc(44px+env(safe-area-inset-bottom))] z-30 flex justify-center px-3 pb-2 md:bottom-0 md:pb-[max(12px,env(safe-area-inset-bottom))]">{composer}</div>
+        <div
+          className="pointer-events-none fixed inset-x-0 bottom-[calc(44px+env(safe-area-inset-bottom))] z-30 flex justify-center px-1 pb-2 sm:px-2 md:bottom-0 md:px-3 md:pb-[max(12px,env(safe-area-inset-bottom))]"
+          data-keyboard-open={keyboard.open || undefined}
+          style={keyboard.open ? { bottom: keyboard.inset } : undefined}
+        >
+          {composer}
+        </div>
       ) : null}
       <CommandPalette
         items={visible}

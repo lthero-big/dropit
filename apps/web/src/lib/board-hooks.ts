@@ -24,6 +24,86 @@ export function useDockedComposer() {
   return useMedia('(max-width: 640px)')
 }
 
+const KEYBOARD_THRESHOLD = 120
+
+export type KeyboardViewport = { inset: number; open: boolean; height: number }
+
+const TEXTAREA_MIN_HEIGHT = 40
+const TEXTAREA_NORMAL_MAX_HEIGHT = 192
+const FIXED_HEADER_SPACE = 64
+const COMPOSER_FRAME_SPACE = 20
+const GROUP_TOOL_SPACE = 44
+
+/**
+ * Caps a mobile textarea before its composer can cover the fixed header.
+ * The remaining draft stays natively scrollable inside the textarea.
+ */
+export function composerTextareaMaxHeight(visibleHeight: number, hasGroups: boolean): number {
+  const reserved = FIXED_HEADER_SPACE + COMPOSER_FRAME_SPACE + (hasGroups ? GROUP_TOOL_SPACE : 0)
+  return Math.max(TEXTAREA_MIN_HEIGHT, Math.min(TEXTAREA_NORMAL_MAX_HEIGHT, Math.round(visibleHeight) - reserved))
+}
+
+/**
+ * Returns the space covered by a virtual keyboard. Browsers that resize the
+ * layout viewport report a zero inset, while overlaying browsers report the
+ * difference between the layout and visual viewports.
+ */
+export function keyboardViewport(layoutHeight: number, visibleHeight: number, offsetTop: number, baselineHeight: number, editing: boolean): KeyboardViewport {
+  if (!editing) return { inset: 0, open: false, height: Math.round(visibleHeight) }
+  const inset = Math.max(0, Math.round(layoutHeight - visibleHeight - offsetTop))
+  return { inset, open: Math.max(inset, baselineHeight - layoutHeight) > KEYBOARD_THRESHOLD, height: Math.round(visibleHeight) }
+}
+
+function editingElement(element: Element | null) {
+  return element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement || (element instanceof HTMLElement && element.isContentEditable)
+}
+
+/** Keeps fixed mobile controls above an overlay keyboard without double-lifting resized layouts. */
+export function useKeyboardViewport(): KeyboardViewport {
+  const [viewport, setViewport] = useState<KeyboardViewport>(() => {
+    const height = typeof window === 'undefined' ? 0 : window.visualViewport?.height ?? window.innerHeight
+    return { inset: 0, open: false, height: Math.round(height) }
+  })
+
+  useEffect(() => {
+    let baselineHeight = window.innerHeight
+    let frame = 0
+    const update = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        const visual = window.visualViewport
+        const editing = editingElement(document.activeElement)
+        if (!editing) baselineHeight = window.innerHeight
+        const next = keyboardViewport(window.innerHeight, visual?.height ?? window.innerHeight, visual?.offsetTop ?? 0, baselineHeight, editing)
+        setViewport((previous) => (previous.inset === next.inset && previous.open === next.open && previous.height === next.height ? previous : next))
+      })
+    }
+    const resetForOrientation = () => {
+      baselineHeight = window.innerHeight
+      update()
+    }
+    const visual = window.visualViewport
+    window.addEventListener('resize', update)
+    window.addEventListener('focusin', update)
+    window.addEventListener('focusout', update)
+    window.addEventListener('orientationchange', resetForOrientation)
+    visual?.addEventListener('resize', update)
+    visual?.addEventListener('scroll', update)
+    update()
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('resize', update)
+      window.removeEventListener('focusin', update)
+      window.removeEventListener('focusout', update)
+      window.removeEventListener('orientationchange', resetForOrientation)
+      visual?.removeEventListener('resize', update)
+      visual?.removeEventListener('scroll', update)
+    }
+  }, [])
+
+  return viewport
+}
+
 /**
  * Scroll-aware collapse for the docked composer: shrinks to a pill while the
  * reader scrolls down, comes back on scroll up, at the end of the page, or when
