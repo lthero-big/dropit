@@ -9,7 +9,7 @@ import { BoardHeader, BoardToolbar } from '@/components/board-toolbar.tsx'
 import { GroupBar, GroupTarget, type GroupFilter } from '@/components/board-groups.tsx'
 import { GroupEmpty, GroupedSections, PinChip, PresencePill } from '@/components/board-parts.tsx'
 import { DeviceGlyph } from '@/components/device-glyph.tsx'
-import { onlineDeviceCount, presenceDots, useCoarsePointer, useDockedComposer, useKeyboardViewport, useScrollCollapse } from '@/lib/board-hooks.ts'
+import { composerTextareaMaxHeight, onlineDeviceCount, presenceDots, useCoarsePointer, useDockedComposer, useKeyboardViewport, useScrollCollapse } from '@/lib/board-hooks.ts'
 import { CommandPalette } from '@/components/command-palette.tsx'
 import { MediaViewer, type ViewerMedia } from '@/components/clip-media.tsx'
 import { UploadCard } from '@/components/upload-card.tsx'
@@ -137,6 +137,7 @@ export function ClipboardBoard({
   const seenAuth = useRef(0)
   const visible = channel.items.filter((item) => item.expiresAt > now)
   const groups = channel.groups
+  const textareaMaxHeight = docked ? composerTextareaMaxHeight(keyboard.height, groups.length > 0) : undefined
   const { query, setQuery, groupFilter, setGroupFilter, shown, pinnedShown, looseAll, looseShown, groupCounts } = useBoardFilter(visible)
   const slides = base
     ? shown.flatMap((item) =>
@@ -729,7 +730,7 @@ export function ClipboardBoard({
             </span>
           </motion.button>
         ) : (
-          <motion.div key="input" layout="position" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, transition: { duration: dur.fast } }} className="p-1.5 sm:p-2.5">
+          <motion.div key="input" layout="position" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, transition: { duration: dur.fast } }} className="px-0.5 py-1.5 sm:p-2.5">
             {docked && groups.length > 0 ? (
               <div className="mb-1 flex h-10 items-center">
                 <GroupTarget groups={groups} value={target} onChange={setTarget} compact reduced={reduced} />
@@ -772,6 +773,7 @@ export function ClipboardBoard({
               }}
               placeholder={docked ? '粘贴或输入…' : '粘贴、输入，或把文件拖到这里…'}
               className="max-h-48 min-h-10 min-w-0 flex-1 resize-none bg-transparent py-2.5 text-base leading-5 text-[var(--fg)] outline-none [field-sizing:content] placeholder:text-[var(--fg-4)] sm:text-[14px]"
+              style={textareaMaxHeight ? { maxHeight: textareaMaxHeight } : undefined}
             />
             {!docked ? (
               <button
@@ -949,7 +951,7 @@ export function ClipboardBoard({
       </div>
       {docked && !readOnly ? (
         <div
-          className="pointer-events-none fixed inset-x-0 bottom-[calc(44px+env(safe-area-inset-bottom))] z-30 flex justify-center px-2 pb-2 md:bottom-0 md:px-3 md:pb-[max(12px,env(safe-area-inset-bottom))]"
+          className="pointer-events-none fixed inset-x-0 bottom-[calc(44px+env(safe-area-inset-bottom))] z-30 flex justify-center px-1 pb-2 sm:px-2 md:bottom-0 md:px-3 md:pb-[max(12px,env(safe-area-inset-bottom))]"
           data-keyboard-open={keyboard.open || undefined}
           style={keyboard.open ? { bottom: keyboard.inset } : undefined}
         >

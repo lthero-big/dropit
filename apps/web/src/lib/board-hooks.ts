@@ -26,7 +26,22 @@ export function useDockedComposer() {
 
 const KEYBOARD_THRESHOLD = 120
 
-export type KeyboardViewport = { inset: number; open: boolean }
+export type KeyboardViewport = { inset: number; open: boolean; height: number }
+
+const TEXTAREA_MIN_HEIGHT = 40
+const TEXTAREA_NORMAL_MAX_HEIGHT = 192
+const FIXED_HEADER_SPACE = 64
+const COMPOSER_FRAME_SPACE = 20
+const GROUP_TOOL_SPACE = 44
+
+/**
+ * Caps a mobile textarea before its composer can cover the fixed header.
+ * The remaining draft stays natively scrollable inside the textarea.
+ */
+export function composerTextareaMaxHeight(visibleHeight: number, hasGroups: boolean): number {
+  const reserved = FIXED_HEADER_SPACE + COMPOSER_FRAME_SPACE + (hasGroups ? GROUP_TOOL_SPACE : 0)
+  return Math.max(TEXTAREA_MIN_HEIGHT, Math.min(TEXTAREA_NORMAL_MAX_HEIGHT, Math.round(visibleHeight) - reserved))
+}
 
 /**
  * Returns the space covered by a virtual keyboard. Browsers that resize the
@@ -34,9 +49,9 @@ export type KeyboardViewport = { inset: number; open: boolean }
  * difference between the layout and visual viewports.
  */
 export function keyboardViewport(layoutHeight: number, visibleHeight: number, offsetTop: number, baselineHeight: number, editing: boolean): KeyboardViewport {
-  if (!editing) return { inset: 0, open: false }
+  if (!editing) return { inset: 0, open: false, height: Math.round(visibleHeight) }
   const inset = Math.max(0, Math.round(layoutHeight - visibleHeight - offsetTop))
-  return { inset, open: Math.max(inset, baselineHeight - layoutHeight) > KEYBOARD_THRESHOLD }
+  return { inset, open: Math.max(inset, baselineHeight - layoutHeight) > KEYBOARD_THRESHOLD, height: Math.round(visibleHeight) }
 }
 
 function editingElement(element: Element | null) {
@@ -45,7 +60,10 @@ function editingElement(element: Element | null) {
 
 /** Keeps fixed mobile controls above an overlay keyboard without double-lifting resized layouts. */
 export function useKeyboardViewport(): KeyboardViewport {
-  const [viewport, setViewport] = useState<KeyboardViewport>({ inset: 0, open: false })
+  const [viewport, setViewport] = useState<KeyboardViewport>(() => {
+    const height = typeof window === 'undefined' ? 0 : window.visualViewport?.height ?? window.innerHeight
+    return { inset: 0, open: false, height: Math.round(height) }
+  })
 
   useEffect(() => {
     let baselineHeight = window.innerHeight
@@ -57,7 +75,7 @@ export function useKeyboardViewport(): KeyboardViewport {
         const editing = editingElement(document.activeElement)
         if (!editing) baselineHeight = window.innerHeight
         const next = keyboardViewport(window.innerHeight, visual?.height ?? window.innerHeight, visual?.offsetTop ?? 0, baselineHeight, editing)
-        setViewport((previous) => (previous.inset === next.inset && previous.open === next.open ? previous : next))
+        setViewport((previous) => (previous.inset === next.inset && previous.open === next.open && previous.height === next.height ? previous : next))
       })
     }
     const resetForOrientation = () => {
