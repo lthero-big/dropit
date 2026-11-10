@@ -383,9 +383,9 @@ export function GroupTarget({ groups, value, onChange, compact, reduced = false 
         data-group-target={value || '-'}
         onClick={(e) => (open ? close(false) : show(e.currentTarget))}
         onKeyDown={onKeyDown}
-        className={`relative flex h-9 shrink-0 items-center gap-1.5 rounded-[var(--radius-md)] border px-2 text-[12px] transition-colors duration-(--dur-fast) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${
+        className={`relative flex shrink-0 items-center gap-1.5 rounded-[var(--radius-md)] border px-2 text-[12px] transition-colors duration-(--dur-fast) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${
           open ? 'border-[var(--line-2)] bg-[var(--surface-2)] text-[var(--fg)]' : 'border-transparent text-[var(--fg-2)] hover:bg-[var(--surface-2)] hover:text-[var(--fg)]'
-        } ${compact ? 'max-w-[96px]' : 'max-w-[148px]'}`}
+        } ${compact ? 'h-10 min-h-10 max-w-[96px]' : 'h-9 max-w-[148px]'}`}
       >
         <motion.span key={value || '-'} initial={reduced ? false : { scale: 0.4 }} animate={{ scale: 1 }} transition={springBounce} className="grid shrink-0 place-items-center">
           <GroupDot group={value || undefined} className="size-2.5" />

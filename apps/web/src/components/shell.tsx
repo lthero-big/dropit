@@ -14,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu.tsx'
 import { errorText } from '@/lib/api.ts'
+import { useKeyboardViewport } from '@/lib/board-hooks.ts'
 import { openTempRoom, roomPath } from '@/lib/temp-room.ts'
 import { formatBytes, quotaTone, spaceLabel } from '@/lib/format.ts'
 import { useSession } from '@/lib/session.tsx'
@@ -43,6 +44,7 @@ export function Shell({
   const { theme, setTheme, skin, setSkin } = useTheme()
   const navigate = useNavigate()
   const location = useLocation()
+  const keyboard = useKeyboardViewport()
   const current = spaces.find((space) => space.id === spaceId)
   const displayName = me?.user.name || me?.user.email || '访客'
   const initial = displayName.slice(0, 1).toUpperCase()
@@ -260,7 +262,9 @@ export function Shell({
         </div>
       </header>
       <div className="mx-auto max-w-[1120px] px-4 pt-5 pb-24 sm:px-6 md:pb-12">{children}</div>
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-3 border-t border-line-1 bg-[color-mix(in_oklab,var(--bg)_88%,transparent)] pb-[env(safe-area-inset-bottom)] backdrop-blur-md md:hidden" data-shell-nav="">
+      <nav className={`fixed inset-x-0 bottom-0 z-30 grid grid-cols-3 border-t border-line-1 bg-[color-mix(in_oklab,var(--bg)_88%,transparent)] pb-[env(safe-area-inset-bottom)] backdrop-blur-md transition-transform duration-150 md:hidden ${
+        keyboard.open ? 'pointer-events-none translate-y-full' : ''
+      }`} data-shell-nav="" data-keyboard-open={keyboard.open || undefined}>
         <Link to="/" className="flex min-h-11 items-center justify-center text-xs font-medium">
           剪贴板
         </Link>
