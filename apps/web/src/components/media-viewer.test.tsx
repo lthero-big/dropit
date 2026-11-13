@@ -8,7 +8,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { ClipboardBoard } from './clipboard-board.tsx'
-import { MediaViewer, type ViewerMedia } from './clip-media.tsx'
+import { InlineVideo, MediaViewer, type ViewerMedia } from './clip-media.tsx'
 import { SharePage } from '@/pages/share-page.tsx'
 import type { Item } from '@/lib/types.ts'
 
@@ -155,13 +155,92 @@ describe('MediaViewer (demo viewer)', () => {
     expect(onClose).toHaveBeenCalledTimes(3)
   })
 
-  it('plays a video with native controls and no zoom chrome', () => {
+  it('plays video with custom controls instead of native controls', () => {
     render(<Harness media={{ type: 'video', src: '/media/v', name: 'clip.mp4' }} />)
     const video = document.querySelector('video')
     expect(video?.getAttribute('src')).toBe('/media/v')
-    expect(video?.hasAttribute('controls')).toBe(true)
+    expect(video?.hasAttribute('controls')).toBe(false)
+    expect(screen.getByRole('button', { name: '播放' })).toBeTruthy()
+    expect(screen.getByRole('slider', { name: '播放进度' })).toBeTruthy()
+    expect(screen.getByRole('slider', { name: '音量' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '静音' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '进入全屏' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: '放大' })).toBeNull()
     expect(screen.queryByText('点击图片放大 · 滚轮 / + − 缩放 · 放大后可拖动 · Esc 关闭')).toBeNull()
+  })
+
+  it('seeks with keyboard and restores a supplied playback position', () => {
+    const onProgress = vi.fn()
+    const rendered = render(<Harness media={{ type: 'video', src: '/media/v', name: 'clip.mp4', initialTime: 20, onProgress }} />)
+    const video = document.querySelector('video') as HTMLVideoElement
+    Object.defineProperty(video, 'duration', { configurable: true, value: 100 })
+    fireEvent.loadedMetadata(video)
+    expect(video.currentTime).toBe(20)
+    fireEvent.timeUpdate(video, { target: { currentTime: 20 } })
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(video.currentTime).toBe(25)
+    fireEvent.keyDown(window, { key: 'ArrowDown' })
+    expect(video.volume).toBeCloseTo(0.9)
+    rendered.unmount()
+    expect(onProgress).toHaveBeenLastCalledWith(25)
+  })
+
+  it('uses Escape to exit fullscreen before closing the viewer', () => {
+    const onClose = vi.fn()
+    const originalFullscreen = Object.getOwnPropertyDescriptor(document, 'fullscreenElement')
+    const originalExit = Object.getOwnPropertyDescriptor(document, 'exitFullscreen')
+    let fullscreenElement: Element | null = null
+    const exitFullscreen = vi.fn(async () => {
+      fullscreenElement = null
+      document.dispatchEvent(new Event('fullscreenchange'))
+    })
+    Object.defineProperty(document, 'fullscreenElement', { configurable: true, get: () => fullscreenElement })
+    Object.defineProperty(document, 'exitFullscreen', { configurable: true, value: exitFullscreen })
+    try {
+      render(<Harness media={{ type: 'video', src: '/media/v', name: 'clip.mp4' }} onClose={onClose} />)
+      fullscreenElement = document.querySelector('video')?.parentElement ?? null
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(exitFullscreen).toHaveBeenCalledTimes(1)
+      expect(onClose).not.toHaveBeenCalled()
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(onClose).toHaveBeenCalledTimes(1)
+    } finally {
+      if (originalFullscreen) Object.defineProperty(document, 'fullscreenElement', originalFullscreen)
+      else delete (document as { fullscreenElement?: Element | null }).fullscreenElement
+      if (originalExit) Object.defineProperty(document, 'exitFullscreen', originalExit)
+      else delete (document as { exitFullscreen?: () => Promise<void> }).exitFullscreen
+    }
+  })
+
+  it('shows a download entry when video playback fails', () => {
+    render(<Harness media={{ type: 'video', src: '/media/broken', download: '/media/download', name: 'broken.mp4' }} />)
+    fireEvent.error(document.querySelector('video') as HTMLVideoElement)
+    expect(screen.getByRole('alert').textContent).toContain('视频播放失败')
+    expect(screen.getByRole('link', { name: '下载视频' }).getAttribute('href')).toBe('/media/download')
+  })
+})
+
+describe('inline video entry', () => {
+  it('opens the viewer directly for a fine pointer and carries playback time back', () => {
+    const onExpand = vi.fn()
+    render(<InlineVideo src="/media/v" name="clip.mp4" onExpand={onExpand} />)
+    const video = document.querySelector('video') as HTMLVideoElement
+    video.currentTime = 18
+    fireEvent.click(screen.getByRole('button', { name: '播放 clip.mp4' }))
+    expect(onExpand).toHaveBeenCalledWith(18, expect.any(Function))
+    const sync = onExpand.mock.calls[0]?.[1] as ((time: number) => void)
+    sync(31)
+    expect(video.currentTime).toBe(31)
+  })
+
+  it('keeps playback inline for a coarse pointer and keeps the expand action available', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }))
+    const onExpand = vi.fn()
+    render(<InlineVideo src="/media/v" name="clip.mp4" onExpand={onExpand} />)
+    fireEvent.click(screen.getByRole('button', { name: '播放 clip.mp4' }))
+    expect(onExpand).not.toHaveBeenCalled()
+    expect(document.querySelector('video')?.hasAttribute('controls')).toBe(true)
+    expect(screen.getByRole('button', { name: '放大查看' })).toBeTruthy()
   })
 })
 

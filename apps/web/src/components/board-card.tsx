@@ -82,7 +82,15 @@ export function itemVisual(item: Item, base: string | null): ClipVisual {
   const name = item.filename?.trim() || (item.hasThumbnail ? '未命名图片' : '未命名文件')
   if (item.hasThumbnail && base) return { id: item.id, kind: 'image', name, src: `${base}/items/${item.id}/thumbnail`, meta: formatBytes(item.size) }
   const media = mediaKind(item)
-  return { id: item.id, kind: 'file', name, size: item.size, media, src: media && base ? `${base}/items/${item.id}/media` : undefined }
+  return {
+    id: item.id,
+    kind: 'file',
+    name,
+    size: item.size,
+    media,
+    src: media && base ? `${base}/items/${item.id}/media` : undefined,
+    download: media && base ? `${base}/items/${item.id}/download` : undefined,
+  }
 }
 
 function inside(el: HTMLElement | null, x: number, y: number, pad = 24) {

@@ -149,5 +149,5 @@ function shareVisual(token: string, share: PublicShare): ClipVisual | null {
   if (share.item.hasThumbnail) return { id: `share-${token}`, kind: 'image', name, src: url('thumbnail'), full: url('preview'), meta: formatBytes(share.item.size) }
   const media = mediaKind({ ...share.item, hasThumbnail: share.item.hasThumbnail })
   if (media !== 'video' && media !== 'audio') return null
-  return { id: `share-${token}`, kind: 'file', name, size: share.item.size, media, src: url('media') }
+  return { id: `share-${token}`, kind: 'file', name, size: share.item.size, media, src: url('media'), download: url('file') }
 }

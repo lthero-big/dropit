@@ -22,6 +22,8 @@ export type ClipVisual =
       size: number
       /** playable audio / video source */
       src?: string
+      /** direct download URL used by the video viewer error state */
+      download?: string
       poster?: string
       /** explicit media kind (the board knows the MIME type); otherwise guessed from the name */
       media?: 'audio' | 'video' | null
@@ -247,7 +249,12 @@ export function GridBody({ clip, viewing, onView, slots }: BodyProps) {
         const src = clip.src
         return (
           <div className="p-1.5 pb-0">
-            <InlineVideo src={src} poster={clip.poster} name={clip.name} onExpand={() => onView({ type: 'video', src, poster: clip.poster, name: clip.name, meta: formatSize(clip.size) })} />
+            <InlineVideo
+              src={src}
+              poster={clip.poster}
+              name={clip.name}
+              onExpand={(initialTime, onProgress) => onView({ type: 'video', src, poster: clip.poster, name: clip.name, meta: formatSize(clip.size), download: clip.download, initialTime, onProgress })}
+            />
             <p className="flex justify-between gap-2 px-1.5 py-2 text-[11px] text-[var(--fg-3)]">
               <span className="truncate text-[var(--fg-2)]">{clip.name}</span>
               <span className="dd-mono shrink-0">{t.label} · {formatSize(clip.size)}</span>
@@ -318,7 +325,7 @@ export function RowBody({ clip, viewing, onView, slots }: BodyProps) {
       }
       if (media === 'video' && clip.src) {
         const src = clip.src
-        lead = <PlayLead color={t.color} name={clip.name} onPlay={() => onView({ type: 'video', src, poster: clip.poster, name: clip.name, meta: formatSize(clip.size) })} />
+        lead = <PlayLead color={t.color} name={clip.name} onPlay={() => onView({ type: 'video', src, poster: clip.poster, name: clip.name, meta: formatSize(clip.size), download: clip.download })} />
       } else {
         lead = <span className="grid size-6 shrink-0 place-items-center rounded-[var(--radius-xs)]" style={{ color: t.color, background: `color-mix(in oklab, ${t.color} 14%, transparent)` }}><Icon className="size-3.5" /></span>
       }
