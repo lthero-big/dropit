@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, animate, motion, useMotionValue, useTransform, type AnimationPlaybackControls, type MotionValue } from 'motion/react'
-import { ChevronLeftIcon, ChevronRightIcon, DownloadIcon, MaximizeIcon, MinusIcon, PauseIcon, PlayIcon, PlusIcon, XIcon } from 'lucide-react'
+import { ChevronLeftIcon, ChevronRightIcon, DownloadIcon, LoaderCircleIcon, MaximizeIcon, MinimizeIcon, MinusIcon, PauseIcon, PlayIcon, PlusIcon, Volume2Icon, VolumeXIcon, XIcon } from 'lucide-react'
+import { useCoarsePointer } from '@/lib/board-hooks.ts'
 import { dur, easeIn, easeOut, springBounce, springSettle } from '@/lib/motion.ts'
 
 /**
@@ -325,11 +326,19 @@ export function AudioPlayer({ src, name, color, compact = false }: { src: string
 
 /* ------------------------------------------------------------------ video */
 
-/** Poster with a play button; plays inline in the card, expand opens the viewer. */
-export function InlineVideo({ src, poster, name, onExpand }: { src: string; poster?: string; name: string; onExpand: () => void }) {
+/** Poster with a play button; touch plays inline, a fine pointer opens the viewer. */
+export function InlineVideo({ src, poster, name, onExpand }: { src: string; poster?: string; name: string; onExpand: (initialTime?: number, onProgress?: (time: number) => void) => void }) {
   const ref = useIsolatePointer<HTMLDivElement>()
   const video = useRef<HTMLVideoElement | null>(null)
   const [started, setStarted] = useState(false)
+  const coarse = useCoarsePointer()
+  const expand = () => {
+    const el = video.current
+    el?.pause()
+    onExpand(el?.currentTime ?? 0, (time) => {
+      if (el) el.currentTime = time
+    })
+  }
   return (
     <div ref={ref} data-action className="group/video relative h-36 overflow-hidden rounded-[calc(var(--radius-md)-3px)] bg-black">
       <video
@@ -354,6 +363,10 @@ export function InlineVideo({ src, poster, name, onExpand }: { src: string; post
             exit={{ opacity: 0, transition: { duration: dur.fast, ease: easeIn } }}
             className="absolute inset-0 grid place-items-center bg-black/25"
             onClick={() => {
+              if (!coarse) {
+                expand()
+                return
+              }
               setStarted(true)
               void video.current?.play().catch(() => undefined)
             }}
@@ -368,11 +381,8 @@ export function InlineVideo({ src, poster, name, onExpand }: { src: string; post
         type="button"
         aria-label="放大查看"
         title="放大查看"
-        onClick={() => {
-          video.current?.pause()
-          onExpand()
-        }}
-        className="absolute bottom-2 right-2 grid size-7 place-items-center rounded-[var(--radius-sm)] bg-black/55 text-white opacity-0 transition-opacity group-hover/video:opacity-100 focus-visible:opacity-100"
+        onClick={expand}
+        className={`absolute bottom-2 right-2 grid size-7 place-items-center rounded-[var(--radius-sm)] bg-black/55 text-white transition-opacity ${coarse ? 'opacity-100' : 'opacity-0 group-hover/video:opacity-100 focus-visible:opacity-100'}`}
       >
         <MaximizeIcon className="size-3.5" />
       </button>
@@ -393,6 +403,10 @@ export type ViewerMedia = {
   full?: string
   /** download link shown in the viewer header */
   download?: string
+  /** resume a card's inline playback in the full viewer */
+  initialTime?: number
+  /** receives the final player position when the viewer closes */
+  onProgress?: (time: number) => void
 }
 
 /** RHEA-190 step 6: the board's image viewer pages through every image on the board. */
@@ -490,6 +504,7 @@ function Viewer({ media, reduced, onClose, gallery }: { media: ViewerMedia; redu
   }, [])
 
   useEffect(() => {
+    if (media.type === 'video') return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
       else if (media.type === 'image' && (e.key === '+' || e.key === '=')) setLevel(zoom + 1)
@@ -570,20 +585,7 @@ function Viewer({ media, reduced, onClose, gallery }: { media: ViewerMedia; redu
               onTap={() => setLevel(zoom === 0 ? 1 : 0)}
             />
           </AnimatePresence>
-        ) : (
-          <motion.video
-            src={media.src}
-            poster={media.poster}
-            controls
-            autoPlay
-            playsInline
-            initial={reduced ? false : { scale: 0.94, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.96, opacity: 0 }}
-            transition={springSettle}
-            className="max-h-full max-w-full rounded-[var(--radius-sm)] bg-black shadow-[0_24px_60px_-20px_rgb(0_0_0/0.7)]"
-          />
-        )}
+        ) : <VideoPlayer media={media} reduced={reduced} onClose={onClose} />}
         {gallery && gallery.count > 1 ? (
           <>
             <StepButton side="left" label="上一张" disabled={!canPrev} onClick={() => step(-1)} />
@@ -597,6 +599,267 @@ function Viewer({ media, reduced, onClose, gallery }: { media: ViewerMedia; redu
         </p>
       ) : null}
     </motion.div>
+  )
+}
+
+const HIDE_CONTROLS_MS = 2500
+
+function VideoPlayer({ media, reduced, onClose }: { media: ViewerMedia; reduced: boolean; onClose: () => void }) {
+  const video = useRef<HTMLVideoElement | null>(null)
+  const frame = useRef<HTMLDivElement | null>(null)
+  const hideTimer = useRef(0)
+  const latestTime = useRef(0)
+  const [playing, setPlaying] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [failed, setFailed] = useState(false)
+  const [time, setTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [buffered, setBuffered] = useState(0)
+  const [volume, setVolume] = useState(1)
+  const [muted, setMuted] = useState(false)
+  const [controlsVisible, setControlsVisible] = useState(true)
+  const [fullscreen, setFullscreen] = useState(false)
+
+  const clearHideTimer = useCallback(() => {
+    window.clearTimeout(hideTimer.current)
+  }, [])
+
+  const wakeControls = useCallback(() => {
+    clearHideTimer()
+    setControlsVisible(true)
+    if (playing) hideTimer.current = window.setTimeout(() => setControlsVisible(false), HIDE_CONTROLS_MS)
+  }, [clearHideTimer, playing])
+
+  const play = useCallback(() => {
+    const el = video.current
+    if (!el) return
+    const attempt = el.play()
+    void attempt?.catch(() => setPlaying(false))
+  }, [])
+
+  const toggle = useCallback(() => {
+    const el = video.current
+    if (!el) return
+    if (el.paused) play()
+    else el.pause()
+    wakeControls()
+  }, [play, wakeControls])
+
+  const seekTo = useCallback((next: number) => {
+    const el = video.current
+    if (!el) return
+    const total = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : duration
+    if (!total) return
+    const value = Math.max(0, Math.min(total, next))
+    el.currentTime = value
+    latestTime.current = value
+    setTime(value)
+    wakeControls()
+  }, [duration, wakeControls])
+
+  const changeVolume = useCallback((next: number) => {
+    const el = video.current
+    const value = Math.max(0, Math.min(1, next))
+    if (el) {
+      el.volume = value
+      el.muted = false
+    }
+    setVolume(value)
+    setMuted(false)
+    wakeControls()
+  }, [wakeControls])
+
+  const toggleMuted = useCallback(() => {
+    const el = video.current
+    if (!el) return
+    el.muted = !el.muted
+    setMuted(el.muted)
+    wakeControls()
+  }, [wakeControls])
+
+  const toggleFullscreen = useCallback(() => {
+    const target = frame.current
+    if (!target) return
+    if (document.fullscreenElement === target) {
+      void document.exitFullscreen?.()
+    } else {
+      const request = target.requestFullscreen?.()
+      void request?.catch(() => undefined)
+    }
+    wakeControls()
+  }, [wakeControls])
+
+  useEffect(() => {
+    const onFullscreenChange = () => setFullscreen(document.fullscreenElement === frame.current)
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
+  }, [])
+
+  useEffect(() => {
+    if (!playing) {
+      clearHideTimer()
+      setControlsVisible(true)
+      return
+    }
+    wakeControls()
+    return clearHideTimer
+  }, [clearHideTimer, playing, wakeControls])
+
+  const onProgress = media.onProgress
+  useEffect(() => () => {
+    clearHideTimer()
+    onProgress?.(latestTime.current)
+  }, [clearHideTimer, onProgress])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.altKey || e.ctrlKey || e.metaKey) return
+      const lower = e.key.toLowerCase()
+      if (e.key === 'Escape') {
+        if (document.fullscreenElement === frame.current) void document.exitFullscreen?.()
+        else onClose()
+      } else if (e.key === ' ') toggle()
+      else if (e.key === 'ArrowLeft') seekTo(time - 5)
+      else if (e.key === 'ArrowRight') seekTo(time + 5)
+      else if (e.key === 'ArrowUp') changeVolume(volume + 0.1)
+      else if (e.key === 'ArrowDown') changeVolume(volume - 0.1)
+      else if (lower === 'm') toggleMuted()
+      else if (lower === 'f') toggleFullscreen()
+      else return
+      e.preventDefault()
+      e.stopPropagation()
+      e.stopImmediatePropagation()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [changeVolume, onClose, seekTo, time, toggle, toggleFullscreen, toggleMuted, volume])
+
+  const progress = duration > 0 ? (time / duration) * 100 : 0
+  const bufferedProgress = duration > 0 ? (buffered / duration) * 100 : 0
+  const currentTime = media.initialTime && media.initialTime > 0 ? media.initialTime : 0
+
+  return (
+    <motion.div
+      ref={frame}
+      initial={reduced ? false : { scale: 0.94, opacity: 0 }}
+      animate={{ scale: 1, opacity: 1 }}
+      exit={{ scale: 0.96, opacity: 0 }}
+      transition={springSettle}
+      onPointerMove={wakeControls}
+      onClick={toggle}
+      className={`relative flex items-center justify-center overflow-hidden rounded-[var(--radius-sm)] bg-black shadow-[0_24px_60px_-20px_rgb(0_0_0/0.7)] ${fullscreen ? 'size-full' : 'max-h-full max-w-full'}`}
+    >
+      <video
+        ref={video}
+        src={media.src}
+        poster={media.poster}
+        autoPlay
+        playsInline
+        preload="metadata"
+        className={`max-h-full max-w-full object-contain ${controlsVisible || !playing ? 'cursor-default' : 'cursor-none'}`}
+        onLoadedMetadata={(e) => {
+          const el = e.currentTarget
+          const total = Number.isFinite(el.duration) ? el.duration : 0
+          setDuration(total)
+          if (currentTime > 0) {
+            el.currentTime = Math.min(currentTime, total || currentTime)
+            latestTime.current = el.currentTime
+            setTime(el.currentTime)
+          }
+        }}
+        onDurationChange={(e) => setDuration(Number.isFinite(e.currentTarget.duration) ? e.currentTarget.duration : 0)}
+        onTimeUpdate={(e) => {
+          latestTime.current = e.currentTarget.currentTime
+          setTime(e.currentTarget.currentTime)
+        }}
+        onProgress={(e) => {
+          const el = e.currentTarget
+          const end = el.buffered.length ? el.buffered.end(el.buffered.length - 1) : 0
+          setBuffered(Number.isFinite(end) ? end : 0)
+        }}
+        onLoadStart={() => {
+          setLoading(true)
+          setFailed(false)
+        }}
+        onCanPlay={() => setLoading(false)}
+        onWaiting={() => setLoading(true)}
+        onPlaying={() => {
+          setLoading(false)
+          setPlaying(true)
+        }}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onVolumeChange={(e) => {
+          setVolume(e.currentTarget.volume)
+          setMuted(e.currentTarget.muted)
+        }}
+        onError={() => {
+          setLoading(false)
+          setFailed(true)
+          setPlaying(false)
+        }}
+      />
+      {loading && !failed ? (
+        <span role="status" aria-label="视频加载中" className="pointer-events-none absolute grid size-10 place-items-center rounded-full bg-black/55 text-white">
+          <LoaderCircleIcon className="size-5 animate-spin" />
+        </span>
+      ) : null}
+      {failed ? (
+        <div role="alert" className="absolute inset-0 grid place-items-center bg-black/70 p-6 text-center text-white">
+          <div>
+            <p className="text-sm font-medium">视频播放失败</p>
+            <a href={media.download ?? media.src} aria-label="下载视频" className="mt-3 inline-flex h-8 items-center rounded-[var(--radius-sm)] border border-white/35 px-3 text-xs text-white hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-white/60">
+              下载视频
+            </a>
+          </div>
+        </div>
+      ) : null}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className={`absolute inset-x-0 bottom-0 flex items-center gap-2 bg-linear-to-t from-black/80 via-black/45 to-transparent px-3 pb-3 pt-10 text-white transition-opacity duration-200 ${controlsVisible || !playing ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
+      >
+        <PlayerButton label={playing ? '暂停' : '播放'} onClick={toggle}>
+          {playing ? <PauseIcon className="size-4" fill="currentColor" /> : <PlayIcon className="size-4 translate-x-px" fill="currentColor" />}
+        </PlayerButton>
+        <div className="relative h-5 min-w-0 flex-1" onPointerDown={wakeControls}>
+          <div className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 overflow-hidden rounded-full bg-white/25">
+            <span className="absolute inset-y-0 left-0 bg-white/30" style={{ width: `${Math.min(100, bufferedProgress)}%` }} />
+            <span className="absolute inset-y-0 left-0 bg-[var(--brand)]" style={{ width: `${Math.min(100, progress)}%` }} />
+          </div>
+          <input
+            type="range"
+            min="0"
+            max={duration || 0}
+            step="0.1"
+            value={Math.min(time, duration || 0)}
+            aria-label="播放进度"
+            aria-valuetext={`${formatClock(time)} / ${formatClock(duration)}`}
+            onChange={(e) => seekTo(Number(e.currentTarget.value))}
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0 focus-visible:opacity-100"
+          />
+        </div>
+        <span className="dd-mono w-[68px] shrink-0 text-right text-[10px] tabular-nums text-white/80 sm:w-[76px] sm:text-[10.5px]">
+          {formatClock(time)} / {formatClock(duration)}
+        </span>
+        <div className="flex items-center gap-1">
+          <PlayerButton label={muted ? '取消静音' : '静音'} onClick={toggleMuted}>
+            {muted || volume === 0 ? <VolumeXIcon className="size-4" /> : <Volume2Icon className="size-4" />}
+          </PlayerButton>
+          <input type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume} aria-label="音量" onChange={(e) => changeVolume(Number(e.currentTarget.value))} className="w-10 accent-[var(--brand)] sm:w-16" />
+        </div>
+        <PlayerButton label={fullscreen ? '退出全屏' : '进入全屏'} onClick={toggleFullscreen}>
+          {fullscreen ? <MinimizeIcon className="size-4" /> : <MaximizeIcon className="size-4" />}
+        </PlayerButton>
+      </div>
+    </motion.div>
+  )
+}
+
+function PlayerButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
+  return (
+    <button type="button" aria-label={label} title={label} onClick={onClick} className="grid size-8 shrink-0 place-items-center rounded-[var(--radius-sm)] text-white/90 outline-none hover:bg-white/15 hover:text-white focus-visible:ring-2 focus-visible:ring-white/60">
+      {children}
+    </button>
   )
 }
 
