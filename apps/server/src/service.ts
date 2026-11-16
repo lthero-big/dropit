@@ -119,14 +119,41 @@ export class ClipboardService {
     if (authorId !== session.user.id && space.ownerId !== session.user.id) throw new ApiError(403, 'FORBIDDEN');
   }
   private shareExpires(expiresIn: string) {
-    const window = expiresIn === '1h' ? 3600000 : expiresIn === '1d' ? 86400000 : expiresIn === '7d' ? 604800000 : expiresIn === 'never' ? null : undefined;
-    if (window === undefined) throw new ApiError(400, 'INVALID_INPUT');
-    return window === null ? null : this.now() + window;
+    if (expiresIn === 'never') return null;
+    const match = /^([1-9]\d{0,4})(h|d|mo)$/.exec(expiresIn);
+    if (!match) throw new ApiError(400, 'INVALID_INPUT');
+    const hours = Number(match[1]) * ({ h: 1, d: 24, mo: 720 }[match[2]]!);
+    if (hours > 3650 * 24) throw new ApiError(400, 'INVALID_INPUT');
+    return this.now() + hours * 3600000;
+  }
+  sharePresets(session: Session | undefined): { hours: number[]; days: number[]; months: number[]; views: number[] } {
+    const userId = this.requireSession(session).user.id;
+    const saved = this.repo.setting(`sharePresets:${userId}`);
+    // Older preferences only stored days and views.
+    return { hours: [], days: [], months: [], views: [], ...(saved ? JSON.parse(saved.value) : {}) };
+  }
+  saveSharePresets(session: Session | undefined, input: Record<string, unknown>) {
+    const userId = this.requireSession(session).user.id;
+    const values = (raw: unknown, max: number) => {
+      if (!Array.isArray(raw) || raw.length > 20 || raw.some(value => !Number.isSafeInteger(value) || value < 1 || value > max)) {
+        throw new ApiError(400, 'INVALID_INPUT');
+      }
+      return [...new Set(raw as number[])].sort((a, b) => a - b);
+    };
+    const presets = {
+      hours: values(input.hours === undefined ? [] : input.hours, 87600),
+      days: values(input.days, 3650),
+      months: values(input.months === undefined ? [] : input.months, 121),
+      views: values(input.views, 1000000),
+    };
+    if (presets.hours.length + presets.days.length + presets.months.length > 20) throw new ApiError(400, 'INVALID_INPUT');
+    this.repo.saveSetting(`sharePresets:${userId}`, JSON.stringify(presets), this.now(), userId);
+    return presets;
   }
   createShare(space: Space, session: Session | undefined, itemId: string, expiresIn: string, maxViews: number | null, origin = this.config.origin): SharePublic & { token: string; url: string } {
     const item = this.item(space, itemId);
     this.canManage(space, item.userId, session);
-    if (maxViews !== null && (!Number.isSafeInteger(maxViews) || maxViews < 1 || maxViews > 100)) throw new ApiError(400, 'INVALID_INPUT');
+    if (maxViews !== null && (!Number.isSafeInteger(maxViews) || maxViews < 1 || maxViews > 1000000)) throw new ApiError(400, 'INVALID_INPUT');
     // 6 random base62 characters; a collision with an existing link just draws another one.
     let raw = shortToken();
     const share = {
@@ -164,6 +191,7 @@ export class ClipboardService {
   managedShares(session: Session | undefined, cursor?: ShareCursor) {
     const auth = this.requireSession(session);
     const now = this.now();
+    this.repo.purgeInvalidShares(now, auth.user.id);
     const rows = this.repo.managedShares(auth.user.id, cursor, 51);
     const shares = rows.slice(0, 50).map((share) => this.managedShare(share, now));
     const last = shares.at(-1);

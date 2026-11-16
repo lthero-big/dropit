@@ -27,7 +27,8 @@
 | 条目（`base` = `/spaces/:id` 或 `/rooms/:room`（访问令牌）） | `GET base`、`GET base/items`、`POST base/items/text`、`POST base/items/file`、`PATCH base/items/:id`、`PATCH base/items/:id/labels`、`DELETE base/items/:id`、`GET base/items/:id/{download,thumbnail,preview,media}` |
 | 分组 | `GET/POST base/groups`、`PATCH/DELETE base/groups/:name` |
 | 分片上传 | `POST base/uploads`、`GET base/uploads/:id`、`PUT base/uploads/:id/chunks/:index`、`POST base/uploads/:id/complete`、`DELETE base/uploads/:id` |
-| 分享链接 | `POST/GET base/items/:id/shares`、`DELETE base/shares/:shareId`、公开 `GET /s/:token` 及 `/s/:token/{file,thumbnail,preview,media}` |
+| 分享链接 | `POST/GET base/items/:id/shares`（创建时 `expiresIn` 支持 `Nh` / `Nd` / `Nmo` / `never`，N 为正整数，最长 3650 天，1 月 = 30 天）、`DELETE base/shares/:shareId`、公开 `GET /s/:token` 及 `/s/:token/{file,thumbnail,preview,media}` |
+| 个人分享选项 | `GET/PUT /me/share-presets`（浏览器会话；`{ hours: number[], days: number[], months: number[], views: number[] }`；小时 1–87600、天 1–3650、月 1–121，1 月 = 30 天，有效期合计最多 20 个；次数 1–1000000，最多 20 个。旧请求可省略 hours/months） |
 | 实时 | `GET base/ws`（WebSocket） |
 
 ## WebSocket

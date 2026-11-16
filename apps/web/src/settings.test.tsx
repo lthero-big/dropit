@@ -69,6 +69,7 @@ function stubFetch(handler: (url: string, init?: RequestInit) => Response | Prom
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
       calls.push({ url, init })
+      if (url === '/api/me/share-presets') return json({ days: [], views: [] })
       return handler(url, init)
     }),
   )
@@ -130,7 +131,7 @@ describe('settings and device confirmation', () => {
     expect(screen.getAllByRole('tabpanel')).toHaveLength(1)
     expect(screen.queryByRole('heading', { name: '访问令牌' })).toBeNull()
     expect(screen.queryByLabelText('用户码')).toBeNull()
-    expect(calls.some((call) => ['/api/tokens', '/api/sessions', '/api/spaces', '/api/shares'].includes(call.url))).toBe(false)
+    expect(calls.some((call) => ['/api/tokens', '/api/sessions', '/api/spaces', '/api/shares', '/api/me/share-presets'].includes(call.url))).toBe(false)
 
     fireEvent.click(screen.getByRole('tab', { name: '访问令牌' }))
     expect(window.location.search).toBe('?tab=tokens')
@@ -144,12 +145,22 @@ describe('settings and device confirmation', () => {
     expect(await screen.findByRole('tabpanel', { name: '登录设备' })).toBeTruthy()
     expect(screen.queryByText('laptop')).toBeNull()
     expect(screen.getAllByRole('tabpanel')).toHaveLength(1)
+
+    fireEvent.click(screen.getByRole('tab', { name: '分享选项' }))
+    expect(window.location.search).toBe('?tab=share-presets')
+    expect(await screen.findByRole('tabpanel', { name: '分享选项' })).toBeTruthy()
+    expect(await screen.findByRole('button', { name: '保存分享选项' })).toBeTruthy()
+    expect(calls.some((call) => call.url === '/api/me/share-presets')).toBe(true)
+    expect(screen.queryByRole('region', { name: '登录设备' })).toBeNull()
+    expect(screen.getAllByRole('tabpanel')).toHaveLength(1)
   })
 
   it.each([
     ['/settings?tab=tokens', '访问令牌'],
     ['/settings#tokens', '访问令牌'],
     ['/settings#device-code', '设备码'],
+    ['/settings?tab=share-presets', '分享选项'],
+    ['/settings#share-presets', '分享选项'],
     ['/settings?tab=unknown', '登录方式'],
     ['/settings#unknown', '登录方式'],
   ])('opens the expected category from %s', async (path, category) => {

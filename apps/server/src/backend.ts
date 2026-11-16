@@ -364,6 +364,12 @@ export function createBackend(options: BackendOptions = {}) {
     return c.json({ ...record, token: raw }, 201);
   });
   app.get('/api/tokens', c => c.json({ tokens: repo.accessTokens(service.requireSession(c.get('session')).user.id) }));
+  app.get('/api/me/share-presets', c => c.json(service.sharePresets(browserSession(c))));
+  app.put('/api/me/share-presets', async c => {
+    const auth = browserSession(c);
+    limit(c, 'share-manage', config.rateUpload);
+    return c.json(service.saveSharePresets(auth, await json(c, 2048)));
+  });
   app.get('/api/shares', c => c.json(service.managedShares(browserSession(c), shareCursor(c.req.query('cursor')))));
   app.get('/api/shares/:shareId/link', c => {
     const auth = browserSession(c);
@@ -1367,7 +1373,7 @@ export function createBackend(options: BackendOptions = {}) {
       const space = scope(c);
       limit(c, space.roomKey ? 'room-write' : 'write', space.roomKey ? config.rateRoom : config.rateUpload);
       const body = await json(c, 2048);
-      const maxViews = body.maxViews === undefined || body.maxViews === null ? null : integer(body.maxViews, 1, 100);
+      const maxViews = body.maxViews === undefined || body.maxViews === null ? null : integer(body.maxViews, 1, 1000000);
       return c.json(service.createShare(space, c.get('session'), c.req.param('id')!, string(body.expiresIn, 8), maxViews, originFor(c)), 201);
     });
     app.get(`${base}/items/:id/shares`, c => {
