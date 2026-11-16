@@ -95,6 +95,7 @@ export type ManagedShareState = 'active' | 'expired' | 'exhausted' | 'revoked' |
 export type ManagedShareCopyStatus = 'available' | 'legacy' | 'unavailable';
 export interface ManagedShare extends SharePublic {
   state: ManagedShareState; copyStatus: ManagedShareCopyStatus; sourceName: string | null; spaceName: string | null;
+  sourceKind: 'text' | 'file' | null;
 }
 export interface Flow { stateHash: string; browserHash: string; provider: string; verifier: string; inviteHash: string | null; expiresAt: number; linkUserId?: string | null }
 export interface Identity { provider: string; subject: string; email: string; name: string }

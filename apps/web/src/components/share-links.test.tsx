@@ -12,7 +12,7 @@ const initialExecCommand = Object.getOwnPropertyDescriptor(document, 'execComman
 
 function share(id: string, state: ManagedShareState = 'active', copyStatus: ManagedShareCopyStatus = state === 'active' ? 'available' : 'unavailable'): ManagedShare {
   return {
-    id, itemId: `item-${id}`, state, copyStatus, sourceName: `来源 ${id}`, spaceName: '我的空间',
+    id, itemId: `item-${id}`, state, copyStatus, sourceKind: 'text', sourceName: `来源 ${id}`, spaceName: '我的空间',
     expiresAt: null, maxViews: 5, views: 1, revoked: state === 'revoked' ? 1 : 0, createdAt: 1_700_000_000_000,
   }
 }
@@ -57,6 +57,36 @@ afterEach(() => {
 })
 
 describe('share link management', () => {
+  it('copies short file links only for available file shares and permits a failed copy retry', async () => {
+    const file = { ...share('file'), sourceKind: 'file' }
+    const legacy = { ...share('legacy', 'active', 'legacy'), sourceKind: 'file' }
+    const revoked = { ...share('revoked', 'revoked'), sourceKind: 'file' }
+    const clipboard = vi.fn<Clipboard['writeText']>().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: clipboard } })
+    let linkCalls = 0
+    const requests: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = requestUrl(input)
+      requests.push(url)
+      if (url === '/api/shares') return Promise.resolve(json({ shares: [file, share('text'), legacy, revoked], nextCursor: null }))
+      if (url === '/api/shares/file/link') {
+        if (++linkCalls === 1) return Promise.resolve(json({ error: { code: 'INTERNAL_ERROR' } }, 500))
+        return Promise.resolve(json({ url: 'https://dropit.example/s/Abc234', directUrl: 'https://dropit.example/d/Abc234' }))
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    }))
+    render(<ThemeProvider><ShareLinks /></ThemeProvider>)
+    await screen.findByText('来源 file')
+    expect(screen.getAllByRole('button', { name: '复制文件直链' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: '复制文件直链' }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('复制链接失败，请重试'))
+    expect(disabled(screen.getByRole('button', { name: '复制文件直链' }))).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: '复制文件直链' }))
+    await waitFor(() => expect(clipboard).toHaveBeenCalledWith('https://dropit.example/d/Abc234'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('文件直链已复制'))
+    expect(requests.some((path) => path.startsWith('/api/s/') || path.startsWith('/d/'))).toBe(false)
+  })
+
   it('isolates pending actions by share, deduplicates a row, and permits a failed row retry', async () => {
     const first = share('first')
     const second = share('second')
