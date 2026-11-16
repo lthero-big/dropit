@@ -62,7 +62,7 @@ describe('设置 has no registration invites', () => {
   for (const [who, me] of [['an ordinary user', user], ['an admin', admin]] as const) {
     it(`for ${who}: no 注册邀请 / 用户邀请 section, no /api/me/invites call, space invites still there`, async () => {
       stubFetch(settingsRoutes(me))
-      renderAt('/settings')
+      renderAt('/settings?tab=space-sharing')
       expect(await screen.findByRole('heading', { name: '空间成员与邀请' })).toBeTruthy()
       for (const name of ['注册邀请', '用户邀请']) expect(screen.queryByRole('heading', { name })).toBeNull()
       expect(screen.queryByText(/允许普通用户邀请|每人默认邀请上限/)).toBeNull()
