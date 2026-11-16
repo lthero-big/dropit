@@ -174,6 +174,7 @@ export interface Repository {
   sharesForItem(itemId: string): SharePublic[];
   shareById(id: string): (SharePublic & { spaceId: string; userId: string | null }) | undefined;
   revokeShare(id: string, spaceId: string): void;
+  purgeInvalidShares(now: number, userId?: string): void;
   managedShares(userId: string, cursor: ShareCursor | undefined, limit: number): ManagedShareRow[];
   ownedManagedShare(id: string, userId: string): ManagedShareLinkRow | undefined;
   revokeOwnedShare(id: string, userId: string): void;
@@ -968,16 +969,28 @@ export class SqliteRepository implements Repository {
     return this.db.prepare(`SELECT s.id,s.itemId,s.expiresAt,s.maxViews,s.views,s.revoked,s.createdAt,s.copyToken IS NOT NULL AS hasCopyToken,
       i.id AS sourceItemId,i.kind AS sourceKind,i.text AS sourceText,i.filename AS sourceFilename,i.expiresAt AS sourceExpiresAt,
       sp.id AS sourceSpaceId,sp.name AS sourceSpaceName,sp.expiresAt AS sourceSpaceExpiresAt,sp.closedAt AS sourceSpaceClosedAt,
-      CASE WHEN sp.ownerId=? OR EXISTS (SELECT 1 FROM members m WHERE m.spaceId=sp.id AND m.userId=?) THEN 1 ELSE 0 END AS sourceVisible
+      CASE WHEN sp.roomKey IS NOT NULL OR sp.ownerId=? OR EXISTS (SELECT 1 FROM members m WHERE m.spaceId=sp.id AND m.userId=?) THEN 1 ELSE 0 END AS sourceVisible
       FROM shares s LEFT JOIN items i ON i.id=s.itemId LEFT JOIN spaces sp ON sp.id=s.spaceId
       WHERE s.createdBy=? ${after} ORDER BY s.createdAt DESC,s.id DESC LIMIT ?`)
       .all(userId, userId, ...values) as ManagedShareRow[];
+  }
+  purgeInvalidShares(now: number, userId?: string) {
+    // Keep exhausted links: their last visitor may still be using a download ticket.
+    this.db.prepare(`DELETE FROM shares WHERE ${userId === undefined ? '' : 'createdBy=@userId AND'} (
+      expiresAt<=@now OR NOT EXISTS (
+        SELECT 1 FROM items i JOIN spaces sp ON sp.id=i.spaceId
+        WHERE i.id=shares.itemId AND sp.id=shares.spaceId
+          AND (i.expiresAt IS NULL OR i.expiresAt>@now)
+          AND (sp.expiresAt IS NULL OR sp.expiresAt>@now) AND sp.closedAt IS NULL
+          AND (shares.createdBy IS NULL OR sp.roomKey IS NOT NULL OR sp.ownerId=shares.createdBy
+            OR EXISTS (SELECT 1 FROM members m WHERE m.spaceId=sp.id AND m.userId=shares.createdBy))
+      ))`).run({ now, ...(userId === undefined ? {} : { userId }) });
   }
   ownedManagedShare(id: string, userId: string) {
     return this.db.prepare(`SELECT s.id,s.itemId,s.expiresAt,s.maxViews,s.views,s.revoked,s.createdAt,s.copyToken,s.copyToken IS NOT NULL AS hasCopyToken,
       i.id AS sourceItemId,i.kind AS sourceKind,i.text AS sourceText,i.filename AS sourceFilename,i.expiresAt AS sourceExpiresAt,
       sp.id AS sourceSpaceId,sp.name AS sourceSpaceName,sp.expiresAt AS sourceSpaceExpiresAt,sp.closedAt AS sourceSpaceClosedAt,
-      CASE WHEN sp.ownerId=? OR EXISTS (SELECT 1 FROM members m WHERE m.spaceId=sp.id AND m.userId=?) THEN 1 ELSE 0 END AS sourceVisible
+      CASE WHEN sp.roomKey IS NOT NULL OR sp.ownerId=? OR EXISTS (SELECT 1 FROM members m WHERE m.spaceId=sp.id AND m.userId=?) THEN 1 ELSE 0 END AS sourceVisible
       FROM shares s LEFT JOIN items i ON i.id=s.itemId LEFT JOIN spaces sp ON sp.id=s.spaceId
       WHERE s.id=? AND s.createdBy=?`).get(userId, userId, id, userId) as ManagedShareLinkRow | undefined;
   }
@@ -1030,6 +1043,7 @@ export class SqliteRepository implements Repository {
       const items = (this.db.prepare('SELECT * FROM items WHERE expiresAt<=? OR spaceId IN (SELECT id FROM spaces WHERE expiresAt<=?)').all(now, now) as Item[]).map(mapItem);
       for (const item of items) this.deleteItem(item.id);
       this.db.prepare('DELETE FROM spaces WHERE expiresAt<=?').run(now);
+      this.purgeInvalidShares(now);
       this.db.prepare('DELETE FROM sessions WHERE expiresAt<=?').run(now);
       this.db.prepare('DELETE FROM flows WHERE expiresAt<=?').run(now);
       this.db.prepare('DELETE FROM device_authorizations WHERE expiresAt<=?').run(now);

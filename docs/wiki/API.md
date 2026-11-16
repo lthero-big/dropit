@@ -28,6 +28,7 @@
 | 分组 | `GET/POST base/groups`、`PATCH/DELETE base/groups/:name` |
 | 分片上传 | `POST base/uploads`、`GET base/uploads/:id`、`PUT base/uploads/:id/chunks/:index`、`POST base/uploads/:id/complete`、`DELETE base/uploads/:id` |
 | 分享链接 | `POST/GET base/items/:id/shares`、`DELETE base/shares/:shareId`、公开 `GET /s/:token` 及 `/s/:token/{file,thumbnail,preview,media}` |
+| 个人分享选项 | `GET/PUT /me/share-presets`（浏览器会话；`{ days: number[], views: number[] }`，每类最多 20 个） |
 | 实时 | `GET base/ws`（WebSocket） |
 
 ## WebSocket

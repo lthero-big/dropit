@@ -28,10 +28,8 @@ const unavailableCopyLabels: Partial<Record<ManagedShareState, string>> = {
 const filters: { value: 'all' | ManagedShareState; label: string }[] = [
   { value: 'all', label: '全部状态' },
   { value: 'active', label: '仅有效' },
-  { value: 'expired', label: '仅过期' },
   { value: 'exhausted', label: '仅用尽' },
   { value: 'revoked', label: '仅撤回' },
-  { value: 'source_unavailable', label: '仅来源失效' },
 ]
 
 function stamp(value: number) {
@@ -141,7 +139,7 @@ export function ShareLinks() {
     <Panel
       id="share-links"
       title="分享链接"
-      description="管理由你创建的链接。新创建且仍有效的链接可再次复制；旧版本链接无法恢复，请从原条目重新分享。"
+      description="管理由你创建的链接。已过期或来源失效的记录会自动删除。新创建且仍有效的链接可再次复制；旧版本链接无法恢复，请从原条目重新分享。"
       actions={
         <div className="flex items-center gap-2">
           <label className="sr-only" htmlFor="share-state-filter">状态筛选</label>

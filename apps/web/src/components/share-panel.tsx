@@ -2,23 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 're
 import { createPortal } from 'react-dom'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button.tsx'
-import { api, errorText } from '@/lib/api.ts'
+import { ApiError, api, errorText } from '@/lib/api.ts'
 import { copyText, formatRemain } from '@/lib/format.ts'
 import type { ShareCreated, ShareLink } from '@/lib/types.ts'
-
-const expiryOptions = [
-  ['1h', '1 小时'],
-  ['1d', '1 天'],
-  ['7d', '7 天'],
-  ['never', '不过期'],
-] as const
-
-const viewOptions = [
-  ['1', '仅一次'],
-  ['5', '5 次'],
-  ['10', '10 次'],
-  ['', '不限'],
-] as const
+import { defaultShareDays, defaultShareViews, emptySharePresets, shareChoices, type SharePresets } from '@/lib/share-presets.ts'
 
 function shareState(share: ShareLink, now: number): string {
   if (share.revoked) return '已撤销'
@@ -95,10 +82,25 @@ export function SharePanel({
     }
   }, [anchorRef])
   const [shares, setShares] = useState<ShareLink[]>([])
-  const [expiresIn, setExpiresIn] = useState<(typeof expiryOptions)[number][0]>('1d')
+  const [presets, setPresets] = useState<SharePresets>(emptySharePresets)
+  const [expiresIn, setExpiresIn] = useState('1d')
   const [maxViews, setMaxViews] = useState('1')
   const [createdUrl, setCreatedUrl] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    api<SharePresets>('/api/me/share-presets')
+      .then((body) => { if (!cancelled) setPresets(body) })
+      .catch((error: unknown) => {
+        // Anonymous temporary-room visitors use the built-in options.
+        if (!cancelled && !(error instanceof ApiError && (error.status === 401 || error.status === 404))) toast.error(errorText(error))
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  const expiryOptions = [['1h', '1 小时'], ...shareChoices(defaultShareDays, presets.days).map((days) => [`${days}d`, `${days} 天`]), ['never', '不过期']]
+  const viewOptions = [...shareChoices(defaultShareViews, presets.views).map((views) => [String(views), views === 1 ? '仅一次' : `${views} 次`]), ['', '不限']]
 
   useEffect(() => {
     let cancelled = false
@@ -166,7 +168,7 @@ export function SharePanel({
           <select
             aria-label="有效期"
             value={expiresIn}
-            onChange={(event) => setExpiresIn(event.target.value as (typeof expiryOptions)[number][0])}
+            onChange={(event) => setExpiresIn(event.target.value)}
             className="mt-1 block border border-line-2 bg-transparent px-2 py-1"
           >
             {expiryOptions.map(([value, label]) => (
@@ -195,6 +197,7 @@ export function SharePanel({
           生成链接
         </Button>
       </div>
+      <a href="/settings#share-presets" className="mt-2 inline-block text-xs text-muted-foreground underline">在设置中添加分享选项</a>
       {createdUrl ? (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <input readOnly aria-label="分享链接" value={createdUrl} className="min-w-0 flex-1 border border-line-2 bg-transparent px-2 py-1 text-xs" />

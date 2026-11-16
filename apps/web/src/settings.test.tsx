@@ -69,6 +69,7 @@ function stubFetch(handler: (url: string, init?: RequestInit) => Response | Prom
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
       calls.push({ url, init })
+      if (url === '/api/me/share-presets') return json({ days: [], views: [] })
       return handler(url, init)
     }),
   )

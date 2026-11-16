@@ -7,6 +7,7 @@ import { DeviceSessions } from '@/components/device-sessions.tsx'
 import { LoginMethods } from '@/components/login-methods.tsx'
 import { PasswordForm } from '@/components/password-form.tsx'
 import { ShareLinks } from '@/components/share-links.tsx'
+import { SharePresets } from '@/components/share-presets.tsx'
 import { SpaceSharing } from '@/components/space-sharing.tsx'
 import { ChoiceChip, Facts, NavLinkOut, Panel, SettingRow, SettingsLayout, SideNav, StatusPill, fieldClass, labelClass, selectClass, type NavGroup } from '@/components/settings-ui.tsx'
 import { PageTitle, Shell } from '@/components/shell.tsx'
@@ -28,8 +29,8 @@ const expiryChoices = [
   { value: 'custom', label: '自定义' },
 ]
 
-type SectionId = 'login-methods' | 'password' | 'devices' | 'space-sharing' | 'share-links' | 'device-code' | 'tokens'
-const SECTION_IDS: SectionId[] = ['login-methods', 'password', 'devices', 'space-sharing', 'share-links', 'device-code', 'tokens']
+type SectionId = 'login-methods' | 'password' | 'devices' | 'space-sharing' | 'share-presets' | 'share-links' | 'device-code' | 'tokens'
+const SECTION_IDS: SectionId[] = ['login-methods', 'password', 'devices', 'space-sharing', 'share-links', 'share-presets', 'device-code', 'tokens']
 const SETTINGS_NAV: NavGroup<SectionId>[] = [
   {
     label: '账户',
@@ -39,6 +40,7 @@ const SETTINGS_NAV: NavGroup<SectionId>[] = [
       { id: 'devices', label: '登录设备', icon: MonitorSmartphoneIcon, hint: '已登录的浏览器' },
       { id: 'space-sharing', label: '空间成员', icon: UsersIcon, hint: '邀请别人加入我的空间' },
       { id: 'share-links', label: '分享链接', icon: Share2Icon, hint: '查看、撤回和删除记录' },
+      { id: 'share-presets', label: '分享选项', icon: Share2Icon, hint: '自定义分享天数和次数' },
     ],
   },
   {
@@ -106,7 +108,7 @@ export function SettingsPage() {
       navigate('/admin?tab=invites', { replace: true })
       return
     }
-    if (!['devices', 'login-methods', 'password', 'space-sharing', 'share-links', 'device-code', 'tokens'].includes(anchor)) return
+    if (!SECTION_IDS.includes(anchor as SectionId)) return
     const id = window.setTimeout(() => document.getElementById(anchor)?.scrollIntoView?.({ block: 'start' }), 50)
     return () => window.clearTimeout(id)
   }, [me, navigate])
@@ -300,6 +302,7 @@ export function SettingsPage() {
         </Panel>
         <SpaceSharing meId={me.user.id} />
         <ShareLinks />
+        <SharePresets />
         <DeviceConfirm initialCode="" initialVerificationId={null} auto={false} />
         <Panel
           id="tokens"

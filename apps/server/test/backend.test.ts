@@ -1466,6 +1466,130 @@ test('RHEA-190 step 7: migration 10 adds the per-browser room binding to old dat
   assert.equal(check.pragma('user_version', { simple: true }), 19);
 });
 
+test('RHEA-222: personal share presets persist, normalize and stay isolated from other accounts', async t => {
+  const f = await fixture({ rateUpload: 1000 }); t.after(() => f.dispose());
+  const admin = await f.admin();
+  const endpoint = '/api/me/share-presets';
+  assert.equal((await f.request(endpoint)).status, 401);
+  assert.equal((await f.json(endpoint, { days: [], views: [] }, '', 'PUT')).status, 401);
+  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), { days: [], views: [] });
+  const saved = await f.json(endpoint, { days: [30, 3, 30], views: [200, 20, 200] }, admin.cookie, 'PUT');
+  assert.equal(saved.status, 200);
+  assert.deepEqual(await saved.json(), { days: [3, 30], views: [20, 200] });
+  const reopened = new SqliteRepository(join(f.directory, 'dropit.sqlite'));
+  try {
+    assert.deepEqual(JSON.parse(reopened.setting(`sharePresets:${admin.user.id}`)!.value), { days: [3, 30], views: [20, 200] });
+  } finally { reopened.close(); }
+  const invitation = await f.invite(admin.cookie, admin.space.id);
+  const member = await f.login('presets-member', invitation.token);
+  assert.deepEqual(await (await f.request(endpoint, {}, member.cookie)).json(), { days: [], views: [] });
+  assert.equal((await f.json(endpoint, { days: [14], views: [50] }, member.cookie, 'PUT')).status, 200);
+  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), { days: [3, 30], views: [20, 200] });
+  for (const invalid of [
+    {}, { days: '3', views: [] }, { days: [0], views: [] }, { days: [3651], views: [] },
+    { days: [1.5], views: [] }, { days: ['3'], views: [] }, { days: [], views: [-1] },
+    { days: [], views: [1000001] }, { days: [], views: [2.5] }, { days: Array(21).fill(2), views: [] },
+  ]) assert.equal((await f.json(endpoint, invalid, admin.cookie, 'PUT')).status, 400, JSON.stringify(invalid));
+  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), { days: [3, 30], views: [20, 200] });
+  const pat = await (await f.json('/api/tokens', { name: 'presets', scopes: ['read', 'write'], expiresInDays: 1 }, admin.cookie)).json();
+  assert.equal((await f.request(endpoint, { headers: { authorization: `Bearer ${pat.token}` } })).status, 403);
+  assert.equal((await f.json(endpoint, { days: [], views: [] }, admin.cookie, 'PUT')).status, 200);
+  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), { days: [], views: [] });
+});
+
+test('RHEA-222: custom share days and view counts enforce bounds and preserve legacy options', async t => {
+  const f = await fixture({ rateUpload: 1000 }); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const { item } = await (await f.json(`${base}/items/text`, { text: 'custom share' }, admin.cookie)).json();
+  const endpoint = `${base}/items/${item.id}/shares`;
+  for (const [expiresIn, lifetime, maxViews] of [
+    ['1h', 3600000, 1], ['1d', 86400000, 5], ['7d', 604800000, 10],
+    ['3d', 3 * 86400000, 200], ['3650d', 3650 * 86400000, 1000000], ['never', null, null],
+  ] as const) {
+    const response = await f.json(endpoint, { expiresIn, maxViews }, admin.cookie);
+    assert.equal(response.status, 201);
+    const share = await response.json();
+    assert.equal(share.expiresAt, lifetime === null ? null : f.now() + lifetime);
+    assert.equal(share.maxViews, maxViews);
+    assert.equal((await f.request(`/api/s/${share.token}`)).status, 200);
+  }
+  for (const expiresIn of ['0d', '-1d', '1.5d', '3651d', '01d', '2h', '3', 'Infinityd']) {
+    assert.equal((await f.json(endpoint, { expiresIn }, admin.cookie)).status, 400, expiresIn);
+  }
+  for (const maxViews of [0, -1, 1.5, 1000001, '20']) {
+    assert.equal((await f.json(endpoint, { expiresIn: '3d', maxViews }, admin.cookie)).status, 400);
+  }
+  const room = await (await f.json('/api/rooms', {})).json();
+  const roomBase = `/api/rooms/${room.token}`;
+  const roomItem = await (await f.json(`${roomBase}/items/text`, { text: 'anonymous' })).json();
+  assert.equal((await f.json(`${roomBase}/items/${roomItem.item.id}/shares`, { expiresIn: '14d', maxViews: 200 })).status, 201);
+});
+
+test('RHEA-222: purging invalid shares precedes pagination and does not purge another account on read', async t => {
+  const f = await fixture({ rateUpload: 1000 }); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const { item } = await (await f.json(`${base}/items/text`, { text: 'pagination cleanup' }, admin.cookie)).json();
+  for (let index = 0; index < 51; index++) {
+    await f.json(`${base}/items/${item.id}/shares`, { expiresIn: 'never' }, admin.cookie);
+  }
+  const invitation = await f.invite(admin.cookie, admin.space.id);
+  const member = await f.login('cleanup-member', invitation.token);
+  const memberItem = await (await f.json(`${base}/items/text`, { text: 'member share' }, member.cookie)).json();
+  assert.equal((await f.json(`${base}/items/${memberItem.item.id}/shares`, { expiresIn: '1h' }, member.cookie)).status, 201);
+  for (let index = 0; index < 55; index++) {
+    await f.json(`${base}/items/${item.id}/shares`, { expiresIn: '1h' }, admin.cookie);
+  }
+  f.advance(3600000);
+  const first = await (await f.request('/api/shares', {}, admin.cookie)).json();
+  assert.equal(first.shares.length, 50);
+  assert.ok(first.shares.every((share: { state: string }) => share.state === 'active'));
+  const second = await (await f.request(`/api/shares?cursor=${encodeURIComponent(first.nextCursor)}`, {}, admin.cookie)).json();
+  assert.equal(second.shares.length, 1);
+  assert.equal(second.nextCursor, null);
+  assert.equal(f.repo.managedShares(f.repo.users().find(user => user.name === 'cleanup-member')!.id, undefined, 100).length, 1);
+  const db = new Database(join(f.directory, 'dropit.sqlite'), { readonly: true });
+  try { assert.equal((db.prepare('SELECT count(*) AS n FROM shares').get() as { n: number }).n, 52); }
+  finally { db.close(); }
+  assert.deepEqual((await (await f.request('/api/shares', {}, member.cookie)).json()).shares, []);
+});
+
+test('RHEA-222: scheduled cleanup removes missing, expired and inaccessible sources, keeping live rooms and last-view tickets', async t => {
+  const f = await fixture({ rateUpload: 1000 }); t.after(() => f.dispose());
+  const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
+  const uploaded = await (await f.upload(base, admin.cookie, 'last view download')).json();
+  const once = await (await f.json(`${base}/items/${uploaded.item.id}/shares`, { expiresIn: 'never', maxViews: 1 }, admin.cookie)).json();
+  const opened = await (await f.request(`/api/s/${once.token}`)).json();
+  const { item } = await (await f.json(`${base}/items/text`, { text: 'gone' }, admin.cookie)).json();
+  const missing = await (await f.json(`${base}/items/${item.id}/shares`, { expiresIn: 'never' }, admin.cookie)).json();
+  await f.request(`${base}/items/${item.id}`, { method: 'DELETE' }, admin.cookie);
+  const expiring = await (await f.json(`${base}/items/${uploaded.item.id}/shares`, { expiresIn: '1h' }, admin.cookie)).json();
+  const invitation = await f.invite(admin.cookie, admin.space.id);
+  const member = await f.login('former-member', invitation.token);
+  const memberItem = await (await f.json(`${base}/items/text`, { text: 'member share' }, member.cookie)).json();
+  const inaccessible = await (await f.json(`${base}/items/${memberItem.item.id}/shares`, { expiresIn: 'never' }, member.cookie)).json();
+  const memberId = f.repo.users().find(user => user.name === 'former-member')!.id;
+  f.repo.removeMember(admin.space.id, memberId);
+  const room = await (await f.json('/api/rooms', {}, admin.cookie)).json();
+  const roomBase = `/api/rooms/${room.token}`;
+  const roomItem = await (await f.json(`${roomBase}/items/text`, { text: 'live room' }, admin.cookie)).json();
+  const roomShare = await (await f.json(`${roomBase}/items/${roomItem.item.id}/shares`, { expiresIn: 'never' }, admin.cookie)).json();
+  // Read cleanup must preserve the ticket granted to the last viewer.
+  await f.request('/api/shares', {}, admin.cookie);
+  f.repo.expire(f.now());
+  assert.equal((await f.request(`/api/s/${once.token}/file?access=${opened.access}`)).status, 200);
+  assert.equal((await f.request(`/api/s/${once.token}`)).status, 404);
+  const live = await (await f.request('/api/shares', {}, admin.cookie)).json();
+  assert.equal(live.shares.find((share: { id: string }) => share.id === roomShare.id).state, 'active');
+  assert.equal((await f.request(`/api/s/${missing.token}`)).status, 404);
+  assert.equal((await f.request(`/api/s/${inaccessible.token}`)).status, 404);
+  f.advance(3600000);
+  f.repo.expire(f.now());
+  assert.equal(f.repo.sharesForItem(uploaded.item.id).some(share => share.id === expiring.id), false);
+  f.repo.setRoomClosed(room.token.split('.')[0], true, f.now());
+  f.repo.expire(f.now());
+  assert.equal(f.repo.sharesForItem(roomItem.item.id).length, 0);
+});
+
 test('RHEA-210: account share management isolates creators and keeps revocation history', async t => {
   const f = await fixture(); t.after(() => f.dispose());
   const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
@@ -1479,14 +1603,13 @@ test('RHEA-210: account share management isolates creators and keeps revocation 
   f.advance(3600001);
 
   let listed = await (await f.request('/api/shares', {}, admin.cookie)).json();
-  assert.equal(listed.shares.length, 3);
+  assert.equal(listed.shares.length, 2);
   assert.equal(JSON.stringify(listed).includes('tokenHash'), false);
   assert.equal(JSON.stringify(listed).includes(history.token), false);
   assert.equal(JSON.stringify(listed).includes('copyToken'), false);
   assert.equal(listed.shares.find((share: { id: string }) => share.id === history.id).copyStatus, 'available');
   assert.equal(listed.shares.find((share: { id: string }) => share.id === history.id).sourceName, '管理中的文本');
-  assert.equal(listed.shares.find((share: { id: string }) => share.id === expiring.id).state, 'expired');
-  assert.equal(listed.shares.find((share: { id: string }) => share.id === expiring.id).copyStatus, 'unavailable');
+  assert.equal(listed.shares.some((share: { id: string }) => share.id === expiring.id), false);
   assert.equal(listed.shares.find((share: { id: string }) => share.id === exhausted.id).state, 'exhausted');
   assert.equal(listed.shares.find((share: { id: string }) => share.id === exhausted.id).copyStatus, 'unavailable');
   assert.equal((await f.request(`/api/shares/${history.id}`, { method: 'DELETE' }, admin.cookie)).status, 409);
@@ -1504,14 +1627,12 @@ test('RHEA-210: account share management isolates creators and keeps revocation 
   listed = await (await f.request('/api/shares', {}, admin.cookie)).json();
   assert.equal(listed.shares.find((share: { id: string }) => share.id === history.id).state, 'revoked');
 
-  assert.equal((await f.request(`${base}/items/${item.id}`, { method: 'DELETE' }, admin.cookie)).status, 204);
-  listed = await (await f.request('/api/shares', {}, admin.cookie)).json();
-  const invalid = listed.shares.find((share: { id: string }) => share.id === exhausted.id);
-  assert.equal(invalid.state, 'source_unavailable');
-  assert.equal(invalid.sourceName, null);
   assert.equal((await f.request(`/api/shares/${history.id}`, { method: 'DELETE' }, admin.cookie)).status, 204);
   listed = await (await f.request('/api/shares', {}, admin.cookie)).json();
   assert.equal(listed.shares.some((share: { id: string }) => share.id === history.id), false);
+  assert.equal((await f.request(`${base}/items/${item.id}`, { method: 'DELETE' }, admin.cookie)).status, 204);
+  listed = await (await f.request('/api/shares', {}, admin.cookie)).json();
+  assert.deepEqual(listed.shares, []);
 });
 
 test('RHEA-210: an owner can copy the unchanged recoverable link without exposing it in history', async t => {
