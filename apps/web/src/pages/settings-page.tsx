@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { Link, useNavigate } from 'react-router'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router'
 import { ArrowRightIcon, KeyRoundIcon, LockKeyholeIcon, KeySquareIcon, MonitorSmartphoneIcon, PlusIcon, Share2Icon, ShieldIcon, SquareTerminalIcon, UserRoundIcon, UsersIcon } from 'lucide-react'
 import { toast } from 'sonner'
 import { DeviceConfirm } from '@/components/device-confirm.tsx'
@@ -71,10 +71,10 @@ export function SettingsPage() {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [pendingRevoke, setPendingRevoke] = useState<string | null>(null)
-  const [section, setSection] = useState<SectionId>(() => {
-    const anchor = window.location.hash.slice(1) as SectionId
-    return SECTION_IDS.includes(anchor) ? anchor : 'login-methods'
-  })
+  const location = useLocation()
+  const requestedSection = (new URLSearchParams(location.search).get('tab') ?? location.hash.slice(1)) as SectionId
+  const section = SECTION_IDS.includes(requestedSection) ? requestedSection : 'login-methods'
+  const contentRef = useRef<HTMLDivElement>(null)
   const navigate = useNavigate()
 
   const load = useCallback(async () => {
@@ -83,7 +83,7 @@ export function SettingsPage() {
   }, [])
 
   useEffect(() => {
-    if (!me) return
+    if (!me || section !== 'tokens') return
     let cancelled = false
     load().catch((error: unknown) => {
       if (!cancelled) toast.error(errorText(error))
@@ -91,10 +91,10 @@ export function SettingsPage() {
     return () => {
       cancelled = true
     }
-  }, [load, me])
+  }, [load, me, section])
 
   useEffect(() => {
-    const anchor = window.location.hash.slice(1)
+    const anchor = location.hash.slice(1)
     if (!me) return
     // RHEA-190 m22: OAuth moved to 管理. Old links to /settings#oauth land there.
     if (anchor === 'oauth' && me.user.role === 'admin') {
@@ -106,38 +106,15 @@ export function SettingsPage() {
       navigate('/admin?tab=invites', { replace: true })
       return
     }
-    if (!['devices', 'login-methods', 'password', 'space-sharing', 'share-links', 'device-code', 'tokens'].includes(anchor)) return
-    const id = window.setTimeout(() => document.getElementById(anchor)?.scrollIntoView?.({ block: 'start' }), 50)
-    return () => window.clearTimeout(id)
-  }, [me, navigate])
+  }, [me, navigate, location.hash])
 
-  // Follow the scroll position so the side nav shows where you are.
-  useEffect(() => {
-    if (!me || typeof IntersectionObserver !== 'function') return
-    const observer = new IntersectionObserver(
-      (records) => {
-        const visible = records.filter((record) => record.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0]
-        if (visible && SECTION_IDS.includes(visible.target.id as SectionId)) setSection(visible.target.id as SectionId)
-      },
-      { rootMargin: '-96px 0px -60% 0px' },
-    )
-    const timer = window.setTimeout(() => {
-      for (const id of SECTION_IDS) {
-        const el = document.getElementById(id)
-        if (el) observer.observe(el)
-      }
-    }, 100)
-    return () => {
-      window.clearTimeout(timer)
-      observer.disconnect()
-    }
-  }, [me])
-
-  function jumpTo(id: SectionId) {
-    setSection(id)
-    const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    document.getElementById(id)?.scrollIntoView?.({ behavior: reduce ? 'auto' : 'smooth', block: 'start' })
-    window.history.replaceState(null, '', `#${id}`)
+  function selectSection(id: SectionId) {
+    const params = new URLSearchParams(location.search)
+    params.set('tab', id)
+    navigate({ pathname: location.pathname, search: `?${params.toString()}`, hash: '' })
+    // Keep the navigation visible when leaving a long settings category.
+    const top = contentRef.current?.getBoundingClientRect().top ?? 0
+    if (top < 0) window.scrollBy({ top: top - 88 })
   }
 
   useEffect(() => {
@@ -265,8 +242,8 @@ export function SettingsPage() {
             label="设置分类"
             groups={SETTINGS_NAV}
             active={section}
-            onSelect={jumpTo}
-            mode="anchors"
+            onSelect={selectSection}
+            mode="tabs"
             footer={
               me.user.role === 'admin' ? (
                 <div className="grid gap-0.5">
@@ -283,132 +260,140 @@ export function SettingsPage() {
           />
         }
       >
-        <LoginMethods hasPassword={Boolean(me.hasPassword)} />
-        <Panel
-          id="password"
-          title="密码"
-          description={
-            me.hasPassword
-              ? `用 ${me.user.email} + 密码登录。修改后会登出其他设备。`
-              : `这个账号还没有密码，只能用 GitHub / Google 登录。设置后也可以用 ${me.user.email} + 密码登录。`
-          }
-        >
-          <PasswordForm hasPassword={Boolean(me.hasPassword)} onDone={refresh} />
-        </Panel>
-        <Panel id="devices" title="登录设备" description="所有登录了这个账号的浏览器。可以单独登出某一台，或一次登出其他所有设备。">
-          <DeviceSessions onSelfSignedOut={() => void refresh().then(() => window.location.assign('/login'))} />
-        </Panel>
-        <SpaceSharing meId={me.user.id} />
-        <ShareLinks />
-        <DeviceConfirm initialCode="" initialVerificationId={null} auto={false} />
-        <Panel
-          id="tokens"
-          title="访问令牌"
-          description="给命令行、脚本或其他程序用的个人令牌。明文只在创建时显示一次。"
-          actions={
-            <Button type="button" onClick={() => setCreating(true)}>
-              <PlusIcon aria-hidden="true" />
-              创建令牌
-            </Button>
-          }
-        >
-          {tokens.length === 0 ? <p className="rounded-md border border-dashed border-line-2 p-4 text-sm text-muted-foreground">还没有令牌。用设备码登录，或手动创建一个。</p> : null}
-          <ul className="grid gap-3">
-            {tokens.map((token) => {
-              const state = tokenState(token, now)
-              const active = state === '有效'
-              return (
-                <li key={token.id} className={`rounded-md border border-line-1 bg-surface-0 p-4 ${active ? '' : 'text-fg-3'}`} data-token-id={token.id}>
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    {editing === token.id ? (
-                      <form
-                        className="flex grow flex-col gap-2 sm:flex-row"
-                        onSubmit={(event) => {
-                          event.preventDefault()
-                          void rename(token.id)
-                        }}
-                      >
-                        <label className="sr-only" htmlFor={`rename-${token.id}`}>
-                          新名称
-                        </label>
-                        <input id={`rename-${token.id}`} className={`${fieldClass} grow`} value={draft} maxLength={80} onChange={(event) => setDraft(event.target.value)} />
-                        <Button type="submit" className="h-10">
-                          保存
-                        </Button>
-                        <Button type="button" variant="outline" className="h-10" onClick={() => setEditing(null)}>
-                          取消
-                        </Button>
-                      </form>
-                    ) : (
-                      <div className="flex min-w-0 flex-wrap items-center gap-2">
-                        <h3 className="text-base font-semibold break-all text-fg">{token.name}</h3>
-                        <StatusPill tone={active ? 'good' : 'neutral'}>{state}</StatusPill>
-                      </div>
-                    )}
-                    {editing === token.id ? null : (
-                      <div className="flex flex-wrap gap-2">
-                        {active ? (
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => {
-                              setEditing(token.id)
-                              setDraft(token.name)
-                              setPendingRevoke(null)
+        <div ref={contentRef} role="tabpanel" id={`panel-${section}`} aria-labelledby={`tab-${section}`} tabIndex={0}>
+          {section === 'login-methods' ? <LoginMethods hasPassword={Boolean(me.hasPassword)} /> : null}
+          {section === 'password' ? (
+            <Panel
+              id="password"
+              title="密码"
+              description={
+                me.hasPassword
+                  ? `用 ${me.user.email} + 密码登录。修改后会登出其他设备。`
+                  : `这个账号还没有密码，只能用 GitHub / Google 登录。设置后也可以用 ${me.user.email} + 密码登录。`
+              }
+            >
+              <PasswordForm hasPassword={Boolean(me.hasPassword)} onDone={refresh} />
+            </Panel>
+          ) : null}
+          {section === 'devices' ? (
+            <Panel id="devices" title="登录设备" description="所有登录了这个账号的浏览器。可以单独登出某一台，或一次登出其他所有设备。">
+              <DeviceSessions onSelfSignedOut={() => void refresh().then(() => window.location.assign('/login'))} />
+            </Panel>
+          ) : null}
+          {section === 'space-sharing' ? <SpaceSharing meId={me.user.id} /> : null}
+          {section === 'share-links' ? <ShareLinks /> : null}
+          {section === 'device-code' ? <DeviceConfirm initialCode="" initialVerificationId={null} auto={false} /> : null}
+          {section === 'tokens' ? (
+            <Panel
+              id="tokens"
+              title="访问令牌"
+              description="给命令行、脚本或其他程序用的个人令牌。明文只在创建时显示一次。"
+              actions={
+                <Button type="button" onClick={() => setCreating(true)}>
+                  <PlusIcon aria-hidden="true" />
+                  创建令牌
+                </Button>
+              }
+            >
+              {tokens.length === 0 ? <p className="rounded-md border border-dashed border-line-2 p-4 text-sm text-muted-foreground">还没有令牌。用设备码登录，或手动创建一个。</p> : null}
+              <ul className="grid gap-3">
+                {tokens.map((token) => {
+                  const state = tokenState(token, now)
+                  const active = state === '有效'
+                  return (
+                    <li key={token.id} className={`rounded-md border border-line-1 bg-surface-0 p-4 ${active ? '' : 'text-fg-3'}`} data-token-id={token.id}>
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        {editing === token.id ? (
+                          <form
+                            className="flex grow flex-col gap-2 sm:flex-row"
+                            onSubmit={(event) => {
+                              event.preventDefault()
+                              void rename(token.id)
                             }}
                           >
-                            改名
-                          </Button>
-                        ) : null}
-                        {!active ? (
-                          pendingRevoke === token.id ? (
-                            <Button type="button" variant="destructive" size="sm" onClick={() => void purge(token.id)}>
-                              确认删除
+                            <label className="sr-only" htmlFor={`rename-${token.id}`}>
+                              新名称
+                            </label>
+                            <input id={`rename-${token.id}`} className={`${fieldClass} grow`} value={draft} maxLength={80} onChange={(event) => setDraft(event.target.value)} />
+                            <Button type="submit" className="h-10">
+                              保存
                             </Button>
-                          ) : (
-                            <Button type="button" variant="outline" size="sm" onClick={() => setPendingRevoke(token.id)}>
-                              删除
+                            <Button type="button" variant="outline" className="h-10" onClick={() => setEditing(null)}>
+                              取消
                             </Button>
-                          )
-                        ) : pendingRevoke === token.id ? (
-                          <Button type="button" variant="destructive" size="sm" onClick={() => void revoke(token.id)}>
-                            确认撤销
-                          </Button>
+                          </form>
                         ) : (
-                          <Button type="button" variant="destructive" size="sm" onClick={() => setPendingRevoke(token.id)}>
-                            撤销
-                          </Button>
+                          <div className="flex min-w-0 flex-wrap items-center gap-2">
+                            <h3 className="text-base font-semibold break-all text-fg">{token.name}</h3>
+                            <StatusPill tone={active ? 'good' : 'neutral'}>{state}</StatusPill>
+                          </div>
+                        )}
+                        {editing === token.id ? null : (
+                          <div className="flex flex-wrap gap-2">
+                            {active ? (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  setEditing(token.id)
+                                  setDraft(token.name)
+                                  setPendingRevoke(null)
+                                }}
+                              >
+                                改名
+                              </Button>
+                            ) : null}
+                            {!active ? (
+                              pendingRevoke === token.id ? (
+                                <Button type="button" variant="destructive" size="sm" onClick={() => void purge(token.id)}>
+                                  确认删除
+                                </Button>
+                              ) : (
+                                <Button type="button" variant="outline" size="sm" onClick={() => setPendingRevoke(token.id)}>
+                                  删除
+                                </Button>
+                              )
+                            ) : pendingRevoke === token.id ? (
+                              <Button type="button" variant="destructive" size="sm" onClick={() => void revoke(token.id)}>
+                                确认撤销
+                              </Button>
+                            ) : (
+                              <Button type="button" variant="destructive" size="sm" onClick={() => setPendingRevoke(token.id)}>
+                                撤销
+                              </Button>
+                            )}
+                          </div>
                         )}
                       </div>
-                    )}
-                  </div>
-                  <Facts
-                    className="mt-3 border-t border-line-1 pt-3"
-                    items={[
-                      { label: '范围', value: token.scopes.map(scopeLabel).join('、') },
-                      { label: '创建', value: formatWhen(token.createdAt, now) },
-                      { label: '最近使用', value: token.lastUsedAt === null ? '从未使用' : formatStamp(token.lastUsedAt) },
-                      { label: '过期', value: token.expiresAt === null ? '永不' : formatStamp(token.expiresAt) },
-                    ]}
-                  />
-                </li>
-              )
-            })}
-          </ul>
-        </Panel>
-        {me.user.role === 'admin' ? (
-          <Panel title="站点设置" description="OAuth 登录（GitHub / Google 应用凭据）是整个站点的配置，已移到「管理 → 登录与安全」。" flush data-admin-moved="">
-            <SettingRow title="OAuth 登录配置" description="回调地址、Client ID / Secret、启用与验证">
-              <Button type="button" variant="outline" asChild>
-                <Link to="/admin?tab=oauth">
-                  前往管理
-                  <ArrowRightIcon aria-hidden="true" />
-                </Link>
-              </Button>
-            </SettingRow>
-          </Panel>
-        ) : null}
+                      <Facts
+                        className="mt-3 border-t border-line-1 pt-3"
+                        items={[
+                          { label: '范围', value: token.scopes.map(scopeLabel).join('、') },
+                          { label: '创建', value: formatWhen(token.createdAt, now) },
+                          { label: '最近使用', value: token.lastUsedAt === null ? '从未使用' : formatStamp(token.lastUsedAt) },
+                          { label: '过期', value: token.expiresAt === null ? '永不' : formatStamp(token.expiresAt) },
+                        ]}
+                      />
+                    </li>
+                  )
+                })}
+              </ul>
+            </Panel>
+          ) : null}
+          {section === 'login-methods' && me.user.role === 'admin' ? (
+            <Panel title="站点设置" description="OAuth 登录（GitHub / Google 应用凭据）是整个站点的配置，已移到「管理 → 登录与安全」。" flush data-admin-moved="">
+              <SettingRow title="OAuth 登录配置" description="回调地址、Client ID / Secret、启用与验证">
+                <Button type="button" variant="outline" asChild>
+                  <Link to="/admin?tab=oauth">
+                    前往管理
+                    <ArrowRightIcon aria-hidden="true" />
+                  </Link>
+                </Button>
+              </SettingRow>
+            </Panel>
+          ) : null}
+        </div>
       </SettingsLayout>
 
       {creating ? (

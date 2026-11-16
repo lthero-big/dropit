@@ -232,7 +232,7 @@ describe('personal invites (admin-only since RHEA-190 m50)', () => {
       if (url === '/api/spaces/s1/members') return json({ members: [] })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
-    renderAt('/settings')
+    renderAt('/settings?tab=space-sharing')
     expect(await screen.findByText(/管理员关闭了你的空间邀请/)).toBeTruthy()
     expect((screen.getByRole('button', { name: '生成空间邀请' }) as HTMLButtonElement).disabled).toBe(true)
     expect(screen.queryByRole('button', { name: '生成邀请' })).toBeNull()

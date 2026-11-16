@@ -117,6 +117,54 @@ describe('device code helpers', () => {
 })
 
 describe('settings and device confirmation', () => {
+  it('switches categories without mounting or loading unrelated settings', async () => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/me/identities') return json({ identities: [], available: [] })
+      if (url === '/api/tokens') return json({ tokens })
+      if (url === '/api/sessions') return json({ sessions: [] })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt('/settings')
+    expect(await screen.findByRole('tabpanel', { name: '登录方式' })).toBeTruthy()
+    expect(screen.getAllByRole('tabpanel')).toHaveLength(1)
+    expect(screen.queryByRole('heading', { name: '访问令牌' })).toBeNull()
+    expect(screen.queryByLabelText('用户码')).toBeNull()
+    expect(calls.some((call) => ['/api/tokens', '/api/sessions', '/api/spaces', '/api/shares'].includes(call.url))).toBe(false)
+
+    fireEvent.click(screen.getByRole('tab', { name: '访问令牌' }))
+    expect(window.location.search).toBe('?tab=tokens')
+    expect(screen.getByRole('tab', { name: '访问令牌' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByRole('tabpanel', { name: '访问令牌' })).toBeTruthy()
+    expect(await screen.findByText('laptop')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: '登录方式' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: '登录设备' }))
+    expect(window.location.search).toBe('?tab=devices')
+    expect(await screen.findByRole('tabpanel', { name: '登录设备' })).toBeTruthy()
+    expect(screen.queryByText('laptop')).toBeNull()
+    expect(screen.getAllByRole('tabpanel')).toHaveLength(1)
+  })
+
+  it.each([
+    ['/settings?tab=tokens', '访问令牌'],
+    ['/settings#tokens', '访问令牌'],
+    ['/settings#device-code', '设备码'],
+    ['/settings?tab=unknown', '登录方式'],
+    ['/settings#unknown', '登录方式'],
+  ])('opens the expected category from %s', async (path, category) => {
+    stubFetch((url) => {
+      if (url === '/api/me') return json(me)
+      if (url === '/api/tokens') return json({ tokens: [] })
+      if (url === '/api/me/identities') return json({ identities: [], available: [] })
+      return json({ error: { code: 'NOT_FOUND' } }, 404)
+    })
+    renderAt(path)
+    expect(await screen.findByRole('tabpanel', { name: category })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: category }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getAllByRole('tabpanel')).toHaveLength(1)
+  })
+
   it('lists tokens and revokes one after confirmation', async () => {
     const live = tokens.map((token) => ({ ...token }))
     stubFetch((url, init) => {
@@ -128,7 +176,7 @@ describe('settings and device confirmation', () => {
       }
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
-    renderAt('/settings')
+    renderAt('/settings?tab=tokens')
     expect(await screen.findByRole('heading', { name: '设置' })).toBeTruthy()
     expect(await screen.findByText('laptop')).toBeTruthy()
     expect(screen.getByText('读取、写入')).toBeTruthy()
@@ -152,7 +200,7 @@ describe('settings and device confirmation', () => {
       }
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
-    renderAt('/settings')
+    renderAt('/settings?tab=tokens')
     expect(await screen.findByText('old')).toBeTruthy()
     expect(screen.getAllByRole('button', { name: '删除' })).toHaveLength(1)
     fireEvent.click(screen.getByRole('button', { name: '删除' }))
@@ -177,7 +225,7 @@ describe('settings and device confirmation', () => {
     })
     const writeText = vi.fn(async () => undefined)
     vi.spyOn(navigator.clipboard, 'writeText').mockImplementation(writeText)
-    renderAt('/settings')
+    renderAt('/settings?tab=tokens')
     fireEvent.click(await screen.findByRole('button', { name: '创建令牌' }))
     fireEvent.change(screen.getByLabelText('名称'), { target: { value: 'ci' } })
     fireEvent.click(screen.getByLabelText('写入'))
@@ -201,7 +249,7 @@ describe('settings and device confirmation', () => {
       if (url === '/api/tokens') return json({ tokens })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
-    renderAt('/settings')
+    renderAt('/settings?tab=tokens')
     fireEvent.click(await screen.findByRole('button', { name: '改名' }))
     fireEvent.change(screen.getByLabelText('新名称'), { target: { value: 'desk' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
@@ -245,7 +293,7 @@ describe('settings and device confirmation', () => {
       if (url.startsWith('/api/auth/device?')) return json({ error: { code: 'NOT_FOUND', detail: '<script>' } }, 404)
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
-    renderAt('/settings')
+    renderAt('/settings?tab=device-code')
     const input = await screen.findByLabelText('用户码')
     fireEvent.change(input, { target: { value: 'ZZZZ-ZZZZ' } })
     fireEvent.click(screen.getByRole('button', { name: '查询' }))
@@ -266,7 +314,7 @@ describe('settings and device confirmation', () => {
       if (url === '/api/auth/device/deny' && init?.method === 'POST') return new Response(null, { status: 204 })
       return json({ error: { code: 'NOT_FOUND' } }, 404)
     })
-    renderAt('/settings')
+    renderAt('/settings?tab=device-code')
     fireEvent.change(await screen.findByLabelText('用户码'), { target: { value: 'https://dropit.example/device?user_code=abcd-efgh&verification_id=vid-9' } })
     fireEvent.click(screen.getByRole('button', { name: '查询' }))
     expect(await screen.findByText('cli')).toBeTruthy()
