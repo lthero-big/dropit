@@ -1466,6 +1466,119 @@ test('RHEA-190 step 7: migration 10 adds the per-browser room binding to old dat
   assert.equal(check.pragma('user_version', { simple: true }), 19);
 });
 
+test('RHEA-224: short file links return bytes directly and reuse tickets for ranges', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin(), base = `/api/spaces/${admin.space.id}`;
+  const { item } = await (await f.upload(base, admin.cookie, '0123456789', 'text/plain', '资料.txt')).json();
+  const share = await (await f.json(`${base}/items/${item.id}/shares`, { expiresIn: '1d', maxViews: 1 }, admin.cookie)).json();
+  assert.match(share.directUrl, /^http:\/\/localhost:3000\/d\/[A-Za-z0-9]{6}$/);
+  assert.equal(share.directUrl, `${origin}/d/${share.token}`);
+  const recovered = await (await f.request(`/api/shares/${share.id}/link`, {}, admin.cookie)).json();
+  assert.deepEqual(recovered, { url: share.url, directUrl: share.directUrl });
+  const managed = await (await f.request('/api/shares', {}, admin.cookie)).json();
+  assert.equal(managed.shares[0].sourceKind, 'file');
+  assert.equal(managed.shares[0].views, 0);
+
+  // No cookies, Origin, access query, redirect or metadata-page request is needed.
+  const path = new URL(share.directUrl).pathname;
+  const response = await f.app.request(path);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('location'), null);
+  assert.equal(response.headers.get('content-type'), 'application/octet-stream');
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(response.headers.get('content-disposition')!, /attachment;.*filename\*=UTF-8''%E8%B5%84%E6%96%99.txt/);
+  assert.equal(response.headers.get('content-length'), '10');
+  assert.equal(await response.text(), '0123456789');
+  assert.equal(f.repo.sharesForItem(item.id)[0].views, 1);
+  const access = response.headers.get('x-share-access')!;
+  const resumable = response.headers.get('content-location')!;
+  assert.equal(new URL(resumable, origin).searchParams.get('access'), access);
+  const range = await f.request(resumable, { headers: { range: 'bytes=3-6' } });
+  assert.equal(range.status, 206);
+  assert.equal(range.headers.get('content-range'), 'bytes 3-6/10');
+  assert.equal(await range.text(), '3456');
+  const suffix = await f.request(`${path}?access=${access}`, { headers: { range: 'bytes=-2' } });
+  assert.equal(suffix.status, 206);
+  assert.equal(await suffix.text(), '89');
+  const invalidRange = await f.request(`${path}?access=${access}`, { headers: { range: 'bytes=99-' } });
+  assert.equal(invalidRange.status, 416);
+  assert.equal(invalidRange.headers.get('content-range'), 'bytes */10');
+  assert.equal(f.repo.sharesForItem(item.id)[0].views, 1);
+  assert.equal((await f.request(path)).status, 404);
+  assert.equal((await f.request(`/api/s/${share.token}`)).status, 404);
+  assert.equal((await f.request(`/api/shares/${share.id}/link`, {}, admin.cookie)).status, 404);
+  f.advance(600001);
+  assert.equal((await f.request(`${path}?access=${access}`)).status, 404);
+});
+
+test('RHEA-224: direct links share expiry, revocation, source lifetime and atomic view limits', async t => {
+  const f = await fixture(); t.after(() => f.dispose());
+  const admin = await f.admin(), base = `/api/spaces/${admin.space.id}`;
+  const { item } = await (await f.upload(base, admin.cookie, 'file content')).json();
+  const create = async (expiresIn = 'never', maxViews: number | null = null) =>
+    (await f.json(`${base}/items/${item.id}/shares`, { expiresIn, maxViews }, admin.cookie)).json();
+  const once = await create('never', 1);
+  const attempts = await Promise.all([f.request(`/d/${once.token}`), f.request(`/d/${once.token}`)]);
+  assert.deepEqual(attempts.map(response => response.status).sort(), [200, 404]);
+  await Promise.all(attempts.map(response => response.arrayBuffer()));
+
+  const revoked = await create();
+  const opened = await f.request(`/d/${revoked.token}`);
+  const access = opened.headers.get('x-share-access');
+  await opened.arrayBuffer();
+  assert.equal((await f.request(`${base}/shares/${revoked.id}`, { method: 'DELETE' }, admin.cookie)).status, 204);
+  assert.equal((await f.request(`/d/${revoked.token}?access=${access}`)).status, 404);
+  const expiring = await create('1h');
+  f.advance(3600001);
+  assert.equal((await f.request(`/d/${expiring.token}`)).status, 404);
+
+  const lasting = await create();
+  assert.equal((await f.request(`${base}/items/${item.id}`, { method: 'DELETE' }, admin.cookie)).status, 204);
+  assert.equal((await f.request(`/d/${lasting.token}`)).status, 404);
+  const text = await (await f.json(`${base}/items/text`, { text: 'plain text' }, admin.cookie)).json();
+  const textShare = await (await f.json(`${base}/items/${text.item.id}/shares`, { expiresIn: 'never' }, admin.cookie)).json();
+  assert.equal('directUrl' in textShare, false);
+  const textLink = await (await f.request(`/api/shares/${textShare.id}/link`, {}, admin.cookie)).json();
+  assert.deepEqual(textLink, { url: textShare.url });
+  assert.equal((await f.request(`/d/${textShare.token}`)).status, 404);
+  for (const token of ['invalid', 'ZZZZZZ', 'a'.repeat(43)]) {
+    const missing = await f.request(`/d/${token}`);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.headers.get('cache-control'), 'no-store');
+  }
+
+  const room = await (await f.json('/api/rooms', {})).json();
+  const roomBase = `/api/rooms/${room.token}`;
+  const roomItem = await (await f.upload(roomBase, '', 'room file')).json();
+  const roomShare = await (await f.json(`${roomBase}/items/${roomItem.item.id}/shares`, { expiresIn: 'never' })).json();
+  const roomFile = await f.request(new URL(roomShare.directUrl).pathname);
+  assert.equal(roomFile.status, 200);
+  assert.equal(await roomFile.text(), 'room file');
+  f.advance(86400001);
+  assert.equal((await f.request(new URL(roomShare.directUrl).pathname)).status, 404);
+});
+
+test('RHEA-224: short downloads use the same per-IP share budget as the API', async t => {
+  const f = await fixture({ rateAuth: 2 }); t.after(() => f.dispose());
+  const admin = await f.admin(), base = `/api/spaces/${admin.space.id}`;
+  const { item } = await (await f.upload(base, admin.cookie, 'limited')).json();
+  const share = await (await f.json(`${base}/items/${item.id}/shares`, { expiresIn: 'never' }, admin.cookie)).json();
+  const request = (path: string, ip: string) => f.request(path, { headers: { 'x-test-ip': ip } });
+  for (let i = 0; i < 2; i++) {
+    const response = await request(`/d/${share.token}`, '192.0.2.1');
+    assert.equal(response.status, 200);
+    await response.arrayBuffer();
+  }
+  const limited = await request(`/api/s/${share.token}/file`, '192.0.2.1');
+  assert.equal(limited.status, 429);
+  assert.ok(Number(limited.headers.get('retry-after')) > 0);
+  assert.equal((await request(`/d/${share.token}`, '192.0.2.1')).status, 429);
+  const otherIp = await request(`/d/${share.token}`, '192.0.2.2');
+  assert.equal(otherIp.status, 200);
+  await otherIp.arrayBuffer();
+});
+
 test('RHEA-222: personal share presets persist, normalize and stay isolated from other accounts', async t => {
   const f = await fixture({ rateUpload: 1000 }); t.after(() => f.dispose());
   const admin = await f.admin();

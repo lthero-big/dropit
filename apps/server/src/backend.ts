@@ -1220,8 +1220,19 @@ export function createBackend(options: BackendOptions = {}) {
     shareLimit(c, raw);
     return c.json(service.openPublicShare(raw));
   });
-  app.get('/api/s/:token/file', c => {
-    const raw = c.req.param('token');
+  // Short file links are public capabilities, with the same budgets as /api/s.
+  app.use('/d/*', async (c, next) => {
+    c.header('Cache-Control', 'no-store');
+    const remote = c.get('remote');
+    let ip: string;
+    try { ip = resolveIp(remote, c.req.header('x-forwarded-for')); }
+    catch { ip = remote; }
+    c.set('ip', ip);
+    limit(c, 'general', config.rateGeneral, false);
+    await next();
+  });
+  const shareDownload = (c: Ctx) => {
+    const raw = c.req.param('token')!;
     shareLimit(c, raw);
     let access = c.req.query('access');
     if (!access) {
@@ -1231,7 +1242,9 @@ export function createBackend(options: BackendOptions = {}) {
       c.header('Content-Location', `/api/s/${raw}/file?${new URLSearchParams({ access })}`);
     }
     return sendDownload(c, service.readPublicShare(raw, access));
-  });
+  };
+  app.get('/api/s/:token/file', shareDownload);
+  app.get('/d/:token', shareDownload);
   app.get('/api/s/:token/thumbnail', c => {
     const raw = c.req.param('token');
     shareLimit(c, raw);

@@ -292,7 +292,7 @@ Space routes require membership; room routes require the unexpired capability.
 | GET | `base/items/:id/preview` | Sanitized `image/webp`, longest edge 2048px, aspect preserved, no enlargement; only previously validated raster uploads. `Content-Disposition: inline`, `nosniff`, `Cache-Control: private, max-age=N` (at most 60 seconds, capped by item expiry). Nonmembers/unknown items/nonimages return 404. |
 | GET | `base/items/:id/media` | Inline video or audio after a magic-byte allowlist. `Content-Type` is the sniffed type, never the upload header. `Accept-Ranges: bytes`; a single `Range` returns `206` or `416`. SVG, HTML, images and unknown bytes are `404`. `Content-Disposition: inline`, `nosniff`. |
 | DELETE | `base/items/:id` | 204; retract entry and stored file/thumbnail. In spaces, sender or space owner only; in rooms, every capability holder may retract. |
-| POST | `base/items/:id/shares` | `{expiresIn:'1h'\|'1d'\|'7d'\|'never', maxViews?: number\|null}` → 201 `{id,itemId,expiresAt,maxViews,views,revoked,createdAt,token,url}`. `maxViews` null or omitted is unlimited; otherwise 1–100 (`1` is one-time). Same manager as retract: item author or space owner; any current room capability. |
+| POST | `base/items/:id/shares` | `{expiresIn:'1h'\|'1d'\|'7d'\|'never', maxViews?: number\|null}` → 201 `{id,itemId,expiresAt,maxViews,views,revoked,createdAt,token,url,directUrl?}`. File shares also return `directUrl` (`<origin>/d/<token>`); text shares omit it. `maxViews` null or omitted is unlimited; otherwise 1–100 (`1` is one-time). Same manager as retract: item author or space owner; any current room capability. |
 | GET | `base/items/:id/shares` | `{shares:[Share]}`. No token. Same manager as create. |
 | DELETE | `base/shares/:shareId` | 204; immediate revocation. Same manager as create. |
 
@@ -399,6 +399,17 @@ existing work and rejects new work until below the new thresholds. See the
 [configuration list](backend-config.md#runtime-overrides-and-hard-ceilings).
 
 ## Public share links
+
+File shares also have a short direct URL **outside the `/api` prefix**:
+`GET /d/:token` returns the original file bytes immediately, without a redirect,
+share page, login, or access query. It uses the same token, expiry, view budget,
+revocation, rate limits and download headers as `GET /api/s/:token/file`.
+Both routes return `X-Share-Access` and `Content-Location` for subsequent ranges;
+copying a direct link consumes no views, but each unticketed download consumes one.
+Text shares have no direct URL. Existing short and legacy long share tokens work.
+The creator's `GET /api/shares/:shareId/link` also returns `directUrl` for active,
+recoverable file shares; managed share rows expose `sourceKind` (`file`, `text`,
+or `null` when unavailable) so clients can offer the matching copy action.
 
 No session cookie. `GET` only. Rate-limited per IP and per token. A link never outlives its
 clip: item retention, room expiry and retraction all make the link `404`. `expiresIn:'never'`

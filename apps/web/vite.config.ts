@@ -16,6 +16,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/healthz': 'http://127.0.0.1:8787',
+      '/d/': 'http://127.0.0.1:8787',
       '/api': {
         target: 'http://127.0.0.1:8787',
         ws: true,

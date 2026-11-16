@@ -150,7 +150,7 @@ export class ClipboardService {
     this.repo.saveSetting(`sharePresets:${userId}`, JSON.stringify(presets), this.now(), userId);
     return presets;
   }
-  createShare(space: Space, session: Session | undefined, itemId: string, expiresIn: string, maxViews: number | null, origin = this.config.origin): SharePublic & { token: string; url: string } {
+  createShare(space: Space, session: Session | undefined, itemId: string, expiresIn: string, maxViews: number | null, origin = this.config.origin): SharePublic & { token: string; url: string; directUrl?: string } {
     const item = this.item(space, itemId);
     this.canManage(space, item.userId, session);
     if (maxViews !== null && (!Number.isSafeInteger(maxViews) || maxViews < 1 || maxViews > 1000000)) throw new ApiError(400, 'INVALID_INPUT');
@@ -175,6 +175,7 @@ export class ClipboardService {
       id: share.id, itemId: share.itemId, expiresAt: share.expiresAt, maxViews: share.maxViews,
       views: share.views, revoked: share.revoked, createdAt: share.createdAt,
       token: raw, url: `${origin}/s/${raw}`,
+      ...(item.kind === 'file' ? { directUrl: `${origin}/d/${raw}` } : {}),
     };
   }
   listShares(space: Space, session: Session | undefined, itemId: string) {
@@ -210,13 +211,15 @@ export class ClipboardService {
     return { id: share.id, itemId: share.itemId, expiresAt: share.expiresAt, maxViews: share.maxViews,
       views: share.views, revoked: share.revoked, createdAt: share.createdAt, state,
       copyStatus: state !== 'active' ? 'unavailable' : share.hasCopyToken ? 'available' : 'legacy',
+      sourceKind: sourceUnavailable ? null : share.sourceKind,
       sourceName, spaceName: share.sourceVisible && share.sourceSpaceId ? share.sourceSpaceName : null };
   }
   managedShareLink(session: Session | undefined, shareId: string, origin = this.config.origin) {
     const auth = this.requireSession(session);
     const share = this.repo.ownedManagedShare(shareId, auth.user.id);
     if (!share || !share.copyToken || this.managedShare(share, this.now()).state !== 'active') throw new ApiError(404, 'NOT_FOUND');
-    return { url: `${origin}/s/${share.copyToken}` };
+    return { url: `${origin}/s/${share.copyToken}`,
+      ...(share.sourceKind === 'file' ? { directUrl: `${origin}/d/${share.copyToken}` } : {}) };
   }
   revokeManagedShare(session: Session | undefined, shareId: string) {
     this.repo.revokeOwnedShare(shareId, this.requireSession(session).user.id);

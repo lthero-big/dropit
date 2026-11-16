@@ -85,7 +85,7 @@ export function SharePanel({
   const [presets, setPresets] = useState<SharePresets>(emptySharePresets)
   const [expiresIn, setExpiresIn] = useState('1d')
   const [maxViews, setMaxViews] = useState('1')
-  const [createdUrl, setCreatedUrl] = useState<string | null>(null)
+  const [createdLink, setCreatedLink] = useState<ShareCreated | null>(null)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -125,7 +125,7 @@ export function SharePanel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ expiresIn, maxViews: maxViews ? Number(maxViews) : null }),
       })
-      setCreatedUrl(created.url)
+      setCreatedLink(created)
       setShares((current) => [{ ...created }, ...current.filter((share) => share.id !== created.id)])
       toast.success('链接已生成，请现在复制')
     } catch (error) {
@@ -139,6 +139,7 @@ export function SharePanel({
     try {
       await api(`${base}/shares/${id}`, { method: 'DELETE' })
       setShares((current) => current.map((share) => (share.id === id ? { ...share, revoked: 1 } : share)))
+      setCreatedLink((current) => current?.id === id ? null : current)
       toast.success('已撤销')
     } catch (error) {
       toast.error(errorText(error))
@@ -198,19 +199,30 @@ export function SharePanel({
         </Button>
       </div>
       <a href="/settings#share-presets" className="mt-2 inline-block text-xs text-muted-foreground underline">在设置中添加分享选项</a>
-      {createdUrl ? (
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <input readOnly aria-label="分享链接" value={createdUrl} className="min-w-0 flex-1 border border-line-2 bg-transparent px-2 py-1 text-xs" />
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void copyText(createdUrl).then(() => toast.success('链接已复制'))
-            }}
-          >
-            复制分享链接
-          </Button>
+      {createdLink && shareState(createdLink, now) === '有效' ? (
+        <div className="mt-3 space-y-2">
+          {([['分享链接', createdLink.url], ['文件直链', createdLink.directUrl]] as const).map(([label, url]) => url ? (
+            <div key={label}>
+              <label className="text-xs">
+                {label}
+                <input readOnly aria-label={label} value={url} className="mt-1 w-full border border-line-2 bg-transparent px-2 py-1 text-xs" />
+              </label>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-1"
+                onClick={() => {
+                  void copyText(url)
+                    .then(() => toast.success(`${label}已复制`))
+                    .catch(() => toast.error('复制链接失败，请重试'))
+                }}
+              >
+                复制{label}
+              </Button>
+            </div>
+          ) : null)}
+          {createdLink.directUrl ? <p className="text-xs text-muted-foreground">文件直链打开即下载，与分享页共用有效期和次数。</p> : null}
         </div>
       ) : null}
       <ul className="mt-3">

@@ -8,7 +8,7 @@ import { copyText } from '@/lib/format.ts'
 import type { ManagedShare, ManagedShareState } from '@/lib/types.ts'
 
 type SharePage = { shares: ManagedShare[]; nextCursor: string | null }
-type ShareAction = 'copy' | 'revoke' | 'delete'
+type ShareAction = 'copy' | 'copyDirect' | 'revoke' | 'delete'
 
 const stateLabels: Record<ManagedShareState, string> = {
   active: '有效',
@@ -93,12 +93,14 @@ export function ShareLinks() {
     })
   }
 
-  async function copy(share: ManagedShare) {
-    if (!begin(share.id, 'copy')) return
+  async function copy(share: ManagedShare, direct = false) {
+    if (!begin(share.id, direct ? 'copyDirect' : 'copy')) return
     try {
-      const { url } = await api<{ url: string }>(`/api/shares/${share.id}/link`)
+      const links = await api<{ url: string; directUrl?: string }>(`/api/shares/${share.id}/link`)
+      const url = direct ? links.directUrl : links.url
+      if (!url) throw new Error('Link unavailable')
       await copyText(url)
-      toast.success('链接已复制')
+      toast.success(direct ? '文件直链已复制' : '链接已复制')
     } catch {
       toast.error('复制链接失败，请重试')
     } finally {
@@ -180,10 +182,18 @@ export function ShareLinks() {
               {share.state !== 'active' ? <p className="mt-3 text-xs text-muted-foreground">{unavailableCopyLabels[share.state]}</p> : null}
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 {share.state === 'active' && share.copyStatus === 'available' ? (
-                  <Button type="button" variant="outline" size="sm" disabled={rowBusy} onClick={() => void copy(share)}>
-                    <CopyIcon aria-hidden="true" />
-                    {copying ? '正在复制…' : '复制链接'}
-                  </Button>
+                  <>
+                    <Button type="button" variant="outline" size="sm" disabled={rowBusy} onClick={() => void copy(share)}>
+                      <CopyIcon aria-hidden="true" />
+                      {copying ? '正在复制…' : '复制链接'}
+                    </Button>
+                    {share.sourceKind === 'file' ? (
+                      <Button type="button" variant="outline" size="sm" disabled={rowBusy} onClick={() => void copy(share, true)}>
+                        <CopyIcon aria-hidden="true" />
+                        {action === 'copyDirect' ? '正在复制直链…' : '复制文件直链'}
+                      </Button>
+                    ) : null}
+                  </>
                 ) : null}
                 {share.state !== 'revoked' ? (
                   <Button type="button" variant="outline" size="sm" disabled={rowBusy} onClick={() => void revoke(share)}>
