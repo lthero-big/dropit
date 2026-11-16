@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button.tsx'
 import { ApiError, api, errorText } from '@/lib/api.ts'
 import { copyText, formatRemain } from '@/lib/format.ts'
 import type { ShareCreated, ShareLink } from '@/lib/types.ts'
-import { defaultShareDays, defaultShareViews, emptySharePresets, shareChoices, type SharePresets } from '@/lib/share-presets.ts'
+import { defaultShareViews, emptySharePresets, shareChoices, shareExpiryChoices, type SharePresets } from '@/lib/share-presets.ts'
 
 function shareState(share: ShareLink, now: number): string {
   if (share.revoked) return '已撤销'
@@ -91,7 +91,7 @@ export function SharePanel({
   useEffect(() => {
     let cancelled = false
     api<SharePresets>('/api/me/share-presets')
-      .then((body) => { if (!cancelled) setPresets(body) })
+      .then((body) => { if (!cancelled) setPresets({ ...emptySharePresets, ...body }) })
       .catch((error: unknown) => {
         // Anonymous temporary-room visitors use the built-in options.
         if (!cancelled && !(error instanceof ApiError && (error.status === 401 || error.status === 404))) toast.error(errorText(error))
@@ -99,7 +99,7 @@ export function SharePanel({
     return () => { cancelled = true }
   }, [])
 
-  const expiryOptions = [['1h', '1 小时'], ...shareChoices(defaultShareDays, presets.days).map((days) => [`${days}d`, `${days} 天`]), ['never', '不过期']]
+  const expiryOptions = [...shareExpiryChoices(presets).map(({ expiresIn, label }) => [expiresIn, label]), ['never', '不过期']]
   const viewOptions = [...shareChoices(defaultShareViews, presets.views).map((views) => [String(views), views === 1 ? '仅一次' : `${views} 次`]), ['', '不限']]
 
   useEffect(() => {

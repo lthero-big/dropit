@@ -120,15 +120,17 @@ export class ClipboardService {
   }
   private shareExpires(expiresIn: string) {
     if (expiresIn === 'never') return null;
-    if (expiresIn === '1h') return this.now() + 3600000;
-    const days = /^[1-9]\d{0,3}d$/.test(expiresIn) ? Number(expiresIn.slice(0, -1)) : 0;
-    if (days < 1 || days > 3650) throw new ApiError(400, 'INVALID_INPUT');
-    return this.now() + days * 86400000;
+    const match = /^([1-9]\d{0,4})(h|d|mo)$/.exec(expiresIn);
+    if (!match) throw new ApiError(400, 'INVALID_INPUT');
+    const hours = Number(match[1]) * ({ h: 1, d: 24, mo: 720 }[match[2]]!);
+    if (hours > 3650 * 24) throw new ApiError(400, 'INVALID_INPUT');
+    return this.now() + hours * 3600000;
   }
-  sharePresets(session: Session | undefined): { days: number[]; views: number[] } {
+  sharePresets(session: Session | undefined): { hours: number[]; days: number[]; months: number[]; views: number[] } {
     const userId = this.requireSession(session).user.id;
     const saved = this.repo.setting(`sharePresets:${userId}`);
-    return saved ? JSON.parse(saved.value) : { days: [], views: [] };
+    // Older preferences only stored days and views.
+    return { hours: [], days: [], months: [], views: [], ...(saved ? JSON.parse(saved.value) : {}) };
   }
   saveSharePresets(session: Session | undefined, input: Record<string, unknown>) {
     const userId = this.requireSession(session).user.id;
@@ -138,7 +140,13 @@ export class ClipboardService {
       }
       return [...new Set(raw as number[])].sort((a, b) => a - b);
     };
-    const presets = { days: values(input.days, 3650), views: values(input.views, 1000000) };
+    const presets = {
+      hours: values(input.hours === undefined ? [] : input.hours, 87600),
+      days: values(input.days, 3650),
+      months: values(input.months === undefined ? [] : input.months, 121),
+      views: values(input.views, 1000000),
+    };
+    if (presets.hours.length + presets.days.length + presets.months.length > 20) throw new ApiError(400, 'INVALID_INPUT');
     this.repo.saveSetting(`sharePresets:${userId}`, JSON.stringify(presets), this.now(), userId);
     return presets;
   }

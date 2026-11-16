@@ -666,7 +666,7 @@ test('share links enforce token, expiry, revocation, view limits and owner-only 
   assert.equal((await f.request(`${base}/items/${itemId}/shares`)).status, 401);
   assert.equal((await f.json(`${base}/items/${itemId}/shares`, { expiresIn: '1d', maxViews: 1 }, other.cookie)).status, 403);
   assert.equal((await f.request(`${base}/items/${itemId}/shares`, {}, other.cookie)).status, 403);
-  assert.equal((await f.json(`${base}/items/${itemId}/shares`, { expiresIn: '2h' }, member.cookie)).status, 400);
+  assert.equal((await f.json(`${base}/items/${itemId}/shares`, { expiresIn: '0h' }, member.cookie)).status, 400);
   assert.equal((await f.json(`${base}/items/${itemId}/shares`, { expiresIn: '1h', maxViews: 0 }, member.cookie)).status, 400);
   assert.equal((await f.json(`${base}/items/missing/shares`, { expiresIn: '1h' }, member.cookie)).status, 404);
 
@@ -1470,40 +1470,50 @@ test('RHEA-222: personal share presets persist, normalize and stay isolated from
   const f = await fixture({ rateUpload: 1000 }); t.after(() => f.dispose());
   const admin = await f.admin();
   const endpoint = '/api/me/share-presets';
+  const empty = { hours: [], days: [], months: [], views: [] };
   assert.equal((await f.request(endpoint)).status, 401);
   assert.equal((await f.json(endpoint, { days: [], views: [] }, '', 'PUT')).status, 401);
-  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), { days: [], views: [] });
-  const saved = await f.json(endpoint, { days: [30, 3, 30], views: [200, 20, 200] }, admin.cookie, 'PUT');
+  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), empty);
+  f.repo.saveSetting(`sharePresets:${admin.user.id}`, JSON.stringify({ days: [14], views: [50] }), f.now(), admin.user.id);
+  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), { ...empty, days: [14], views: [50] });
+  const expected = { hours: [2, 6], days: [3, 30], months: [1, 2], views: [20, 200] };
+  const saved = await f.json(endpoint, { hours: [6, 2, 6], days: [30, 3, 30], months: [2, 1, 2], views: [200, 20, 200] }, admin.cookie, 'PUT');
   assert.equal(saved.status, 200);
-  assert.deepEqual(await saved.json(), { days: [3, 30], views: [20, 200] });
+  assert.deepEqual(await saved.json(), expected);
   const reopened = new SqliteRepository(join(f.directory, 'dropit.sqlite'));
   try {
-    assert.deepEqual(JSON.parse(reopened.setting(`sharePresets:${admin.user.id}`)!.value), { days: [3, 30], views: [20, 200] });
+    assert.deepEqual(JSON.parse(reopened.setting(`sharePresets:${admin.user.id}`)!.value), expected);
   } finally { reopened.close(); }
   const invitation = await f.invite(admin.cookie, admin.space.id);
   const member = await f.login('presets-member', invitation.token);
-  assert.deepEqual(await (await f.request(endpoint, {}, member.cookie)).json(), { days: [], views: [] });
+  assert.deepEqual(await (await f.request(endpoint, {}, member.cookie)).json(), empty);
   assert.equal((await f.json(endpoint, { days: [14], views: [50] }, member.cookie, 'PUT')).status, 200);
-  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), { days: [3, 30], views: [20, 200] });
+  assert.deepEqual(await (await f.request(endpoint, {}, member.cookie)).json(), { ...empty, days: [14], views: [50] });
+  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), expected);
   for (const invalid of [
     {}, { days: '3', views: [] }, { days: [0], views: [] }, { days: [3651], views: [] },
     { days: [1.5], views: [] }, { days: ['3'], views: [] }, { days: [], views: [-1] },
     { days: [], views: [1000001] }, { days: [], views: [2.5] }, { days: Array(21).fill(2), views: [] },
+    { ...empty, hours: [87601] }, { ...empty, hours: [0] }, { ...empty, hours: [1.5] },
+    { ...empty, months: [122] }, { ...empty, months: [-1] }, { ...empty, months: [1.5] },
+    { ...empty, hours: null }, { ...empty, months: '1' },
+    { ...empty, hours: Array.from({ length: 10 }, (_, i) => i + 2), days: Array.from({ length: 10 }, (_, i) => i + 2), months: [2] },
   ]) assert.equal((await f.json(endpoint, invalid, admin.cookie, 'PUT')).status, 400, JSON.stringify(invalid));
-  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), { days: [3, 30], views: [20, 200] });
+  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), expected);
   const pat = await (await f.json('/api/tokens', { name: 'presets', scopes: ['read', 'write'], expiresInDays: 1 }, admin.cookie)).json();
   assert.equal((await f.request(endpoint, { headers: { authorization: `Bearer ${pat.token}` } })).status, 403);
   assert.equal((await f.json(endpoint, { days: [], views: [] }, admin.cookie, 'PUT')).status, 200);
-  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), { days: [], views: [] });
+  assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), empty);
 });
 
-test('RHEA-222: custom share days and view counts enforce bounds and preserve legacy options', async t => {
+test('RHEA-222: custom share hours/days/months and view counts enforce bounds and preserve legacy options', async t => {
   const f = await fixture({ rateUpload: 1000 }); t.after(() => f.dispose());
   const admin = await f.admin(); const base = `/api/spaces/${admin.space.id}`;
   const { item } = await (await f.json(`${base}/items/text`, { text: 'custom share' }, admin.cookie)).json();
   const endpoint = `${base}/items/${item.id}/shares`;
   for (const [expiresIn, lifetime, maxViews] of [
-    ['1h', 3600000, 1], ['1d', 86400000, 5], ['7d', 604800000, 10],
+    ['1h', 3600000, 1], ['2h', 7200000, 200], ['87600h', 3650 * 86400000, 200],
+    ['1d', 86400000, 5], ['7d', 604800000, 10], ['1mo', 30 * 86400000, 200], ['121mo', 3630 * 86400000, 200],
     ['3d', 3 * 86400000, 200], ['3650d', 3650 * 86400000, 1000000], ['never', null, null],
   ] as const) {
     const response = await f.json(endpoint, { expiresIn, maxViews }, admin.cookie);
@@ -1513,7 +1523,7 @@ test('RHEA-222: custom share days and view counts enforce bounds and preserve le
     assert.equal(share.maxViews, maxViews);
     assert.equal((await f.request(`/api/s/${share.token}`)).status, 200);
   }
-  for (const expiresIn of ['0d', '-1d', '1.5d', '3651d', '01d', '2h', '3', 'Infinityd']) {
+  for (const expiresIn of ['0d', '-1d', '1.5d', '3651d', '01d', '0h', '-1h', '1.5h', '87601h', '0mo', '01mo', '-1mo', '1.5mo', '122mo', '1m', '3', 'Infinityd']) {
     assert.equal((await f.json(endpoint, { expiresIn }, admin.cookie)).status, 400, expiresIn);
   }
   for (const maxViews of [0, -1, 1.5, 1000001, '20']) {
