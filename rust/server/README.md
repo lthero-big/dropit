@@ -1,4 +1,4 @@
-# Rust password and text service
+# Rust password, text and browser service
 
 RHEA-227 adds the first runnable Rust slice of the migration. The HTTP reference is
 the TS server at commit 37ce06ebfab2cd98b81e49ce54fb24ec5daeec68. Source contracts are
@@ -7,6 +7,8 @@ in ../CONTRACT.md, ../DECISIONS.md and ../MAP.md.
 The implemented routes are GET /healthz, POST /api/auth/password/login,
 POST /api/auth/logout, GET /api/me, GET /api/spaces, GET /api/spaces/:space,
 GET /api/spaces/:space/items and POST /api/spaces/:space/items/text.
+RHEA-230 adds GET /api/site, /api/version, /api/auth/providers, /api/setup
+and GET /api/spaces/:space/ws.
 
 Existing password hashes, user/space IDs, browser sessions, membership roles,
 quota overrides, persisted limits, text, groups and device metadata retain the TS
@@ -218,11 +220,11 @@ Authorization header still selects the unsupported bearer path.
 
 ## Coverage boundary
 
-OAuth, PAT/device-code authentication, registration/setup, password changes,
-session-management APIs, room APIs, WebSocket broadcasts/revocation, file and
-chunked uploads, sharing, admin APIs, static web hosting, version/update
-endpoints and historical schema upgrades remain outside this slice.
-Unsupported routes return the existing JSON NOT_FOUND form. An
+OAuth, PAT/device-code authentication, registration/setup writes, password changes,
+session-management APIs, room APIs, file and
+chunked uploads, sharing, admin APIs, static web hosting,
+update endpoints and historical schema upgrades remain outside this
+slice. Unsupported routes return the existing JSON NOT_FOUND form. An
 Authorization header selects the unsupported bearer path and returns
 UNAUTHENTICATED with WWW-Authenticate instead of falling back to a cookie.
 
@@ -232,6 +234,72 @@ capacity totals until the TS maintenance implementation cleans them. The slice
 requires a schema-19 fixture and provides no first-run database bootstrap.
 
 The tests establish the documented password/private-text HTTP flow and
-bidirectional database compatibility for synthetic schema-19 data. Browser
-readiness, complete migration, historical upgrades and production performance
-remain unverified.
+bidirectional database compatibility for synthetic schema-19 data. Existing-account Web login, text, realtime and reconnect are covered below.
+Complete migration, historical upgrades and production performance remain unverified.
+
+## Browser and realtime slice (RHEA-230)
+
+`src/browser.rs` reads registration/setup/provider state from the same schema-19
+settings/users/OAuth tables. Public `/api/site` uses the already-resolved origin
+and trusted proxy rules. `/api/version` follows DROPIT_VERSION, DROPIT_COMMIT,
+DROPIT_BUILD_DATE and DROPIT_INSTALL; optional build-info.json beside the executable
+supplies stored metadata. Build dates accept RFC3339/ISO timestamps (the format
+used by existing builds), returned as UTC milliseconds. Non-ISO JavaScript
+Date.parse inputs are not supported. Without build metadata, development commits
+come from git and the version defaults to 0.0.0. Rust release packaging is still
+pending. Reporting a configured OAuth provider does not implement its login flow.
+
+`src/realtime.rs` serves private spaces only. Every connection gets an authoritative
+snapshot, followed by item.created, groups (including group creation before a
+rejected text write), and presence events. Named devices are deduplicated in
+presence while devices counts sockets; unnamed sockets are others. A shared gate
+orders subscription snapshots and text commits/broadcasts, preventing a write
+between subscription and snapshot from being missed. Session device tags are
+persisted using the original columns.
+
+Origin, membership and browser authentication precede upgrade. Limits are eight
+connections per IP/user and 256 total, including upgrade reservations. Reservations
+are released on failed upgrades, errors and closes. Authorization is checked every
+second and before each event delivery; session expiry/revocation, disabled users
+and removed members close with 1008 / Authorization expired. Application writes to
+the channel close with 1008 / Read-only channel. Incoming payloads are limited to
+1024 bytes (1009 on overflow). Ping/pong runs every 30 seconds; a missing pong
+terminates the socket at the next heartbeat. A bounded per-client queue holds at
+most 1 MiB of payloads, with a five-second send deadline. Overflow or a blocked
+writer closes with 1013 / Slow consumer; publishers never await network consumers.
+The bounded queue also has a 256-message ceiling for tiny payload floods.
+
+### Reproduce
+
+After the existing dependency/build setup, run from the repository root:
+
+```sh
+(cd rust/server && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings)
+(cd rust/server && cargo build --locked && cargo test --locked -- --nocapture)
+node rust/server/tests/browser.mjs
+pnpm --filter @dropit/web smoke
+```
+
+`tests/realtime.rs` runs a second real-process reference harness, independently
+archiving/building fixed TS commit 37ce06ebfab2cd98b81e49ce54fb24ec5daeec68.
+It compares bootstrap state, WS upgrade status, snapshot content versus HTTP,
+Unicode device names/session tags, groups/text events, deduplicated presence,
+reconnect, writes racing snapshots, read-only and payload limits, revoked/expired
+sessions, disabled users, removed members and the eight-socket cap with slot reuse.
+It also pauses a real TCP reader and sends 180 near-limit texts, checking 1013,
+then checks two actual 30-second heartbeat intervals and no-pong termination.
+Both implementations run against separate TS-generated fixtures and all children,
+sockets and temporary data are removed. TS's Node upgrade adapter discards error
+response bodies, so failed-upgrade comparisons require status and compare JSON
+codes only when a body is available. Successful HTTP responses retain full JSON
+assertions. The original 199-response harness remains unchanged.
+
+`tests/browser.mjs` builds no fake backend: it uses the built current TS code only
+to generate the fixture, starts Rust on 18878, and invokes the existing Web smoke
+against that explicit target. Playwright starts Vite, which sends all HTTP/WS to
+Rust; no TS server runs. The browser checks login/text/reload/logout plus independent
+cookie jars, named devices, cross-browser item.created delivery and a real socket
+reconnect snapshot after offline writes. The TS-only short-download assertion is
+intentionally skipped for Rust. The same smoke runs unchanged against TS by
+omitting the explicit backend target. These tests require free local ports 15173
+and 18878 (18787 for the default TS smoke).

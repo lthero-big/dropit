@@ -1,7 +1,9 @@
+mod browser;
 mod config;
 mod db;
 mod downloads;
 mod password;
+mod realtime;
 
 use std::{
     collections::HashMap,
@@ -26,8 +28,10 @@ use tokio::sync::Semaphore;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
+use browser::BuildInfo;
 use config::{Config, StartupResult, parse_origin};
 use db::{Account, Database, Device, TextInput};
+use realtime::Realtime;
 
 type ApiResult<T> = Result<T, ApiError>;
 
@@ -84,6 +88,8 @@ impl IntoResponse for ApiError {
 struct StateData {
     config: Arc<Config>,
     db: Database,
+    build: BuildInfo,
+    realtime: Realtime,
     limiter: Mutex<HashMap<(&'static str, String), Bucket>>,
     password_slots: Arc<Semaphore>,
 }
@@ -132,6 +138,8 @@ struct RequestContext {
     ip: String,
     ip_summary: String,
     secure_cookie: bool,
+    request_origin: Option<String>,
+    received_origin: Option<String>,
     auth: Option<Auth>,
 }
 
@@ -145,9 +153,12 @@ impl RequestContext {
 async fn main() -> StartupResult<()> {
     let mut config = Config::load()?;
     let db = Database::open(&mut config)?;
+    let build = browser::build_info();
     let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port)).await?;
     let app = Arc::new(StateData {
         db,
+        build,
+        realtime: Realtime::new(),
         config: Arc::new(config),
         limiter: Mutex::new(HashMap::new()),
         password_slots: Arc::new(Semaphore::new(4)),
@@ -156,11 +167,16 @@ async fn main() -> StartupResult<()> {
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/api/auth/password/login", post(login))
         .route("/api/auth/logout", post(logout))
+        .route("/api/auth/providers", get(browser::auth_providers))
+        .route("/api/site", get(browser::site))
+        .route("/api/version", get(browser::version))
+        .route("/api/setup", get(browser::setup))
         .route("/api/me", get(me))
         .route("/api/spaces", get(spaces))
         .route("/api/spaces/{space}", get(space))
         .route("/api/spaces/{space}/items", get(items))
         .route("/api/spaces/{space}/items/text", post(text))
+        .route("/api/spaces/{space}/ws", get(realtime::websocket))
         .route(
             "/api/spaces/{space}/items/{id}/download",
             get(download).head(download),
@@ -331,6 +347,8 @@ async fn api_context(
         ip,
         ip_summary,
         secure_cookie,
+        request_origin: own.map(str::to_owned),
+        received_origin: header_value(headers, "origin").map(str::to_owned),
         auth,
     })
 }
@@ -639,10 +657,25 @@ async fn text(
     };
     let config = app.config.clone();
     let hash = auth.session_hash.clone();
-    let item = app
+    let _gate = app.realtime.gate.lock().await;
+    let channel = space_id.clone();
+    let (item, groups) = app
         .db
-        .run(move |db| db::insert_text(db, &config, &hash, &space_id, input))
+        .run(move |db| {
+            let before = db::groups(db, &space_id)?;
+            let item = db::insert_text(db, &config, &hash, &space_id, input);
+            let after = db::groups(db, &space_id)?;
+            Ok((item, (before != after).then_some(after)))
+        })
         .await?;
+    // TS creates/publishes a group even if a later quota/capacity check fails.
+    if let Some(groups) = groups {
+        app.realtime
+            .publish(&channel, json!({ "type": "groups", "groups": groups }));
+    }
+    let item = item?;
+    app.realtime
+        .publish(&channel, json!({ "type": "item.created", "item": item }));
     Ok((StatusCode::CREATED, Json(json!({ "item": item }))))
 }
 
@@ -805,7 +838,16 @@ fn decode_uri_component(value: &str) -> Option<String> {
 }
 
 fn parse_device(headers: &HeaderMap) -> Option<Device> {
-    let id = header_value(headers, "x-dropit-device")?;
+    let name = header_value(headers, "x-dropit-device-name").and_then(decode_uri_component);
+    device_from_values(
+        header_value(headers, "x-dropit-device"),
+        name.as_deref(),
+        header_value(headers, "x-dropit-device-kind"),
+    )
+}
+
+fn device_from_values(id: Option<&str>, name: Option<&str>, kind: Option<&str>) -> Option<Device> {
+    let id = id?;
     if !(6..=64).contains(&id.len())
         || !id
             .bytes()
@@ -813,16 +855,13 @@ fn parse_device(headers: &HeaderMap) -> Option<Device> {
     {
         return None;
     }
-    let name = header_value(headers, "x-dropit-device-name")
-        .and_then(decode_uri_component)
-        .unwrap_or_default();
-    let name = clean_whitespace(&name);
-    let name = if name.is_empty() || name.chars().any(char::is_control) {
+    let name = clean_whitespace(name.unwrap_or_default());
+    let name = if name.is_empty() || name.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}') {
         "未命名设备".into()
     } else {
         name.chars().take(40).collect()
     };
-    let kind = header_value(headers, "x-dropit-device-kind")
+    let kind = kind
         .filter(|kind| matches!(*kind, "mac" | "phone" | "pad" | "pc" | "cli"))
         .unwrap_or("pc");
     Some(Device {
