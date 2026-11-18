@@ -94,6 +94,14 @@ The exact integration tree passed `cargo fmt --check`, `cargo clippy --locked --
 
 The RHEA-237 child remains `in_review` for human acceptance with its original owner and stage; its completed coordinator review rule may be disabled after this delivery. RHEA-238 owns scheduled maintenance and historical upgrades, while RHEA-236 and RHEA-239 remain the next stage-4 coordination surfaces.
 
+### RHEA-236 acceptance
+
+PR #87 is the spaces, rooms and sharing delivery, targeting `migration/rhea-226-rust`. The exact Rust implementation validation head is `008e003c64c50665d06e25c25ba2747a50030cc4`; the follow-up browser assertion fix is `719e583`. The room/share harness archives and builds the fixed TypeScript reference commit `37ce06ebfab2cd98b81e49ce54fb24ec5daeec68`, so a clean CI checkout does not depend on `apps/server/dist`.
+
+The serialized locked validation passed fmt, strict clippy, build, 7 unit tests, 228 file-read responses, 199 login/text responses, machine-auth compatibility, 526 realtime checks, 316 room/share HTTP/WebSocket checks, and 353 upload/chunk checks. Browser smoke against Rust passed 3 tests with the TS-only short-link test skipped. Coverage includes member roles and invite races, disabled and cross-account sessions, room reuse/codes/PIN lockout/unlock/close/reopen/expiry, admin metadata/delete, room files and previews, PAT revocation, share expiry/exhaustion/single-view races, copy-token isolation, ticket revoke/expiry, source retract and public/room rate budgets.
+
+The remaining boundaries are OAuth/account setup, full administration, historical upgrades and maintenance, room chunk sessions, share presets, item labels/groups/editing, and final Rust release packaging. The PR still requires the repository's normal CI and coordinator review before integration.
+
 ## Remaining work
 
 Continue with full authentication/machine access, first-run and historical database upgrades, spaces/rooms/permissions, organization/sharing, uploads/image generation, runtime administration and complete data/client/container acceptance. Refine each next task against the latest accepted implementation.
@@ -117,8 +125,8 @@ Remaining stage 4 items stay backlog until their stated data/auth/upload boundar
 
 - RHEA-234 machine access passed the third independent review and merged as `2756dad4cb7c4e2986b2789213b45241c33154c5` from PR #85.
 - RHEA-233 direct upload, image preview and retract is integrated as `b8ec9222613a68f57208e53b9a89f96da3e1d3ed` from PR #84.
-- RHEA-237 delivered PR #86 with its private-space chunk session comparison and passing checks; the coordinator resolved the later integration conflict and accepted it as `7412f12`, with the final MAP record in this file. RHEA-236 is now running because its authentication and realtime dependencies are integrated. RHEA-238 and RHEA-239 remain backlog until upload and space boundaries are stable.
+- RHEA-237 delivered PR #86 with its private-space chunk session comparison and passing checks; the coordinator resolved the later integration conflict and accepted it as `7412f12`, with the final MAP record in this file. RHEA-236 has completed its repair run on exact validation head `008e003c64c50665d06e25c25ba2747a50030cc4`, with browser smoke rerun after `719e583`. RHEA-238 and RHEA-239 remain backlog until upload and space boundaries are stable.
 
-The RHEA-237 conflict was resolved and PR #86 merged as `7412f123be88c50876d253ec230a2db9ce9de1d4`. RHEA-236 PR #87 currently has a merge conflict and a failed Rust HTTP compatibility check, so it is in a repair run. RHEA-238 and RHEA-239 remain backlog until the space/share and upload boundaries are accepted.
+The RHEA-237 conflict was resolved and PR #86 merged as `7412f123be88c50876d253ec230a2db9ce9de1d4`. RHEA-236 PR #87 is updated against `migration/rhea-226-rust`; its clean-checkout Rust suite and browser smoke pass as recorded above, and it awaits the normal CI/coordinator review. RHEA-238 and RHEA-239 remain backlog until the space/share and upload boundaries are accepted.
 
 The preliminary full-migration estimate is 12–20 person-days, or 15–25 with contingency. Re-estimate after the first runnable Rust slice. It is not a schedule commitment or a claim that the first wave completes the server migration.

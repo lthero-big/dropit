@@ -492,6 +492,14 @@ and expired download tickets, source retraction and public/room rate budgets.
 Room/share previews reuse the existing bounded preview pool and image decoder.
 Existing private-space chunk upload routes and their C1–C12 comparisons remain.
 
+The exact Rust implementation validation head was
+`008e003c64c50665d06e25c25ba2747a50030cc4`. From a clean checkout with
+`apps/server/dist` absent, the locked suite passed 7 unit tests, 228 file-read
+responses, 199 login/text responses, machine-auth compatibility, 526 realtime
+checks, 316 room/share checks, and 353 upload/chunk checks. Browser smoke was
+rerun after the selector-stability fix in `719e583`; it passed 3 tests with the
+TS-only short-link test skipped.
+
 OAuth, account setup/registration and password lifecycle, remaining general
 administration, historical schema upgrades, scheduled maintenance, room chunk
 sessions, share presets, item editing/labels/group management and final Rust
