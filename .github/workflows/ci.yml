@@ -28,8 +28,56 @@ jobs:
       - run: pnpm test
       - run: pnpm build
 
+  rust:
+    name: Rust fmt, clippy, build, HTTP compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # fetch-depth: 0 is required because the compatibility harness archives
+      # the fixed TS reference commit from the local Git object database.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/server -> target
+          cache-on-failure: true
+      - name: verify compatibility inputs
+        working-directory: rust/server
+        run: |
+          test "$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)" = "1.94.0"
+          git cat-file -e 37ce06ebfab2cd98b81e49ce54fb24ec5daeec68^{commit}
+          command -v cc
+          command -v git
+          command -v tar
+          node --version
+          pnpm --version
+          rustc --version
+      - name: cargo fmt
+        working-directory: rust/server
+        run: cargo fmt --check
+      - name: cargo clippy
+        working-directory: rust/server
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: cargo build
+        working-directory: rust/server
+        run: cargo build --locked
+      - name: TS/Rust HTTP compatibility
+        working-directory: rust/server
+        run: cargo test --locked -- --nocapture
+
   image:
     name: docker image
+    needs: [verify, rust]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

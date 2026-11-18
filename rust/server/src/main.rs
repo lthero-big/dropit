@@ -1,6 +1,7 @@
 mod browser;
 mod config;
 mod db;
+mod downloads;
 mod password;
 mod realtime;
 
@@ -15,7 +16,7 @@ use axum::{
     Json, Router,
     body::to_bytes,
     extract::{ConnectInfo, Extension, Path, Request, State, rejection::PathRejection},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -176,6 +177,18 @@ async fn main() -> StartupResult<()> {
         .route("/api/spaces/{space}/items", get(items))
         .route("/api/spaces/{space}/items/text", post(text))
         .route("/api/spaces/{space}/ws", get(realtime::websocket))
+        .route(
+            "/api/spaces/{space}/items/{id}/download",
+            get(download).head(download),
+        )
+        .route(
+            "/api/spaces/{space}/items/{id}/thumbnail",
+            get(thumbnail).head(thumbnail),
+        )
+        .route(
+            "/api/spaces/{space}/items/{id}/media",
+            get(media).head(media),
+        )
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
         .layer(middleware::from_fn_with_state(app.clone(), request_context))
@@ -221,7 +234,9 @@ async fn request_context(
         next.run(request).await
     };
     let headers = response.headers_mut();
-    if is_api {
+    // Hono sets no-store before the handler, then media overwrites it with private, no-store.
+    // This layer runs after the handler, so an existing Cache-Control must win.
+    if is_api && !headers.contains_key(header::CACHE_CONTROL) {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
     if secure {
@@ -662,6 +677,114 @@ async fn text(
     app.realtime
         .publish(&channel, json!({ "type": "item.created", "item": item }));
     Ok((StatusCode::CREATED, Json(json!({ "item": item }))))
+}
+
+async fn download(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    method: Method,
+    path: Result<Path<(String, String)>, PathRejection>,
+    request: Request,
+) -> Response {
+    read_existing(app, context, method, path, request, ReadKind::Download).await
+}
+
+async fn thumbnail(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    method: Method,
+    path: Result<Path<(String, String)>, PathRejection>,
+    request: Request,
+) -> Response {
+    read_existing(app, context, method, path, request, ReadKind::Thumbnail).await
+}
+
+async fn media(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    method: Method,
+    path: Result<Path<(String, String)>, PathRejection>,
+    request: Request,
+) -> Response {
+    read_existing(app, context, method, path, request, ReadKind::Media).await
+}
+
+#[derive(Clone, Copy)]
+enum ReadKind {
+    Download,
+    Thumbnail,
+    Media,
+}
+
+async fn read_existing(
+    app: App,
+    context: RequestContext,
+    method: Method,
+    path: Result<Path<(String, String)>, PathRejection>,
+    request: Request,
+    kind: ReadKind,
+) -> Response {
+    let Ok(user_id) = context
+        .require_auth()
+        .map(|auth| auth.account.user.id.clone())
+    else {
+        return ApiError::UNAUTHENTICATED.into_response();
+    };
+    let Ok(Path((space, id))) = path else {
+        return ApiError::NOT_FOUND.into_response();
+    };
+    let range = downloads::range_header(request.headers()).map(str::to_owned);
+    let head = method == Method::HEAD;
+    let directory = downloads::files_dir(&app.config.data);
+    let loaded = app
+        .db
+        .run(move |db| db::readable_file(db, &space, &user_id, &id))
+        .await;
+    let file = match loaded {
+        Ok(file) => file,
+        Err(error) => return error.into_response(),
+    };
+    let Ok(size) = file_size(file.size) else {
+        return ApiError::internal("negative stored size").into_response();
+    };
+    let prepared = match kind {
+        ReadKind::Download => {
+            let (Some(key), Some(filename)) = (
+                file.file_key.filter(|key| !key.is_empty()),
+                file.filename.filter(|name| !name.is_empty()),
+            ) else {
+                return ApiError::NOT_FOUND.into_response();
+            };
+            downloads::prepare_download(&directory, &key, &filename, size, range.as_deref(), head)
+        }
+        ReadKind::Thumbnail => {
+            let Some(key) = file.thumbnail_key.filter(|key| !key.is_empty()) else {
+                return ApiError::NOT_FOUND.into_response();
+            };
+            downloads::prepare_thumbnail(&directory, &key, head)
+        }
+        ReadKind::Media => {
+            let Some(key) = file.file_key.filter(|key| !key.is_empty()) else {
+                return ApiError::NOT_FOUND.into_response();
+            };
+            downloads::prepare_media(
+                &directory,
+                &key,
+                file.filename.as_deref().unwrap_or("media"),
+                size,
+                range.as_deref(),
+                head,
+            )
+        }
+    };
+    match prepared {
+        Ok(prepared) => downloads::into_response(prepared, head),
+        Err(error) => error.into_response(),
+    }
+}
+
+fn file_size(size: i64) -> ApiResult<u64> {
+    u64::try_from(size).map_err(|_| ApiError::internal("negative stored size"))
 }
 
 async fn read_json(request: Request, limit: usize) -> ApiResult<Map<String, Value>> {

@@ -216,6 +216,41 @@ pub fn space(db: &Connection, id: &str, user_id: &str, write: bool) -> ApiResult
     Ok(space)
 }
 
+/// A private-space file that the caller may read. Keys stay off the JSON item.
+pub struct StoredFile {
+    pub filename: Option<String>,
+    pub size: i64,
+    pub file_key: Option<String>,
+    pub thumbnail_key: Option<String>,
+}
+
+pub fn readable_file(
+    db: &Connection,
+    space_id: &str,
+    user_id: &str,
+    item_id: &str,
+) -> ApiResult<StoredFile> {
+    let time = now();
+    space(db, space_id, user_id, false)?;
+    let file = db
+        .query_row(
+            "SELECT filename, size, fileKey, thumbnailKey FROM items
+             WHERE id=? AND spaceId=? AND expiresAt>?",
+            params![item_id, space_id, time],
+            |row| {
+                Ok(StoredFile {
+                    filename: row.get(0)?,
+                    size: row.get(1)?,
+                    file_key: row.get(2)?,
+                    thumbnail_key: row.get(3)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or(ApiError::NOT_FOUND)?;
+    Ok(file)
+}
+
 #[derive(Clone, Serialize)]
 pub struct Device {
     pub id: String,
