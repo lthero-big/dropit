@@ -100,15 +100,15 @@ PR #87 is the spaces, rooms and sharing delivery, targeting `migration/rhea-226-
 
 The serialized locked validation passed fmt, strict clippy, build, 7 unit tests, 228 file-read responses, 199 login/text responses, machine-auth compatibility, 526 realtime checks, 316 room/share HTTP/WebSocket checks, and 353 upload/chunk checks. Browser smoke against Rust passed 3 tests with the TS-only short-link test skipped. Coverage includes member roles and invite races, disabled and cross-account sessions, room reuse/codes/PIN lockout/unlock/close/reopen/expiry, admin metadata/delete, room files and previews, PAT revocation, share expiry/exhaustion/single-view races, copy-token isolation, ticket revoke/expiry, source retract and public/room rate budgets.
 
-The remaining boundaries are OAuth/account setup, full administration, historical upgrades and maintenance, room chunk sessions, share presets, item labels/groups/editing, and final Rust release packaging. The PR still requires the repository's normal CI and coordinator review before integration.
+The remaining boundaries are OAuth/account setup, full administration, room chunk sessions, share presets, item labels/groups/editing, and final Rust release packaging. Historical upgrades, durable maintenance, runtime configuration, health, graceful shutdown and the isolated Rust image are accepted below.
 
 ## Remaining work
 
-Continue with full authentication/machine access, first-run and historical database upgrades, spaces/rooms/permissions, organization/sharing, uploads/image generation, runtime administration and complete data/client/container acceptance. Refine each next task against the latest accepted implementation.
+Continue with full authentication/machine access, first-run account setup, runtime administration and complete data/client/container acceptance. Refine each next task against the latest accepted implementation.
 
 ## Third wave
 
-RHEA-230, RHEA-231, RHEA-232, RHEA-233, RHEA-234 and the accepted upload test stability work are integrated. RHEA-237 is integrated after independent review. RHEA-235 remains in review for human acceptance.
+RHEA-230, RHEA-231, RHEA-232, RHEA-233, RHEA-234 and the accepted upload test stability work are integrated. RHEA-236, RHEA-237 and RHEA-238 are integrated after independent review. RHEA-235 remains in review for human acceptance.
 
 | Work | Owner | Stage | Independent acceptance |
 | --- | --- | ---: | --- |
@@ -116,7 +116,7 @@ RHEA-230, RHEA-231, RHEA-232, RHEA-233, RHEA-234 and the accepted upload test st
 | RHEA-233: direct upload, image preview and retract | DE代码高手-grok | 3 | Existing private-space upload, preview and retract behavior with real TS/Rust comparisons |
 | RHEA-236: spaces, rooms and sharing | DE 后端工程师 | 4 | Members, roles, rooms, PINs, share links and revocation preserve client-visible behavior |
 | RHEA-237: resumable uploads and image processing | DE代码高手-grok | 4 | Integrated as `7412f12`; chunk concurrency, resume/cancel, quota atomicity, cleanup and image boundary behavior accepted |
-| RHEA-238: historical migration and maintenance | DE 后端工程师 | 4 | Schema 1–19 upgrades, cleanup, runtime settings, graceful shutdown and isolated image/container checks |
+| RHEA-238: historical migration and maintenance | DE 后端工程师 | 4 | Integrated as `ac6e957`; schema 1–19 upgrades, cleanup, runtime settings, graceful shutdown and isolated image/container checks |
 | RHEA-239: final client and container acceptance | DE 前端工程师 | 4 | Web/CLI/mobile protocol checks, CI evidence, Docker health/volume/signal checks and release report |
 
 Remaining stage 4 items stay backlog until their stated data/auth/upload boundaries are integrated. They have separate owners and independent acceptance surfaces. Promote them as dependencies become real, and keep the parent in progress through final acceptance.
@@ -125,11 +125,11 @@ Remaining stage 4 items stay backlog until their stated data/auth/upload boundar
 
 - RHEA-234 machine access passed the third independent review and merged as `2756dad4cb7c4e2986b2789213b45241c33154c5` from PR #85.
 - RHEA-233 direct upload, image preview and retract is integrated as `b8ec9222613a68f57208e53b9a89f96da3e1d3ed` from PR #84.
-- RHEA-237 delivered PR #86 with its private-space chunk session comparison and passing checks; the coordinator resolved the later integration conflict and accepted it as `7412f12`, with the final MAP record in this file. RHEA-236 has completed its repair run on exact validation head `008e003c64c50665d06e25c25ba2747a50030cc4`, with browser smoke rerun after `719e583`. RHEA-238 and RHEA-239 remain backlog until upload and space boundaries are stable.
+- RHEA-237 delivered PR #86 with its private-space chunk session comparison and passing checks; the coordinator resolved the later integration conflict and accepted it as `7412f12`, with the final MAP record in this file. RHEA-236 completed its repair run on exact validation head `008e003c64c50665d06e25c25ba2747a50030cc4`, with browser smoke rerun after `719e583`. RHEA-238 was then independently accepted and integrated from PR #90.
 
-The RHEA-237 conflict was resolved and PR #86 merged as `7412f123be88c50876d253ec230a2db9ce9de1d4`. RHEA-236 PR #87 is updated against `migration/rhea-226-rust`; its clean-checkout Rust suite and browser smoke pass as recorded above, and it awaits the normal CI/coordinator review. RHEA-238 and RHEA-239 remain backlog until the space/share and upload boundaries are accepted.
+The RHEA-237 conflict was resolved and PR #86 merged as `7412f123be88c50876d253ec230a2db9ce9de1d4`. RHEA-236 PR #87 passed its clean-checkout Rust suite and browser smoke and merged as recorded above. RHEA-238 PR #90 has also merged after its permission-boundary repair; RHEA-239 remains blocked on the resulting Rust image and remaining protocol dependencies.
 
-RHEA-236 has since passed the clean checkout, room/share compatibility and Docker checks, and PR #87 merged as `eee16f5815f4eb0b457ee21309d2e15c7240ad3c`. RHEA-238 is now running the historical migration and maintenance work. RHEA-239 is now running the final client and container acceptance work. OAuth/registration, historical migration, runtime maintenance and final release packaging remain explicit acceptance boundaries until their tasks produce evidence.
+RHEA-236 passed the clean checkout, room/share compatibility and Docker checks, and PR #87 merged as `eee16f5815f4eb0b457ee21309d2e15c7240ad3c`. RHEA-238 has now delivered and integrated the historical migration and maintenance boundary. RHEA-239 remains the final client and container acceptance work; OAuth/registration and final release packaging remain explicit boundaries.
 
 ### RHEA-239 checkpoint and remaining acceptance
 
@@ -139,7 +139,7 @@ The coordinator also checked the original RHEA-239 execution record: its seriali
 
 RHEA-239 remains incomplete and is blocked on technical delivery, with its original frontend owner, stage 4 and original review rule (1 of 3 fires used). RHEA-238 must first deliver accepted historical upgrades, maintenance, backup/recovery and a Rust runtime image. Full client acceptance must then run against the resulting Rust commit/image, including actual Web/CLI/mobile protocol flows, not only mocked client tests. The stage-4 delivery includes a no-go report; it does not authorize switching production or completing the parent.
 
-RHEA-240 is the backend owner's stage-5 backlog for complete OAuth/setup/registration, identities, passwords, registration invites, account administration and session lifecycle. Promote it after the same owner's RHEA-238 is independently accepted and integrated, without waiting for human done. It excludes RHEA-238's historical migrations, maintenance, limits/site configuration and container ownership. It has its own three-review rule. The parent coordination check already scheduled for 2026-11-18 19:10:23 UTC is reused. Item editing/labels/groups, share presets, room chunk sessions and remaining administration/update distribution remain explicit compatibility gaps to refine before final RHEA-239 acceptance. The parent stays in_progress; main merge and production deployment remain separate release decisions.
+RHEA-240 is the backend owner's stage-5 work for complete OAuth/setup/registration, identities, passwords, registration invites, account administration and session lifecycle. It is eligible to proceed after the integrated RHEA-238 boundary, without waiting for human `done`; it excludes RHEA-238's historical migrations, maintenance, limits/site configuration and container ownership. It has its own three-review rule. The parent coordination check already scheduled for 2026-11-18 19:10:23 UTC is reused. Item editing/labels/groups, share presets, room chunk sessions and remaining administration/update distribution remain explicit compatibility gaps to refine before final RHEA-239 acceptance. The parent stays in_progress; main merge and production deployment remain separate release decisions.
 
 The preliminary full-migration estimate is 12–20 person-days, or 15–25 with contingency. Re-estimate after the first runnable Rust slice. It is not a schedule commitment or a claim that the first wave completes the server migration.
 
@@ -147,6 +147,6 @@ The preliminary full-migration estimate is 12–20 person-days, or 15–25 with 
 
 RHEA-236 is integrated from PR #87 at merge `eee16f5815f4eb0b457ee21309d2e15c7240ad3c`; RHEA-237 is integrated from PR #86 at merge `7412f123be88c50876d253ec230a2db9ce9de1d4`; and RHEA-239's pre-cutover record is integrated through PR #89 at merge `4cbeb03365bc9e721d2de07fed378d991e892f75`. The RHEA-239 conclusion remains blocked: the accepted image is the TS `node dist/index.js` baseline, so it does not authorize Rust cutover.
 
-RHEA-238 is the active next dependency. PR #90 remains open on base `migration/rhea-226-rust` at head `768f1f003aa0adc5ddcfde555f953d74a33f0295`. Its first independent review rejected the delivery because both Rust CI runs failed three migration/database tests with `PermissionDenied`: `migrations.rs` changed permissions on a shared `/tmp` parent directory used by the tests. The required repair is to use per-run private temporary directories or restrict permission changes to service-managed data directories while retaining production permission failure semantics. The original backend run `01a1f00b-381f-7b5c-8a10-713bb4c3a926` was restored and is active; no RHEA-238 code is integrated yet.
+RHEA-238 passed its first independent review after the original CI failure was repaired. PR #90 head `14c804c35fe702b2022c73dd07063ac6f1bc5123` moved data-directory creation and 0700 enforcement into `Database::open`, so migration tests no longer chmod shared `/tmp`; the PR merged into `migration/rhea-226-rust` as `ac6e95748a2f5d56bdf533605cf79c0f2aa1578e`. The coordinator independently passed fmt, strict locked clippy, locked build and the full locked test/compatibility suite: 199 HTTP, 526 HTTP/WebSocket, 316 room/share and 353 upload checks. The isolated `Dockerfile.rust` build, `/healthz`, non-root `dropit` user and `/data` mode 700 checks passed locally; the PR's 8 CI checks also passed. The initial failed head and repair remain historical evidence for the permission boundary.
 
 RHEA-240 remains a stage-5 backlog item for OAuth/setup/registration and account lifecycle. It will be promoted after the RHEA-238 migration/maintenance boundary is independently accepted, without waiting for human `done`; RHEA-239 will be re-run only after a real Rust image and the remaining protocol dependencies exist. The parent remains `in_progress`.
