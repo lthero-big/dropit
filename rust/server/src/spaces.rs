@@ -19,7 +19,10 @@ use crate::{
 };
 
 fn value_i64(value: Option<&Value>, default: i64, min: i64, max: i64) -> ApiResult<i64> {
-    let value = value.and_then(Value::as_i64).unwrap_or(default);
+    let value = match value {
+        None | Some(Value::Null) => default,
+        Some(value) => value.as_i64().ok_or(ApiError::INVALID_INPUT)?,
+    };
     if !(min..=max).contains(&value) {
         return Err(ApiError::INVALID_INPUT);
     }
@@ -104,17 +107,13 @@ pub async fn list_invites(
             "SELECT count(*) FROM invites WHERE createdBy=? AND joinSpace=1 AND revoked=0 AND uses<maxUses AND expiresAt>?",
             rusqlite::params![user_id, now()], |row| row.get(0),
         )?;
-        Ok((rows, active))
+        let limit = invite_limit(db, &user_id)?;
+        Ok((rows, active, limit))
     }).await?;
-    let (invites, active) = rows;
-    let limit = if auth.account.user.role == "admin" {
-        None
-    } else {
-        Some(5_i64)
-    };
+    let (invites, active, limit) = rows;
     let remaining = limit.map(|limit| (limit - active).max(0));
     Ok(Json(json!({
-        "enabled": remaining != Some(0), "limit": limit, "active": active, "remaining": remaining,
+        "enabled": limit != Some(0), "limit": limit, "active": active, "remaining": remaining,
         "invites": invites,
     })))
 }
@@ -138,16 +137,6 @@ pub async fn create_invite(
         _ => return Err(ApiError::INVALID_INPUT),
     }
     .to_owned();
-    if auth.account.user.role != "admin" {
-        let creator = auth.account.user.id.clone();
-        let open = app.db.run(move |db| Ok(db.query_row(
-            "SELECT count(*) FROM invites WHERE createdBy=? AND joinSpace=1 AND revoked=0 AND uses<maxUses AND expiresAt>?",
-            rusqlite::params![creator, now()], |row| row.get::<_, i64>(0),
-        )?)).await?;
-        if open >= 5 {
-            return Err(ApiError::new(403, "INVITE_LIMIT_REACHED"));
-        }
-    }
     let raw = password::session_token()?;
     let invite_id = Uuid::new_v4().to_string();
     let created_at = now();
@@ -157,11 +146,17 @@ pub async fn create_invite(
     let inserted_id = invite_id.clone();
     let inserted_role = role.clone();
     app.db.run(move |db| {
-        db.execute(
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let limit = invite_limit(&tx, &creator)?;
+        if limit == Some(0) { return Err(ApiError::new(403, "INVITES_DISABLED")); }
+        let active: i64 = tx.query_row("SELECT count(*) FROM invites WHERE createdBy=? AND joinSpace=1 AND revoked=0 AND uses<maxUses AND expiresAt>?", rusqlite::params![creator, now()], |row| row.get(0))?;
+        if limit.is_some_and(|limit| active >= limit) { return Err(ApiError::new(403, "INVITE_LIMIT_REACHED")); }
+        tx.execute(
             "INSERT INTO invites (id,tokenHash,spaceId,maxUses,uses,expiresAt,revoked,createdBy,joinSpace,createdAt,role)
              VALUES (?,?,?,?,0,?,0,?,1,?,?)",
             rusqlite::params![inserted_id, hash, space, max_uses, created_at + hours * 3_600_000, creator, created_at, inserted_role],
         )?;
+        tx.commit()?;
         Ok(())
     }).await?;
     let expires_at = created_at + hours * 3_600_000;
@@ -269,7 +264,6 @@ pub async fn remove_member(
     if changed == 0 {
         return Err(ApiError::NOT_FOUND);
     }
-    app.realtime.revoke_space(&space_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -308,7 +302,6 @@ pub async fn leave(
     if changed == 0 {
         return Err(ApiError::NOT_FOUND);
     }
-    app.realtime.revoke_space(&space_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -344,7 +337,7 @@ pub async fn invite_info(
         max_uses,
         uses,
         expires_at,
-        revoked,
+        _revoked,
         join_space,
         role,
         _created_by,
@@ -372,11 +365,15 @@ pub async fn invite_info(
     } else {
         false
     };
+    let open_registration = app
+        .db
+        .run(|db| Ok(db::setting(db, "registration")?.as_deref() == Some("open")))
+        .await?;
     let role = role.unwrap_or_else(|| "editor".to_owned());
     Ok(Json(
         json!({ "personal": false, "spaceName": space_name, "expiresAt": expires_at,
         "remainingUses": max_uses - uses, "inviterName": inviter_name, "role": role,
-        "canRegister": creator_admin, "member": member, "spaceId": member.then_some(space_id), "revoked": revoked }),
+        "canRegister": creator_admin || open_registration, "member": member, "spaceId": member.then_some(space_id) }),
     ))
 }
 
@@ -391,6 +388,8 @@ pub async fn accept_invite(
     let token_hash = password::hash(&raw);
     let user_id = auth.account.user.id.clone();
     let result = app.db.run(move |db| {
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let db = &tx;
         let invite: Option<(String, i64)> = db.query_row(
             "SELECT spaceId,joinSpace FROM invites WHERE tokenHash=? AND revoked=0 AND uses<maxUses AND expiresAt>?",
             rusqlite::params![token_hash, now()], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -399,7 +398,25 @@ pub async fn accept_invite(
         if join_space == 0 { return Err(ApiError::new(403, "INVITE_INVALID")); }
         db::accept_invite(db, &token_hash, &user_id, now())?;
         let role: String = db.query_row("SELECT coalesce(role,'editor') FROM members WHERE spaceId=? AND userId=?", rusqlite::params![space_id, user_id], |row| row.get(0))?;
-        Ok(json!({ "spaceId": space_id, "role": role }))
+        let result = json!({ "spaceId": space_id, "role": role });
+        tx.commit()?;
+        Ok(result)
     }).await?;
     Ok(Json(result))
+}
+
+fn invite_limit(db: &rusqlite::Connection, user: &str) -> ApiResult<Option<i64>> {
+    Ok(db.query_row(
+        "SELECT role,inviteLimit FROM users WHERE id=?",
+        [user],
+        |row| {
+            let role: String = row.get(0)?;
+            let limit: Option<i64> = row.get(1)?;
+            Ok(if role == "admin" {
+                None
+            } else {
+                Some(limit.unwrap_or(5))
+            })
+        },
+    )?)
 }

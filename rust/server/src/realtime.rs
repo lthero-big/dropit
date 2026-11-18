@@ -122,13 +122,6 @@ impl Realtime {
             }
         }
     }
-
-    pub fn revoke_space(&self, space: &str) {
-        let mut hub = self.hub.lock().unwrap();
-        for connection in hub.connections.values_mut().filter(|c| c.space == space) {
-            let _ = connection.close.send(true);
-        }
-    }
 }
 
 impl Hub {
@@ -270,7 +263,12 @@ pub async fn room_websocket(
                 && expected
                     .strip_prefix("http://")
                     .is_some_and(|host| received == format!("https://{host}"))));
-    if !allowed {
+    if context
+        .auth
+        .as_ref()
+        .is_none_or(|auth| auth.bearer.is_none())
+        && !allowed
+    {
         let mut error = ApiError::new(403, "ORIGIN_REJECTED");
         error.details = Some(Box::new(serde_json::Map::from_iter([
             ("expected".into(), expected.into()),
@@ -296,14 +294,14 @@ pub async fn room_websocket(
         room_space.id,
         context.ip,
         user.clone(),
-        bearer,
+        bearer.clone(),
         device,
     )?;
     let upgrade = upgrade.map_err(|_| ApiError::new(500, "INTERNAL_ERROR"))?;
     Ok(upgrade
         .max_message_size(1024)
         .max_frame_size(1024)
-        .on_upgrade(move |socket| run_room(socket, subscription, room, user))
+        .on_upgrade(move |socket| run_room(socket, subscription, room, bearer))
         .into_response())
 }
 
@@ -402,7 +400,7 @@ async fn run(
     loop {
         tokio::select! {
             biased;
-            _ = sub.close.changed() => { close(&mut socket, 1013, "Slow consumer").await; break; }
+            _ = sub.close.changed() => { let code=if authorized(&app,&space,&user,&hash,bearer.as_deref()).await {1013} else {1008}; close(&mut socket, code, "Channel closed").await; break; }
             _ = validation.tick() => {
                 if !authorized(&app, &space, &user, &hash, bearer.as_deref()).await { close(&mut socket, 1008, "Authorization expired").await; break; }
             }
@@ -444,11 +442,16 @@ async fn run(
     }
 }
 
-async fn run_room(mut socket: WebSocket, mut sub: Subscription, room_token: String, user: String) {
+async fn run_room(
+    mut socket: WebSocket,
+    mut sub: Subscription,
+    room_token: String,
+    bearer: Option<String>,
+) {
     let app = sub.app.clone();
     let snapshot = {
         let _gate = app.realtime.gate.lock().await;
-        if crate::rooms::load_room(&app, &room_token).await.is_err() {
+        if !room_authorized(&app, &room_token, bearer.as_deref()).await {
             close(&mut socket, 1008, "Authorization expired").await;
             return;
         }
@@ -500,8 +503,8 @@ async fn run_room(mut socket: WebSocket, mut sub: Subscription, room_token: Stri
     loop {
         tokio::select! {
             biased;
-            _ = sub.close.changed() => { close(&mut socket, 1013, "Slow consumer").await; break; }
-            _ = validation.tick() => { if crate::rooms::load_room(&app, &room_token).await.is_err() { close(&mut socket, 1008, "Authorization expired").await; break; } }
+            _ = sub.close.changed() => { let code=if room_authorized(&app,&room_token,bearer.as_deref()).await {1013} else {1008}; close(&mut socket, code, "Channel closed").await; break; }
+            _ = validation.tick() => { if !room_authorized(&app, &room_token, bearer.as_deref()).await { close(&mut socket, 1008, "Authorization expired").await; break; } }
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_))) => { let _ = tokio::time::timeout(SEND_TIMEOUT, socket.flush()).await; break; }
                 Some(Err(error)) => { let inner = error.into_inner(); match inner.downcast_ref::<tungstenite::Error>() { Some(tungstenite::Error::Capacity(_)) => close(&mut socket, 1009, "Max payload size exceeded").await, Some(tungstenite::Error::Utf8(_)) => close(&mut socket, 1007, "Invalid UTF-8").await, _ => {} } break; }
@@ -514,12 +517,11 @@ async fn run_room(mut socket: WebSocket, mut sub: Subscription, room_token: Stri
             payload = sub.receiver.recv() => {
                 let Some(payload) = payload else { break; };
                 consume(&sub, payload.len());
-                if crate::rooms::load_room(&app, &room_token).await.is_err() { close(&mut socket, 1008, "Authorization expired").await; break; }
+                if !room_authorized(&app, &room_token, bearer.as_deref()).await { close(&mut socket, 1008, "Authorization expired").await; break; }
                 if send(&mut socket, Message::Text(payload.to_string().into())).await.is_err() { close(&mut socket, 1013, "Slow consumer").await; break; }
             }
         }
     }
-    let _ = user;
 }
 
 fn consume(sub: &Subscription, bytes: usize) {
@@ -550,6 +552,17 @@ async fn close(socket: &mut WebSocket, code: u16, reason: &'static str) {
         })),
     )
     .await;
+}
+
+async fn room_authorized(app: &App, token: &str, bearer: Option<&str>) -> bool {
+    if crate::rooms::load_room(app, token).await.is_err() {
+        return false;
+    }
+    if let Some(bearer) = bearer {
+        let id = bearer.to_owned();
+        return app.db.run(move |db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM access_tokens t JOIN users u ON u.id=t.userId WHERE t.id=? AND t.revoked=0 AND u.disabled=0 AND u.pending=0 AND (t.expiresAt IS NULL OR t.expiresAt>?))",rusqlite::params![id,crate::now()],|row|row.get::<_,bool>(0))?)).await.unwrap_or(false);
+    }
+    true
 }
 
 #[cfg(test)]

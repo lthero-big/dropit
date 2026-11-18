@@ -345,6 +345,10 @@ pub async fn preview(
         Ok(source) => source,
         Err(error) => return error.into_response(),
     };
+    preview_item(app, source, false).await
+}
+
+pub async fn preview_item(app: App, source: db::PreviewSource, shared: bool) -> Response {
     let slot = match acquire(&app, true, PREVIEW_SLOTS, "PREVIEW_BUSY") {
         Ok(slot) => slot,
         Err(error) => return error.into_response(),
@@ -391,7 +395,11 @@ pub async fn preview(
     );
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_str(&format!("private, max-age={max_age}")).unwrap(),
+        if shared {
+            HeaderValue::from_static("no-store")
+        } else {
+            HeaderValue::from_str(&format!("private, max-age={max_age}")).unwrap()
+        },
     );
     response
 }

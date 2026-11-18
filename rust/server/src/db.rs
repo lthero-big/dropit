@@ -505,11 +505,14 @@ pub fn insert_room_text(
     input: TextInput,
 ) -> ApiResult<Item> {
     let time = now();
+    if let Some(group) = &input.group {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        room(&tx, space_id, time)?;
+        ensure_group(&tx, space_id, group, time)?;
+        tx.commit()?;
+    }
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let space = room(&tx, space_id, time)?;
-    if let Some(group) = &input.group {
-        ensure_group(&tx, space_id, group, time)?;
-    }
     let (used, reserved): (i64, i64) = tx.query_row(
         "SELECT coalesce(sum(storedBytes),0),coalesce((SELECT sum(size) FROM uploads WHERE spaceId=? AND expiresAt>?),0) FROM items WHERE spaceId=?",
         params![space_id, time, space_id],
@@ -561,11 +564,14 @@ pub fn insert_room_file(
     input: FileInput,
 ) -> ApiResult<Item> {
     let time = now();
+    if let Some(group) = &input.group {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        room(&tx, space_id, time)?;
+        ensure_group(&tx, space_id, group, time)?;
+        tx.commit()?;
+    }
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let space = room(&tx, space_id, time)?;
-    if let Some(group) = &input.group {
-        ensure_group(&tx, space_id, group, time)?;
-    }
     let (used, reserved): (i64, i64) = tx.query_row(
         "SELECT coalesce(sum(storedBytes),0),coalesce((SELECT sum(size) FROM uploads WHERE spaceId=? AND expiresAt>?),0) FROM items WHERE spaceId=?",
         params![space_id, time, space_id],

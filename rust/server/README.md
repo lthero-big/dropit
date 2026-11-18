@@ -470,3 +470,30 @@ A clean body shorter than Content-Length returns UPLOAD_INCOMPLETE; an
 HTTP/1.1 close of a short Content-Length is a stream error and returns 404.
 The upload harness does not open a WebSocket. File create and delete use the
 same publish calls as text.
+
+## RHEA-236 spaces, rooms and shares
+
+`cargo test --locked --test rooms_sharing -- --nocapture` archives and builds the
+fixed TS reference commit `37ce06ebfab2cd98b81e49ce54fb24ec5daeec68` with its frozen
+lockfile. It does not require `apps/server/dist` in the working checkout. The
+harness compares real TS/Rust status, error, JSON and cache headers on independent
+copies of a TS-created schema-19 fixture. Only newly generated UUIDs, capability
+values and clocks are normalized. It also restarts each implementation on the
+other one's database and checks persisted room/PIN, invitation and share/copy
+capabilities. Processes, sockets, SQLite copies and files are isolated and cleaned
+on success or failure; expiry is exercised by editing only the fixture's rows.
+
+Coverage includes owner/editor/viewer and cross-account permissions, invite
+limits and concurrent single-use acceptance, member leave/removal, disabled
+sessions, room reuse/codes/PIN lockout/unlock/close/reopen/expiry, room snapshots
+and real WebSocket events, PAT revocation, room file Range and derived images,
+share expiration/exhaustion, single-view races, copy-token isolation, revoked
+and expired download tickets, source retraction and public/room rate budgets.
+Room/share previews reuse the existing bounded preview pool and image decoder.
+Existing private-space chunk upload routes and their C1–C12 comparisons remain.
+
+OAuth, account setup/registration and password lifecycle, remaining general
+administration, historical schema upgrades, scheduled maintenance, room chunk
+sessions, share presets, item editing/labels/group management and final Rust
+container packaging are separate migration work. This slice does not establish
+that the entire TS product can be switched to Rust yet.

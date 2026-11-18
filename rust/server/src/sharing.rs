@@ -2,7 +2,6 @@
 
 use axum::{
     Extension, Json,
-    body::Body,
     extract::{Path, Query, Request, State, rejection::PathRejection},
     http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
@@ -12,8 +11,8 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::{
-    ApiError, ApiResult, App, RequestContext, browser_session, db, downloads, images, now,
-    origin_for, password, read_json, rooms,
+    ApiError, ApiResult, App, RequestContext, browser_session, db, downloads, now, origin_for,
+    password, read_json, rooms,
 };
 
 struct Shared {
@@ -37,13 +36,28 @@ type ShareLookup = (
 type ShareOpen = (String, String, Option<i64>, Option<i64>, i64);
 
 fn short_token() -> ApiResult<String> {
-    const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    let mut bytes = [0_u8; 6];
-    getrandom::fill(&mut bytes).map_err(ApiError::internal)?;
-    Ok(bytes
-        .into_iter()
-        .map(|byte| ALPHABET[(byte as usize) % ALPHABET.len()] as char)
-        .collect())
+    rooms::random_chars(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+}
+fn public_limit(app: &App, context: &RequestContext, raw: &str) -> ApiResult<()> {
+    app.limit("share:ip", &context.ip, app.config.rate_auth)?;
+    app.limit(
+        "share:link",
+        &format!("{}:{}", password::hash(raw), context.ip),
+        app.config.rate_upload,
+    )
+}
+
+fn write_limit(app: &App, context: &RequestContext, room: bool) -> ApiResult<()> {
+    let (ip, user, count) = if room {
+        ("room-write:ip", "room-write:user", app.config.rate_room)
+    } else {
+        ("write:ip", "write:user", app.config.rate_upload)
+    };
+    app.limit(ip, &context.ip, count)?;
+    if let Some(auth) = &context.auth {
+        app.limit(user, &auth.account.user.id, count)?;
+    }
+    Ok(())
 }
 
 fn share_hash(raw: &str) -> String {
@@ -255,7 +269,7 @@ pub async fn create_private(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let Path((space_id, item_id)) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let (space, item) = load_private(&app, &context, &space_id, &item_id, true).await?;
-    app.limit("share:ip", &context.ip, app.config.rate_upload)?;
+    write_limit(&app, &context, false)?;
     create_inner(app, context, space, item, request).await
 }
 
@@ -267,7 +281,7 @@ pub async fn create_room(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let Path((token, item_id)) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let (space, item) = load_room_item(&app, &token, &item_id).await?;
-    app.limit("share:ip", &context.ip, app.config.rate_room)?;
+    write_limit(&app, &context, true)?;
     create_inner(app, context, space, item, request).await
 }
 
@@ -333,23 +347,22 @@ async fn revoke_resource(
         let user_id = context.require_auth()?.account.user.id.clone();
         let id = resource.clone();
         app.db
-            .run(move |db| db::space(db, &id, &user_id, false))
+            .run(move |db| db::space(db, &id, &user_id, true))
             .await?
     };
     let space_id = space.id.clone();
-    let user_id = context
-        .auth
-        .as_ref()
-        .map(|auth| auth.account.user.id.clone());
     if !room {
         let id = share_id.clone();
         let scope = space_id.clone();
-        let caller = user_id.clone().ok_or(ApiError::UNAUTHENTICATED)?;
-        let allowed = app.db.run(move |db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM shares s LEFT JOIN items i ON i.id=s.itemId WHERE s.id=? AND s.spaceId=? AND (s.createdBy=? OR i.userId=? OR EXISTS(SELECT 1 FROM spaces WHERE id=? AND ownerId=?)))", rusqlite::params![id, scope, caller, caller, scope, caller], |row| row.get::<_, bool>(0))?)).await?;
-        if !allowed {
-            return Err(ApiError::NOT_FOUND);
+        let author=app.db.run(move|db|Ok(db.query_row("SELECT i.userId FROM shares s JOIN items i ON i.id=s.itemId WHERE s.id=? AND s.spaceId=?",rusqlite::params![id,scope],|row|row.get::<_,Option<String>>(0)).optional()?)).await?.ok_or(ApiError::NOT_FOUND)?;
+        let caller = &context.require_auth()?.account.user.id;
+        if author.as_deref() != Some(caller.as_str())
+            && space.owner_id.as_deref() != Some(caller.as_str())
+        {
+            return Err(ApiError::new(403, "FORBIDDEN"));
         }
     }
+    write_limit(&app, &context, room)?;
     let id = share_id.clone();
     let changed = app.db.run(move |db| Ok(db.execute("UPDATE shares SET revoked=1,downloadTicketHash=NULL,downloadTicketExpiresAt=NULL WHERE id=? AND spaceId=?", rusqlite::params![id, space_id])?)).await?;
     if changed == 0 {
@@ -358,142 +371,211 @@ async fn revoke_resource(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// Managed views reveal source content only while the creator can still read it.
+const MANAGED_SELECT: &str = "SELECT s.id,s.itemId,s.expiresAt,s.maxViews,s.views,s.revoked,s.createdAt,s.copyToken,
+    i.id,i.kind,i.filename,i.text,i.expiresAt,sp.id,sp.name,sp.expiresAt,sp.closedAt,
+    (sp.roomKey IS NOT NULL OR sp.ownerId=?1 OR EXISTS(SELECT 1 FROM members m WHERE m.spaceId=sp.id AND m.userId=?1))
+    FROM shares s LEFT JOIN items i ON i.id=s.itemId LEFT JOIN spaces sp ON sp.id=s.spaceId";
+
+fn managed_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Value, Option<String>)> {
+    let expires: Option<i64> = row.get(2)?;
+    let max_views: Option<i64> = row.get(3)?;
+    let views: i64 = row.get(4)?;
+    let revoked: i64 = row.get(5)?;
+    let created: i64 = row.get(6)?;
+    let copy: Option<String> = row.get(7)?;
+    let item_id: Option<String> = row.get(8)?;
+    let kind: Option<String> = row.get(9)?;
+    let filename: Option<String> = row.get(10)?;
+    let text: Option<String> = row.get(11)?;
+    let item_expires: Option<i64> = row.get(12)?;
+    let space_id: Option<String> = row.get(13)?;
+    let space_name: Option<String> = row.get(14)?;
+    let space_expires: Option<i64> = row.get(15)?;
+    let closed: Option<i64> = row.get(16)?;
+    let visible: Option<bool> = row.get(17)?;
+    let unavailable = item_id.is_none()
+        || space_id.is_none()
+        || visible != Some(true)
+        || item_expires.is_some_and(|t| t <= now())
+        || space_expires.is_some_and(|t| t <= now())
+        || closed.is_some();
+    let state = if revoked != 0 {
+        "revoked"
+    } else if unavailable {
+        "source_unavailable"
+    } else if expires.is_some_and(|t| t <= now()) {
+        "expired"
+    } else if max_views.is_some_and(|n| views >= n) {
+        "exhausted"
+    } else {
+        "active"
+    };
+    let source_name = if unavailable {
+        None
+    } else if kind.as_deref() == Some("file") {
+        Some(
+            filename
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "未命名文件".into()),
+        )
+    } else {
+        let name = text
+            .unwrap_or_default()
+            .split(crate::js_space)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let name = String::from_utf16_lossy(&name.encode_utf16().take(80).collect::<Vec<_>>());
+        Some(if name.is_empty() {
+            "文本条目".into()
+        } else {
+            name
+        })
+    };
+    Ok((
+        json!({ "id": row.get::<_,String>(0)?, "itemId": row.get::<_,String>(1)?, "expiresAt": expires, "maxViews": max_views, "views": views, "revoked": revoked, "createdAt": created,
+        "state": state, "copyStatus": if state != "active" { "unavailable" } else if copy.is_some() { "available" } else { "legacy" },
+        "sourceName": source_name, "sourceKind": if unavailable { None } else { kind }, "spaceName": if visible == Some(true) { space_name } else { None } }),
+        copy,
+    ))
+}
+fn purge_invalid_shares(db: &rusqlite::Connection, user: &str) -> ApiResult<()> {
+    db.execute("DELETE FROM shares WHERE createdBy=?1 AND (expiresAt<=?2 OR NOT EXISTS (
+        SELECT 1 FROM items i JOIN spaces sp ON sp.id=i.spaceId WHERE i.id=shares.itemId AND sp.id=shares.spaceId
+        AND (i.expiresAt IS NULL OR i.expiresAt>?2) AND (sp.expiresAt IS NULL OR sp.expiresAt>?2) AND sp.closedAt IS NULL
+        AND (shares.createdBy IS NULL OR sp.roomKey IS NOT NULL OR sp.ownerId=shares.createdBy OR EXISTS(SELECT 1 FROM members m WHERE m.spaceId=sp.id AND m.userId=shares.createdBy))))", rusqlite::params![user, now()])?;
+    Ok(())
+}
 pub async fn managed_shares(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
     Query(query): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
-    let user_id = context.require_auth()?.account.user.id.clone();
-    let cursor = query
-        .get("cursor")
-        .and_then(|value| value.split_once(':'))
-        .and_then(|(created, id)| Some((created.parse::<i64>().ok()?, id.to_owned())));
-    let rows = app.db.run(move |db| {
-        let (cursor_created, cursor_id) = cursor.unwrap_or((i64::MAX, "\u{10ffff}".into()));
-        let mut statement = db.prepare(
-            "SELECT s.id,s.itemId,s.expiresAt,s.maxViews,s.views,s.revoked,s.createdAt,s.copyToken,
-                    i.kind,i.filename,i.text,i.expiresAt,sp.name,sp.expiresAt,sp.closedAt
-             FROM shares s LEFT JOIN items i ON i.id=s.itemId LEFT JOIN spaces sp ON sp.id=s.spaceId
-             WHERE s.createdBy=? AND (s.createdAt<? OR (s.createdAt=? AND s.id<?))
-             ORDER BY s.createdAt DESC,s.id DESC LIMIT 51",
-        )?;
-        let mut values = statement.query(rusqlite::params![user_id, cursor_created, cursor_created, cursor_id])?;
-        let mut output = Vec::new();
-        while let Some(row) = values.next()? {
-            let expires: Option<i64> = row.get(2)?; let max_views: Option<i64> = row.get(3)?; let views: i64 = row.get(4)?;
-            let revoked: i64 = row.get(5)?; let created: i64 = row.get(6)?; let copy: Option<String> = row.get(7)?;
-            let kind: Option<String> = row.get(8)?; let filename: Option<String> = row.get(9)?; let text: Option<String> = row.get(10)?;
-            let item_expires: Option<i64> = row.get(11)?; let space_name: Option<String> = row.get(12)?; let space_expires: Option<i64> = row.get(13)?; let closed: Option<i64> = row.get(14)?;
-            let state = if revoked != 0 { "revoked" } else if expires.is_some_and(|value| value <= now()) { "expired" } else if max_views.is_some_and(|value| views >= value) { "exhausted" } else if kind.is_none() || space_name.is_none() || item_expires.is_some_and(|value| value <= now()) || space_expires.is_some_and(|value| value <= now()) || closed.is_some() { "source_unavailable" } else { "active" };
-            let copy_status = if state != "active" { "unavailable" } else if copy.is_some() { "available" } else { "legacy" };
-            output.push(json!({ "id": row.get::<_, String>(0)?, "itemId": row.get::<_, String>(1)?, "expiresAt": expires, "maxViews": max_views, "views": views, "revoked": revoked, "createdAt": created,
-                "state": state, "copyStatus": copy_status, "sourceName": filename.or(text), "spaceName": space_name, "sourceKind": kind }));
+    let user = browser_session(&context)?.account.user.id.clone();
+    let cursor = match query.get("cursor").filter(|value| !value.is_empty()) {
+        None => None,
+        Some(value) => {
+            let (time, id) = value.split_once(':').ok_or(ApiError::INVALID_INPUT)?;
+            if time.is_empty()
+                || time.len() > 16
+                || !time.bytes().all(|b| b.is_ascii_digit())
+                || id.is_empty()
+                || id.len() > 64
+                || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                return Err(ApiError::INVALID_INPUT);
+            }
+            let time: i64 = time.parse().map_err(|_| ApiError::INVALID_INPUT)?;
+            if time >= 1_i64 << 53 {
+                return Err(ApiError::INVALID_INPUT);
+            }
+            Some((time, id.to_owned()))
         }
-        Ok(output)
+    };
+    let rows = app.db.run(move |db| {
+        purge_invalid_shares(db, &user)?;
+        let (created, id) = cursor.unwrap_or((i64::MAX, "~".into()));
+        let query = format!("{MANAGED_SELECT} WHERE s.createdBy=?1 AND (s.createdAt<?2 OR (s.createdAt=?2 AND s.id<?3)) ORDER BY s.createdAt DESC,s.id DESC LIMIT 51");
+        let mut statement = db.prepare(&query)?;
+        Ok(statement.query_map(rusqlite::params![user,created,id], managed_row)?.map(|row| row.map(|(value,_)| value)).collect::<rusqlite::Result<Vec<_>>>()?)
     }).await?;
-    let next = if rows.len() == 51 {
-        rows.get(49).and_then(|row| {
-            Some(format!(
-                "{}:{}",
-                row.get("createdAt")?.as_i64()?,
-                row.get("id")?.as_str()?
-            ))
-        })
+    let next = if rows.len() > 50 {
+        Some(format!(
+            "{}:{}",
+            rows[49]["createdAt"].as_i64().unwrap(),
+            rows[49]["id"].as_str().unwrap()
+        ))
     } else {
         None
     };
-    let mut rows = rows;
-    if rows.len() > 50 {
-        rows.truncate(50);
-    }
+    let rows: Vec<_> = rows.into_iter().take(50).collect();
     Ok(Json(json!({ "shares": rows, "nextCursor": next })))
 }
-
 pub async fn managed_link(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
-) -> ApiResult<(axum::http::HeaderMap, Json<Value>)> {
-    let auth = browser_session(&context)?;
-    let Path(share_id) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    let id = share_id.clone();
-    let user = auth.account.user.id.clone();
-    let copy = app
+) -> ApiResult<Json<Value>> {
+    let user = browser_session(&context)?.account.user.id.clone();
+    let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    manage_limit(&app, &context)?;
+    let (view, token) = app
         .db
         .run(move |db| {
             Ok(db
                 .query_row(
-                    "SELECT copyToken,revoked,expiresAt FROM shares WHERE id=? AND createdBy=?",
-                    rusqlite::params![id, user],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<String>>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                        ))
-                    },
+                    &format!("{MANAGED_SELECT} WHERE s.id=?2 AND s.createdBy=?1"),
+                    rusqlite::params![user, id],
+                    managed_row,
                 )
                 .optional()?)
         })
         .await?
         .ok_or(ApiError::NOT_FOUND)?;
-    if copy.1 != 0 || copy.0.is_none() || copy.2.is_some_and(|value| value <= now()) {
+    if view["state"] != "active" {
         return Err(ApiError::NOT_FOUND);
     }
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    Ok((
-        headers,
-        Json(json!({ "url": format!("{}/s/{}", origin_for(&app, &context), copy.0.unwrap()) })),
-    ))
+    let token = token.ok_or(ApiError::NOT_FOUND)?;
+    let origin = origin_for(&app, &context);
+    let mut result = json!({ "url": format!("{origin}/s/{token}") });
+    if view["sourceKind"] == "file" {
+        result["directUrl"] = format!("{origin}/d/{token}").into();
+    }
+    Ok(Json(result))
 }
-
+fn manage_limit(app: &App, context: &RequestContext) -> ApiResult<()> {
+    app.limit("share-manage:ip", &context.ip, app.config.rate_upload)?;
+    if let Some(auth) = &context.auth {
+        app.limit(
+            "share-manage:user",
+            &auth.account.user.id,
+            app.config.rate_upload,
+        )?;
+    }
+    Ok(())
+}
 pub async fn managed_revoke(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<StatusCode> {
-    let auth = context.require_auth()?;
+    manage_limit(&app, &context)?;
+    let user = browser_session(&context)?.account.user.id.clone();
     let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    let user = auth.account.user.id.clone();
-    let changed = app.db.run(move |db| Ok(db.execute("UPDATE shares SET revoked=1,downloadTicketHash=NULL,downloadTicketExpiresAt=NULL WHERE id=? AND createdBy=?", rusqlite::params![id, user])?)).await?;
+    let changed=app.db.run(move |db| Ok(db.execute("UPDATE shares SET revoked=1,downloadTicketHash=NULL,downloadTicketExpiresAt=NULL WHERE id=? AND createdBy=?",rusqlite::params![id,user])?)).await?;
     if changed == 0 {
         return Err(ApiError::NOT_FOUND);
     }
     Ok(StatusCode::NO_CONTENT)
 }
-
 pub async fn managed_delete(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<StatusCode> {
+    manage_limit(&app, &context)?;
+    let user = browser_session(&context)?.account.user.id.clone();
     let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    let user = context.require_auth()?.account.user.id.clone();
-    let lookup_id = id.clone();
-    let lookup_user = user.clone();
-    let state = app
-        .db
-        .run(move |db| {
-            Ok(db
-                .query_row(
-                    "SELECT revoked FROM shares WHERE id=? AND createdBy=?",
-                    rusqlite::params![lookup_id, lookup_user],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?)
-        })
-        .await?
-        .ok_or(ApiError::NOT_FOUND)?;
-    if state == 0 {
-        return Err(ApiError::new(409, "SHARE_NOT_REVOKED"));
-    }
     app.db
         .run(move |db| {
-            db.execute(
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let revoked = tx
+                .query_row(
+                    "SELECT revoked FROM shares WHERE id=? AND createdBy=?",
+                    rusqlite::params![id, user],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .ok_or(ApiError::NOT_FOUND)?;
+            if revoked == 0 {
+                return Err(ApiError::new(409, "SHARE_NOT_REVOKED"));
+            }
+            tx.execute(
                 "DELETE FROM shares WHERE id=? AND createdBy=?",
                 rusqlite::params![id, user],
             )?;
+            tx.commit()?;
             Ok(())
         })
         .await?;
@@ -521,7 +603,8 @@ async fn read_shared(app: &App, raw: &str, access: Option<&str>, spend: bool) ->
         let item = db::item_by_id(&tx, &item_id, time)?.filter(|item| item.space_id == space_id).ok_or(ApiError::NOT_FOUND)?;
         if !space_live { return Err(ApiError::NOT_FOUND); }
         let ticket_ok = access_hash.as_deref().zip(ticket_hash.as_deref()).is_some_and(|(provided, stored)| provided == stored && ticket_expires.is_some_and(|until| until > time));
-        let should_spend = spend && !ticket_ok;
+        let should_spend = !ticket_ok;
+        let _ = spend;
         let next_views = if should_spend {
             let changed = tx.execute("UPDATE shares SET views=views+1 WHERE tokenHash=? AND revoked=0 AND (maxViews IS NULL OR views<maxViews)", [share_key])?;
             if changed != 1 { return Err(ApiError::NOT_FOUND); }
@@ -540,7 +623,7 @@ pub async fn open_public(
     path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<Json<Value>> {
     let Path(raw) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    app.limit("share:ip", &context.ip, app.config.rate_auth)?;
+    public_limit(&app, &context, &raw)?;
     let (shared, access) = open_shared(&app, &raw).await?;
     Ok(Json(
         json!({ "item": public_share_item(&shared)?, "linkExpiresAt": shared.expires_at, "views": shared.views, "maxViews": shared.max_views, "access": access }),
@@ -554,7 +637,13 @@ async fn public_file_response(
     query: HashMap<String, String>,
     request: Request,
 ) -> Response {
-    let access = query.get("access").map(String::as_str);
+    if let Err(error) = public_limit(&app, &context, &raw) {
+        return error.into_response();
+    }
+    let access = query
+        .get("access")
+        .filter(|s| !s.is_empty())
+        .map(String::as_str);
     let (shared, fresh_access) = if access.is_none() {
         match open_shared(&app, &raw).await {
             Ok((value, access)) => (value, Some(access)),
@@ -605,6 +694,9 @@ async fn public_file_response(
 }
 
 async fn open_shared(app: &App, raw: &str) -> ApiResult<(Shared, String)> {
+    if !valid_token(raw) {
+        return Err(ApiError::NOT_FOUND);
+    }
     let access = password::session_token()?;
     let hash = share_hash(raw);
     let ticket = share_hash(&access);
@@ -641,13 +733,16 @@ pub async fn file(
 
 pub async fn thumbnail(
     State(app): State<App>,
-    Extension(_context): Extension<RequestContext>,
+    Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let Ok(Path(raw)) = path else {
         return ApiError::NOT_FOUND.into_response();
     };
+    if let Err(error) = public_limit(&app, &context, &raw) {
+        return error.into_response();
+    }
     let shared = match read_shared(&app, &raw, query.get("access").map(String::as_str), true).await
     {
         Ok(shared) => shared,
@@ -666,13 +761,16 @@ pub async fn thumbnail(
 
 pub async fn preview(
     State(app): State<App>,
-    Extension(_context): Extension<RequestContext>,
+    Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let Ok(Path(raw)) = path else {
         return ApiError::NOT_FOUND.into_response();
     };
+    if let Err(error) = public_limit(&app, &context, &raw) {
+        return error.into_response();
+    }
     let Ok(shared) = read_shared(&app, &raw, query.get("access").map(String::as_str), true).await
     else {
         return ApiError::NOT_FOUND.into_response();
@@ -680,32 +778,29 @@ pub async fn preview(
     let Some(key) = shared.file.file_key.filter(|key| !key.is_empty()) else {
         return ApiError::NOT_FOUND.into_response();
     };
-    let directory = downloads::files_dir(&app.config.data);
-    let path = match downloads::object_path(&directory, &key) {
-        Ok(path) => path,
-        Err(error) => return error.into_response(),
-    };
-    let bytes = match tokio::task::spawn_blocking(move || images::derive_file(&path, 2048)).await {
-        Ok(Ok(bytes)) => bytes,
-        _ => return ApiError::new(415, "INVALID_IMAGE").into_response(),
-    };
-    let mut response = Response::new(Body::from(bytes));
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/webp"));
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_static("inline"),
-    );
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
+    if shared
+        .file
+        .thumbnail_key
+        .as_deref()
+        .is_none_or(str::is_empty)
+    {
+        return ApiError::NOT_FOUND.into_response();
+    }
+    crate::uploads::preview_item(
+        app,
+        db::PreviewSource {
+            item_id: shared.item.id,
+            file_key: key,
+            expires_at: shared.item.expires_at,
+        },
+        true,
+    )
+    .await
 }
 
 pub async fn media(
     State(app): State<App>,
-    Extension(_context): Extension<RequestContext>,
+    Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
     Query(query): Query<HashMap<String, String>>,
     request: Request,
@@ -713,6 +808,9 @@ pub async fn media(
     let Ok(Path(raw)) = path else {
         return ApiError::NOT_FOUND.into_response();
     };
+    if let Err(error) = public_limit(&app, &context, &raw) {
+        return error.into_response();
+    }
     let Ok(shared) = read_shared(&app, &raw, query.get("access").map(String::as_str), true).await
     else {
         return ApiError::NOT_FOUND.into_response();

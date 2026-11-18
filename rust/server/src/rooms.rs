@@ -6,7 +6,6 @@
 
 use axum::{
     Extension, Json,
-    body::Body,
     extract::{Path, State, rejection::PathRejection},
     http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
@@ -53,12 +52,16 @@ pub async fn load_room(app: &App, raw: &str) -> ApiResult<db::Space> {
     Ok(space)
 }
 
-fn room_view(space: &db::Space, origin: &str, reused: bool) -> ApiResult<Value> {
-    Ok(json!({
+fn room_view(space: &db::Space, origin: &str, reused: Option<bool>) -> ApiResult<Value> {
+    let mut view = json!({
         "token": entry_token(space)?, "expiresAt": space.expires_at,
         "url": format!("{}/r/{}", origin, urlencoding(space.room_code.as_deref().unwrap_or_default())),
-        "code": space.room_code, "hasPin": space.pin_hash.is_some(), "reused": reused,
-    }))
+        "code": space.room_code, "hasPin": space.pin_hash.is_some(),
+    });
+    if let Some(reused) = reused {
+        view["reused"] = reused.into();
+    }
+    Ok(view)
 }
 
 fn urlencoding(value: &str) -> String {
@@ -73,12 +76,98 @@ fn urlencoding(value: &str) -> String {
 }
 
 fn random_code() -> ApiResult<String> {
-    let mut bytes = [0_u8; 6];
-    getrandom::fill(&mut bytes).map_err(ApiError::internal)?;
-    Ok(bytes
-        .into_iter()
-        .map(|byte| ROOM_CODE_ALPHABET[(byte as usize) % ROOM_CODE_ALPHABET.len()] as char)
-        .collect())
+    random_chars(ROOM_CODE_ALPHABET)
+}
+pub fn random_chars(alphabet: &[u8]) -> ApiResult<String> {
+    let ceiling = 256 - 256 % alphabet.len();
+    let mut result = String::with_capacity(6);
+    while result.len() < 6 {
+        let mut bytes = [0; 16];
+        getrandom::fill(&mut bytes).map_err(ApiError::internal)?;
+        for byte in bytes {
+            if (byte as usize) < ceiling {
+                result.push(alphabet[byte as usize % alphabet.len()] as char);
+                if result.len() == 6 {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+async fn pin_hash(app: &App, pin: &str) -> ApiResult<String> {
+    let permit = app
+        .password_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(ApiError::internal)?;
+    let pin = pin.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        password::hash_password(&pin)
+    })
+    .await
+    .map_err(ApiError::internal)?
+}
+async fn verify_pin(app: &App, pin: &str, hash: &str) -> ApiResult<bool> {
+    let permit = app
+        .password_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(ApiError::internal)?;
+    let pin = pin.to_owned();
+    let hash = hash.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        password::verify(&pin, Some(&hash))
+    })
+    .await
+    .map_err(ApiError::internal)?
+}
+fn guess_blocked(app: &App, context: &RequestContext, code: Option<&str>) -> ApiResult<()> {
+    let keys = [
+        ("guess:ip", context.ip.clone()),
+        ("guess:code", code.map(password::hash).unwrap_or_default()),
+    ];
+    let buckets = app.limiter.lock().map_err(ApiError::internal)?;
+    for key in keys.into_iter().filter(|(_, key)| !key.is_empty()) {
+        if let Some(bucket) = buckets.get(&key)
+            && bucket.reset > now()
+            && bucket.count >= app.config.rate_auth
+        {
+            return Err(rate_error((bucket.reset - now() + 999) / 1000));
+        }
+    }
+    Ok(())
+}
+fn guess_failed(app: &App, context: &RequestContext, code: Option<&str>) {
+    let _ = app.limit("guess:ip", &context.ip, app.config.rate_auth);
+    if let Some(code) = code {
+        let _ = app.limit("guess:code", &password::hash(code), app.config.rate_auth);
+    }
+}
+fn caller_limit(
+    app: &App,
+    context: &RequestContext,
+    group: (&'static str, &'static str),
+    count: u32,
+) -> ApiResult<()> {
+    app.limit(group.0, &context.ip, count)?;
+    if let Some(auth) = &context.auth {
+        app.limit(group.1, &auth.account.user.id, count)?;
+    }
+    Ok(())
+}
+pub async fn scope(app: &App, context: &RequestContext, raw: &str) -> ApiResult<db::Space> {
+    caller_limit(
+        app,
+        context,
+        ("room-access:ip", "room-access:user"),
+        app.config.rate_upload,
+    )?;
+    load_room(app, raw).await
 }
 
 fn valid_custom_code(value: &str, change: bool) -> bool {
@@ -92,7 +181,7 @@ fn valid_custom_code(value: &str, change: bool) -> bool {
 
 fn valid_pin(value: &str) -> bool {
     let length = value.chars().count();
-    (4..=32).contains(&length) && !value.chars().any(|ch| ch.is_control())
+    (4..=32).contains(&length) && !value.chars().any(|ch| ch < ' ' || ch == '\u{7f}')
 }
 
 fn device_key(value: Option<&Value>) -> ApiResult<Option<String>> {
@@ -132,11 +221,11 @@ pub async fn create(
     let pin = match body.get("pin") {
         None | Some(Value::Null) => None,
         Some(Value::String(value)) if value.is_empty() => None,
-        Some(Value::String(value)) if valid_pin(value) => Some(password::hash_password(value)?),
+        Some(Value::String(value)) if valid_pin(value) => Some(pin_hash(&app, value).await?),
         Some(_) => return Err(ApiError::new(400, "INVALID_PIN")),
     };
     if custom_code.is_some() {
-        app.limit("guess:ip", &context.ip, app.config.rate_auth)?;
+        guess_blocked(&app, &context, None)?;
     }
     let device_hash = device
         .as_deref()
@@ -151,7 +240,7 @@ pub async fn create(
             if custom_code.is_none() && pin.is_none() {
                 return Ok((
                     StatusCode::OK,
-                    Json(room_view(&space, &origin_for(&app, &context), true)?),
+                    Json(room_view(&space, &origin_for(&app, &context), Some(true))?),
                 ));
             }
             let next_pin = if body.contains_key("pin") {
@@ -163,43 +252,57 @@ pub async fn create(
             let fresh = load_by_id(&app, &space.id).await?;
             return Ok((
                 StatusCode::OK,
-                Json(room_view(&fresh, &origin_for(&app, &context), true)?),
+                Json(room_view(&fresh, &origin_for(&app, &context), Some(true))?),
             ));
         }
     }
-    app.limit("room-create:ip", &context.ip, app.config.rate_room)?;
+    caller_limit(
+        &app,
+        &context,
+        ("room-create:ip", "room-create:user"),
+        app.config.rate_room,
+    )?;
     let room_id = Uuid::new_v4().to_string();
-    let key = password::session_token()?;
-    let was_random = custom_code.is_none();
-    let code = custom_code.clone().unwrap_or(random_code()?);
-    let pin_hash = pin;
     let created_by = context
         .auth
         .as_ref()
         .map(|auth| auth.account.user.id.clone());
     let expires = now() + app.config.room_retention;
-    let inserted = app.db.run({
-        let room_id = room_id.clone(); let key = key.clone(); let code = code.clone(); let pin_hash = pin_hash.clone(); let device_hash = device_hash.clone();
-        move |db| {
-            if db.query_row("SELECT EXISTS(SELECT 1 FROM spaces WHERE roomKey=? OR roomCode=?)", rusqlite::params![key, code], |row| row.get::<_, bool>(0))? {
-                return Err(ApiError::new(409, "CODE_TAKEN"));
+    for _ in 0..12 {
+        let key = password::session_token()?;
+        let code = custom_code.clone().unwrap_or(random_code()?);
+        let result = app.db.run({
+            let room_id = room_id.clone(); let code = code.clone(); let pin = pin.clone(); let device_hash = device_hash.clone(); let created_by = created_by.clone();
+            move |db| {
+                let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                // Expired rooms release both the browser binding and their human code.
+                tx.execute("UPDATE spaces SET roomCode=NULL,pinHash=NULL WHERE roomCode=? AND expiresAt<=?", rusqlite::params![code, now()])?;
+                if tx.query_row("SELECT EXISTS(SELECT 1 FROM spaces WHERE roomCode=?)", [&code], |row| row.get::<_,bool>(0))? { return Err(ApiError::new(409, "CODE_TAKEN")); }
+                if let Some(device_hash) = &device_hash { tx.execute("UPDATE spaces SET deviceHash=NULL WHERE deviceHash=?", [device_hash])?; }
+                tx.execute("INSERT INTO spaces (id,name,ownerId,expiresAt,roomKey,deviceHash,roomCode,pinHash,createdAt,lastActiveAt,closedAt,createdBy) VALUES (?,'Temporary room',NULL,?,?,?,?,?,?,?,NULL,?)",
+                    rusqlite::params![room_id, expires, key, device_hash, code, pin, now(), now(), created_by])?;
+                tx.commit()?;
+                Ok(())
             }
-            db.execute("INSERT INTO spaces (id,name,ownerId,expiresAt,roomKey,deviceHash,roomCode,pinHash,createdAt,lastActiveAt,closedAt,createdBy) VALUES (?,?,?,?,?,?,?,?,?,?,NULL,?)",
-                rusqlite::params![room_id, "Temporary room", Option::<String>::None, expires, key, device_hash, code, pin_hash, now(), now(), created_by])?;
-            Ok(())
+        }).await;
+        match result {
+            Ok(()) => {
+                let space = load_by_id(&app, &room_id).await?;
+                return Ok((
+                    StatusCode::CREATED,
+                    Json(room_view(&space, &origin_for(&app, &context), Some(false))?),
+                ));
+            }
+            Err(error) if error.code == "CODE_TAKEN" && custom_code.is_none() => continue,
+            Err(error) => {
+                if error.code == "CODE_TAKEN" {
+                    guess_failed(&app, &context, None);
+                }
+                return Err(error);
+            }
         }
-    }).await;
-    if let Err(error) = inserted {
-        if error.code == "CODE_TAKEN" && was_random {
-            return Err(ApiError::new(503, "UNAVAILABLE"));
-        }
-        return Err(error);
     }
-    let space = load_by_id(&app, &room_id).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(room_view(&space, &origin_for(&app, &context), false)?),
-    ))
+    Err(ApiError::new(503, "UNAVAILABLE"))
 }
 
 async fn load_by_id(app: &App, id: &str) -> ApiResult<db::Space> {
@@ -223,6 +326,7 @@ async fn set_code_inner(
     }
     let id = space.id.clone();
     app.db.run(move |db| {
+        db.execute("UPDATE spaces SET roomCode=NULL,pinHash=NULL WHERE roomCode=? AND expiresAt<=?", rusqlite::params![next_code, now()])?;
         let holder: Option<String> = db.query_row("SELECT id FROM spaces WHERE roomCode=?", [&next_code], |row| row.get(0)).optional()?;
         if holder.as_deref().is_some_and(|holder| holder != id.as_str()) { return Err(ApiError::new(409, "CODE_TAKEN")); }
         let changed = db.execute("UPDATE spaces SET roomCode=?,pinHash=? WHERE id=? AND roomKey IS NOT NULL AND closedAt IS NULL AND expiresAt>?",
@@ -244,28 +348,19 @@ pub async fn enter(
         .map(str::trim)
         .filter(|value| !value.is_empty() && value.len() <= 64)
         .ok_or(ApiError::new(400, "INVALID_CODE"))?;
-    app.limit("guess:ip", &context.ip, app.config.rate_auth)?;
+    guess_blocked(&app, &context, Some(code))?;
     let code_owned = code.to_owned();
     let space = app
         .db
         .run(move |db| db::room_by_code(db, &code_owned, now()))
-        .await?
-        .ok_or(ApiError::NOT_FOUND)?;
+        .await?;
+    let Some(space) = space else {
+        guess_failed(&app, &context, None);
+        return Err(ApiError::NOT_FOUND);
+    };
     if let Some(pin_hash) = space.pin_hash.as_deref() {
-        let key = space.id.clone();
-        let locked = app
-            .pin_lockouts
-            .lock()
-            .map_err(ApiError::internal)?
-            .get(&key)
-            .copied();
-        if let Some((_, until)) = locked.filter(|(_, until)| *until > now()) {
-            let mut error = ApiError::new(429, "RATE_LIMITED");
-            error.header = Some((
-                axum::http::header::RETRY_AFTER,
-                ((until - now() + 999) / 1000).to_string().parse().unwrap(),
-            ));
-            return Err(error);
+        if let Some(seconds) = locked_for(&app, &space.id)? {
+            return Err(rate_error(seconds));
         }
         let pin = body
             .get("pin")
@@ -275,21 +370,28 @@ pub async fn enter(
         if pin.is_empty() {
             return Err(ApiError::new(401, "PIN_REQUIRED"));
         }
-        if !password::verify(pin, Some(pin_hash))? {
+        if !verify_pin(&app, pin, pin_hash).await? {
+            guess_failed(&app, &context, Some(code));
             let mut locks = app.pin_lockouts.lock().map_err(ApiError::internal)?;
-            let entry = locks.entry(space.id.clone()).or_insert((0, 0));
-            entry.0 = entry.0.saturating_add(1);
+            let time = now();
+            locks.retain(|_, (_, since, until)| {
+                if *until > 0 {
+                    *until > time
+                } else {
+                    *since + app.config.pin_lock_ms > time
+                }
+            });
+            if locks.len() >= 10000
+                && !locks.contains_key(&space.id)
+                && let Some(key) = locks.keys().next().cloned()
+            {
+                locks.remove(&key);
+            }
+            let entry = locks.entry(space.id.clone()).or_insert((0, time, 0));
+            entry.0 += 1;
             if entry.0 >= app.config.pin_lock_failures {
-                entry.1 = now() + app.config.pin_lock_ms;
-                let mut error = ApiError::new(429, "RATE_LIMITED");
-                error.header = Some((
-                    axum::http::header::RETRY_AFTER,
-                    ((entry.1 - now() + 999) / 1000)
-                        .to_string()
-                        .parse()
-                        .unwrap(),
-                ));
-                return Err(error);
+                entry.2 = time + app.config.pin_lock_ms;
+                return Err(rate_error((app.config.pin_lock_ms + 999) / 1000));
             }
             return Err(ApiError::new(403, "PIN_INVALID"));
         }
@@ -298,7 +400,7 @@ pub async fn enter(
             .map_err(ApiError::internal)?
             .remove(&space.id);
     }
-    Ok(Json(room_view(&space, &origin_for(&app, &context), false)?))
+    Ok(Json(room_view(&space, &origin_for(&app, &context), None)?))
 }
 
 pub async fn change_code(
@@ -319,14 +421,20 @@ pub async fn change_code(
     {
         return Err(ApiError::new(403, "FORBIDDEN"));
     }
-    app.limit("room-code:ip", &context.ip, app.config.rate_room)?;
+    caller_limit(
+        &app,
+        &context,
+        ("room-code:ip", "room-code:user"),
+        app.config.rate_room,
+    )?;
+    guess_blocked(&app, &context, None)?;
     if !body.contains_key("code") && !body.contains_key("pin") {
         return Err(ApiError::INVALID_INPUT);
     }
     let code = if body.contains_key("code") {
         match body.get("code") {
-            Some(Value::Null) => None,
-            Some(Value::String(value)) if value.is_empty() => None,
+            Some(Value::Null) => Some(random_code()?),
+            Some(Value::String(value)) if value.is_empty() => Some(random_code()?),
             Some(Value::String(value)) if valid_custom_code(value, true) => Some(value.clone()),
             _ => return Err(ApiError::new(400, "INVALID_CODE")),
         }
@@ -337,20 +445,26 @@ pub async fn change_code(
         match body.get("pin") {
             Some(Value::Null) => None,
             Some(Value::String(value)) if value.is_empty() => None,
-            Some(Value::String(value)) if valid_pin(value) => Some(password::hash_password(value)?),
+            Some(Value::String(value)) if valid_pin(value) => Some(pin_hash(&app, value).await?),
             _ => return Err(ApiError::new(400, "INVALID_PIN")),
         }
     } else {
         space.pin_hash.clone()
     };
-    set_code_inner(&app, &space, code, pin, true).await?;
+    if let Err(error) = set_code_inner(&app, &space, code, pin, false).await {
+        if error.code == "CODE_TAKEN" {
+            guess_failed(&app, &context, None);
+        }
+        return Err(error);
+    }
     let fresh = load_by_id(&app, &space.id).await?;
     app.pin_lockouts
         .lock()
         .map_err(ApiError::internal)?
         .remove(&space.id);
-    let view = room_view(&fresh, &origin_for(&app, &context), false)?;
-    Ok(Json(view))
+    Ok(Json(
+        json!({ "code": fresh.room_code, "hasPin": fresh.pin_hash.is_some(), "url": format!("{}/r/{}", origin_for(&app, &context), urlencoding(fresh.room_code.as_deref().unwrap_or_default())) }),
+    ))
 }
 
 pub async fn info(
@@ -359,7 +473,7 @@ pub async fn info(
     path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<Json<Value>> {
     let Path(raw) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    let space = load_room(&app, &raw).await?;
+    let space = scope(&app, &context, &raw).await?;
     Ok(Json(
         json!({ "id": space.id, "name": space.name, "expiresAt": space.expires_at,
         "code": space.room_code, "hasPin": space.pin_hash.is_some(),
@@ -373,20 +487,30 @@ pub async fn admin_rooms(
     Extension(context): Extension<RequestContext>,
 ) -> ApiResult<Json<Value>> {
     crate::admin_session(&context)?;
-    let rows = app.db.run(move |db| {
+    let mut rows = app.db.run(move |db| {
         let mut statement = db.prepare(
             "SELECT s.id,s.roomCode,u.email,s.createdAt,s.lastActiveAt,s.expiresAt,s.closedAt,
                     s.pinHash IS NOT NULL,(SELECT count(*) FROM items WHERE spaceId=s.id AND expiresAt>?),
-                    (SELECT coalesce(sum(storedBytes),0) FROM items WHERE spaceId=s.id AND expiresAt>?)
+                    (SELECT coalesce(sum(storedBytes),0) FROM items WHERE spaceId=s.id)
              FROM spaces s LEFT JOIN users u ON u.id=s.createdBy WHERE s.roomKey IS NOT NULL AND s.expiresAt>? ORDER BY coalesce(s.lastActiveAt,s.createdAt,0) DESC,s.expiresAt DESC",
         )?;
-        Ok(statement.query_map(rusqlite::params![now(), now(), now()], |row| Ok(json!({
+        Ok(statement.query_map(rusqlite::params![now(), now()], |row| Ok(json!({
             "id": row.get::<_, String>(0)?, "code": row.get::<_, Option<String>>(1)?, "owner": row.get::<_, Option<String>>(2)?,
             "anonymous": row.get::<_, Option<String>>(2)?.is_none(), "createdAt": row.get::<_, Option<i64>>(3)?,
             "lastActiveAt": row.get::<_, Option<i64>>(4)?, "expiresAt": row.get::<_, i64>(5)?, "closed": row.get::<_, Option<i64>>(6)?.is_some(),
             "closedAt": row.get::<_, Option<i64>>(6)?, "hasPin": row.get::<_, bool>(7)?, "itemCount": row.get::<_, i64>(8)?, "bytes": row.get::<_, i64>(9)?,
         })))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }).await?;
+    for row in &mut rows {
+        let estimated = row["createdAt"].is_null();
+        if estimated {
+            row["createdAt"] =
+                (row["expiresAt"].as_i64().unwrap_or_default() - app.config.room_retention).into();
+        }
+        row["createdAtEstimated"] = estimated.into();
+        row["lockedFor"] = locked_for(&app, row["id"].as_str().unwrap_or_default())?
+            .map_or(Value::Null, Value::from);
+    }
     Ok(Json(json!({ "rooms": rows })))
 }
 
@@ -411,9 +535,6 @@ async fn set_closed(
         .await?;
     if changed == 0 {
         return Err(ApiError::NOT_FOUND);
-    }
-    if !reopen {
-        app.realtime.revoke_space(&id);
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -441,22 +562,39 @@ pub async fn admin_delete(
 ) -> ApiResult<StatusCode> {
     crate::admin_session(&context)?;
     let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    let db_id = id.clone();
-    let changed = app.db.run(move |db| Ok(db.execute("UPDATE spaces SET expiresAt=?,closedAt=coalesce(closedAt,?),deviceHash=NULL,roomCode=NULL,pinHash=NULL WHERE id=? AND roomKey IS NOT NULL AND expiresAt>?", rusqlite::params![now(), now(), db_id, now()])?)).await?;
-    if changed == 0 {
-        return Err(ApiError::NOT_FOUND);
+    let keys=app.db.run(move|db| {
+        let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM spaces WHERE id=? AND roomKey IS NOT NULL AND expiresAt>?)",rusqlite::params![id,now()],|row|row.get(0))?;
+        if !exists { return Err(ApiError::NOT_FOUND); }
+        let mut statement=tx.prepare("SELECT fileKey FROM items WHERE spaceId=?1 AND fileKey IS NOT NULL UNION SELECT thumbnailKey FROM items WHERE spaceId=?1 AND thumbnailKey IS NOT NULL UNION SELECT key FROM upload_chunks WHERE uploadId IN (SELECT id FROM uploads WHERE spaceId=?1)")?;
+        let keys=statement.query_map([&id],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?; drop(statement);
+        for key in &keys { tx.execute("INSERT OR IGNORE INTO garbage (key) VALUES (?)",[key])?; }
+        tx.execute("DELETE FROM uploads WHERE spaceId=?",[&id])?;
+        tx.execute("DELETE FROM items WHERE spaceId=?",[&id])?;
+        tx.execute("DELETE FROM shares WHERE spaceId=?",[&id])?;
+        tx.execute("DELETE FROM spaces WHERE id=?",[&id])?;
+        tx.commit()?; Ok(keys)
+    }).await?;
+    let directory = crate::downloads::files_dir(&app.config.data);
+    for key in keys {
+        let path = crate::downloads::object_path(&directory, &key)?;
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ApiError::internal(error)),
+        }
+        app.db.run(move |db| db::forget_garbage(db, &key)).await?;
     }
-    app.realtime.revoke_space(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn items(
     State(app): State<App>,
-    Extension(_context): Extension<RequestContext>,
+    Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<Json<Value>> {
     let Path(raw) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    let space = load_room(&app, &raw).await?;
+    let space = scope(&app, &context, &raw).await?;
     let id = space.id.clone();
     Ok(Json(
         app.db
@@ -472,8 +610,13 @@ pub async fn text(
     request: axum::extract::Request,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let Path(raw) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    let space = load_room(&app, &raw).await?;
-    app.limit("room-write:ip", &context.ip, app.config.rate_room)?;
+    let space = scope(&app, &context, &raw).await?;
+    caller_limit(
+        &app,
+        &context,
+        ("room-write:ip", "room-write:user"),
+        app.config.rate_room,
+    )?;
     let headers = request.headers().clone();
     let body = read_json(request, app.config.max_text * 6 + 1024).await?;
     let text = input_string(body.get("text"), usize::MAX)?;
@@ -484,9 +627,10 @@ pub async fn text(
         return Err(ApiError::new(413, "TEXT_TOO_LARGE"));
     }
     let group = match body.get("group") {
-        None | Some(Value::Null) => {
-            header_value(&headers, "x-dropit-group").and_then(crate::decode_uri_component)
-        }
+        None | Some(Value::Null) => header_value(&headers, "x-dropit-group")
+            .filter(|v| !v.is_empty())
+            .map(|v| crate::decode_uri_component(v).ok_or(ApiError::new(400, "INVALID_GROUP")))
+            .transpose()?,
         Some(Value::String(value)) => Some(value.clone()),
         Some(_) => return Err(ApiError::new(400, "INVALID_GROUP")),
     };
@@ -503,10 +647,20 @@ pub async fn text(
     let _gate = app.realtime.gate.lock().await;
     let config = app.config.clone();
     let db_channel = channel.clone();
-    let item = app
+    let (item, groups) = app
         .db
-        .run(move |db| db::insert_room_text(db, &config, &db_channel, input))
+        .run(move |db| {
+            let before = db::groups(db, &db_channel)?;
+            let item = db::insert_room_text(db, &config, &db_channel, input);
+            let after = db::groups(db, &db_channel)?;
+            Ok((item, (before != after).then_some(after)))
+        })
         .await?;
+    if let Some(groups) = groups {
+        app.realtime
+            .publish(&channel, json!({"type":"groups","groups":groups}));
+    }
+    let item = item?;
     app.realtime
         .publish(&channel, json!({ "type": "item.created", "item": item }));
     Ok((StatusCode::CREATED, Json(json!({ "item": item }))))
@@ -518,8 +672,13 @@ pub async fn delete_item(
     path: Result<Path<(String, String)>, PathRejection>,
 ) -> ApiResult<StatusCode> {
     let Path((raw, item_id)) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    let space = load_room(&app, &raw).await?;
-    app.limit("room-write:ip", &context.ip, app.config.rate_room)?;
+    let space = scope(&app, &context, &raw).await?;
+    caller_limit(
+        &app,
+        &context,
+        ("room-write:ip", "room-write:user"),
+        app.config.rate_room,
+    )?;
     let channel = space.id.clone();
     let deleted = item_id.clone();
     let _gate = app.realtime.gate.lock().await;
@@ -626,29 +785,27 @@ pub async fn preview(
     let Some(key) = file.file_key.filter(|key| !key.is_empty()) else {
         return ApiError::NOT_FOUND.into_response();
     };
-    let path =
-        match crate::downloads::object_path(&crate::downloads::files_dir(&app.config.data), &key) {
-            Ok(path) => path,
-            Err(error) => return error.into_response(),
-        };
-    let bytes =
-        match tokio::task::spawn_blocking(move || crate::images::derive_file(&path, 2048)).await {
-            Ok(Ok(bytes)) => bytes,
-            _ => return ApiError::new(415, "INVALID_IMAGE").into_response(),
-        };
-    let mut response = Response::new(Body::from(bytes));
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/webp"));
-    response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_static("inline"),
-    );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-store"),
-    );
-    response
+    let item = match app
+        .db
+        .run({
+            let id = item_id.clone();
+            move |db| db::item_by_id(db, &id, now())
+        })
+        .await
+    {
+        Ok(Some(item)) => item,
+        _ => return ApiError::NOT_FOUND.into_response(),
+    };
+    crate::uploads::preview_item(
+        app,
+        db::PreviewSource {
+            item_id,
+            file_key: key,
+            expires_at: item.expires_at,
+        },
+        false,
+    )
+    .await
 }
 
 pub async fn media(
@@ -680,4 +837,45 @@ pub async fn media(
         Ok(value) => crate::downloads::into_response(value, head),
         Err(error) => error.into_response(),
     }
+}
+
+fn rate_error(seconds: i64) -> ApiError {
+    let mut error = ApiError::new(429, "RATE_LIMITED");
+    error.header = Some((header::RETRY_AFTER, HeaderValue::from(seconds.max(1))));
+    error
+}
+fn locked_for(app: &App, id: &str) -> ApiResult<Option<i64>> {
+    let mut locks = app.pin_lockouts.lock().map_err(ApiError::internal)?;
+    let time = now();
+    locks.retain(|_, (_, since, until)| {
+        if *until > 0 {
+            *until > time
+        } else {
+            *since + app.config.pin_lock_ms > time
+        }
+    });
+    Ok(locks
+        .get(id)
+        .and_then(|(_, _, until)| (*until > time).then_some((*until - time + 999) / 1000)))
+}
+pub async fn admin_unlock(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<Path<String>, PathRejection>,
+) -> ApiResult<StatusCode> {
+    crate::admin_session(&context)?;
+    let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let lookup = id.clone();
+    let code=app.db.run(move|db|Ok(db.query_row("SELECT roomCode FROM spaces WHERE id=? AND roomKey IS NOT NULL AND expiresAt>?",rusqlite::params![lookup,now()],|row|row.get::<_,Option<String>>(0)).optional()?)).await?.ok_or(ApiError::NOT_FOUND)?;
+    app.pin_lockouts
+        .lock()
+        .map_err(ApiError::internal)?
+        .remove(&id);
+    if let Some(code) = code {
+        app.limiter
+            .lock()
+            .map_err(ApiError::internal)?
+            .remove(&("guess:code", password::hash(&code)));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
