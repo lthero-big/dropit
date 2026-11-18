@@ -129,4 +129,6 @@ Remaining stage 4 items stay backlog until their stated data/auth/upload boundar
 
 The RHEA-237 conflict was resolved and PR #86 merged as `7412f123be88c50876d253ec230a2db9ce9de1d4`. RHEA-236 PR #87 is updated against `migration/rhea-226-rust`; its clean-checkout Rust suite and browser smoke pass as recorded above, and it awaits the normal CI/coordinator review. RHEA-238 and RHEA-239 remain backlog until the space/share and upload boundaries are accepted.
 
+RHEA-236 has since passed the clean checkout, room/share compatibility and Docker checks, and PR #87 merged as `eee16f5815f4eb0b457ee21309d2e15c7240ad3c`. RHEA-238 is now running the historical migration and maintenance work. RHEA-239 is now running the final client and container acceptance work. OAuth/registration, historical migration, runtime maintenance and final release packaging remain explicit acceptance boundaries until their tasks produce evidence.
+
 The preliminary full-migration estimate is 12–20 person-days, or 15–25 with contingency. Re-estimate after the first runnable Rust slice. It is not a schedule commitment or a claim that the first wave completes the server migration.
