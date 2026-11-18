@@ -37,6 +37,8 @@ Measured on this host: Sharp's prebuilt codec list, HEVC encode failure, 4096 ve
 
 Inferred from source and upstream docs, and not executed in Rust: `image` WebP output versus Sharp, GIF disposal, EXIF orientations other than 6, libvips binding behavior, and distro libvips codec sets.
 
+Review follow-up, still on the same TypeScript tree: an independent probe measured one-chunk index `1` as 400 and two-chunk index `1` as 204, media `Cache-Control: private, no-store`, a legacy PNG without `Content-Type` as 201 with `hasThumbnail=false`, a valid PNG containing `<svg/>` as legacy 201 with a thumbnail and session complete 415, and an 8x4 AVIF as upload 201, thumbnail present, preview 200 at 8x4. Those measurements are now the case inputs. AVIF `415` is an unfinished slice, not the compatibility target.
+
 ## Primary sources
 
 - Dropit source and tests named in the contract note.

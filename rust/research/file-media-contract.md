@@ -27,7 +27,15 @@ Both bases exist: `/api/spaces/:space` and `/api/rooms/:room`. Space routes need
 | GET | `/api/s/:token/preview` | generated WebP | `backend.ts:1256-1260` |
 | GET | `/api/s/:token/media` | sniffed media | `backend.ts:1261-1265` |
 
-Every `/api/*` response also gets `Cache-Control: no-store` from `backend.ts:269-270`, then a route may replace it. Preview does replace it. Thumbnail and media do not, so their effective cache header is `no-store` from this middleware. Download sets no cache header of its own, so it also keeps `no-store`. `/d/:token` is outside `/api` and sets `Cache-Control: no-store` in `backend.ts:1224-1225`.
+Every `/api/*` response starts with `Cache-Control: no-store` from `backend.ts:269-270`. A route that sets the same header again replaces that value. Effective headers:
+
+| Route | Effective `Cache-Control` | Where it is set |
+| --- | --- | --- |
+| Member and room preview | `private, max-age=N` | `sendPreview`, `backend.ts:1180` |
+| Share preview | `no-store` | `sendPreview` with `shared=true`, `backend.ts:1180` |
+| Member, room, and share media | `private, no-store` | `sendMedia`, `backend.ts:1191`. This replaces the middleware `no-store`. An independent probe on 2026-11-18 confirmed `private, no-store` |
+| Thumbnail, download, and other `/api/*` routes that do not set the header | `no-store` | middleware only, `backend.ts:269-270`. Thumbnail sets `Content-Type: image/webp` and does not set cache (`backend.ts:1412-1416`, `1248-1254`) |
+| `/d/:token` | `no-store` | outside `/api`, `backend.ts:1224-1225` |
 
 Global security headers on every response, including `/d/`: `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Permissions-Policy` (`backend.ts:256-268`).
 
@@ -195,9 +203,9 @@ WebM and Ogg detection scans the 4096-byte prefix, not the whole file. A codec m
 When a thumbnail is generated (`service.ts:498-509`):
 
 - Session complete sniffs 4096 bytes. A sniffed raster is validated even when the declared MIME is `application/octet-stream`.
-- Session complete also rejects `mime === image/svg+xml` or a prefix matching `/<svg[\s/>]/i` with `415 INVALID_IMAGE`, including SVG whose declared MIME is PNG or octet-stream.
-- Declared MIME `image/jpeg`, `image/png`, `image/webp`, `image/gif`, or `image/avif` also enters the raster pipeline. `image/heic` and `image/heif` do not, unless the prefix sniffed as AVIF.
-- Legacy `POST items/file` does not sniff and does not reject SVG. SVG and HTML are stored download-only, `hasThumbnail: false`. A declared raster MIME that is not a decodable raster still returns `415` and stores nothing.
+- The SVG prefix check runs only when `uploadId` is set, which is the session complete path (`service.ts:498-502`). It rejects `mime === image/svg+xml` or a 4096-byte prefix matching `/<svg[\s/>]/i` with `415 INVALID_IMAGE`. That includes SVG declared as PNG or octet-stream, and a valid PNG whose first 4096 bytes contain `<svg/>`.
+- Declared MIME `image/jpeg`, `image/png`, `image/webp`, `image/gif`, or `image/avif` also enters the raster pipeline. `image/heic` and `image/heif` do not, unless the session prefix sniffed as AVIF.
+- Legacy `POST items/file` does not read a prefix and does not apply the SVG regex. Declared `image/svg+xml` or `text/html` is stored download-only, `hasThumbnail: false`. A valid PNG declared `image/png` is stored with a thumbnail even when `<svg/>` sits inside the first 4096 bytes. An independent probe on 2026-11-18 measured both outcomes: legacy 201 with `hasThumbnail=true`, session complete 415. A declared raster MIME that is not a decodable raster still returns `415` and stores nothing. Omitting `Content-Type` defaults to `application/octet-stream` (`backend.ts:1350`), so a legacy PNG without that header is 201 and `hasThumbnail=false`.
 - Thumbnail edge is 320. The thumbnail object is a second file. `storedBytes = fileSize + thumbnailSize`. Thumbnail write limit is 1 MiB.
 - If the quota can hold the declared file but not the thumbnail, complete returns `413 QUOTA_EXCEEDED`, no item, no files (`uploads.test.ts` AC-U2/U6).
 
@@ -230,7 +238,7 @@ EXIF orientation 6 on a 3000x1500 JPEG: preview width 1024 and height 2048. Outp
 7. Sniffed AVIF enters raster validation. A declared `image/heic` without an `avif`/`avis` brand does not. Sharp may still classify a real AVIF as `format: heif`; the allowlist includes `heif`, so that path works only after the pipeline starts.
 8. TIFF decodes in this Sharp build and would pass a naive "Sharp can open it" check. `raster()` still rejects it because `tiff` is not in the format list. Expected result is `415` when the declared MIME forced the pipeline, or a download-only item when neither sniff nor declared MIME selected it.
 9. Pixel limit is exact: 4096x4096 (16,777,216) is accepted by this build; 4097x4097 throws `Input image exceeds pixel limit` and becomes `415`. Width and height are not capped independently.
-10. `image/svg+xml` declared on the legacy route is stored. The same bytes declared as `image/png` are `415` only when the prefix matches the SVG regex or Sharp rejects them. A PNG that merely contains the letters `<svg` later in the file is not rejected by the prefix regex unless those bytes sit in the sniffed window in that form.
+10. The SVG prefix regex is session-complete only. Legacy `image/svg+xml` is stored download-only. A real SVG declared `image/png` on the legacy route enters `raster()` and returns `415` because Sharp's format is `svg`, not because of the regex. A valid PNG that contains `<svg/>` in the first 4096 bytes is 201 with a thumbnail on the legacy route and `415` on session complete. The same letters past byte 4096 do not trip the session regex.
 11. Multi-range and malformed Range headers are full 200 responses, not 416. Only an unsatisfiable single range is 416.
 12. Media 404 and download 200 can both be correct for the same item. HTML declared as `video/mp4` is the test case (`backend.test.ts` media preview).
 13. WebM sniff uses `Buffer.includes('webm')` on the prefix. A file whose EBML header is valid but whose codec id sits after byte 4096 is not inlined.

@@ -6,15 +6,15 @@ Research only. No crate is added to the repository by this note. Versions below 
 
 Use the pure-Rust `image` crate for the first media slice, and keep original bytes on disk.
 
-- Decode only JPEG, PNG, GIF, and WebP through `image` 0.25.x with explicit features.
+- Decode JPEG, PNG, GIF, and WebP through `image` 0.25.x with explicit features.
 - Apply orientation with `kamadak-exif` before resize.
 - Resize inside the requested edge, never enlarge, then encode WebP.
-- Reject AVIF and HEIF in that first slice with the same `415 INVALID_IMAGE` the TypeScript pipeline returns when Sharp throws. Record the gap. Do not pretend the pure-Rust encoder matches Sharp's AVIF path.
-- Add a libvips binding only in a later slice if a real AVIF/HEIF fixture must preview and the coordinator accepts the system packages.
+- Keep the TypeScript AVIF result as the final compatibility target: upload `201`, `hasThumbnail=true`, thumbnail `200`, preview `200` with the source dimensions when they already fit. An independent probe on 2026-11-18 measured an 8x4 AVIF at those statuses. A first slice that returns `415` for AVIF is unfinished capability, not an accepted product change. ADR-002 forbids shrinking that boundary without a recorded decision on RHEA-226.
+- Finish AVIF decode before the migration is called compatible. The dependency path is below. HEIF/HEVC stays download-only unless a later probe shows the current server thumbnails that file.
 
 This matches ADR-004: compare observable status, headers, and image properties. Do not promise byte-identical WebP.
 
-`image` is the recommended path because the current product contract is a bounded raster pipeline, not a general image server. The crate is pure Rust for the formats the first slice needs, so the future Docker image does not gain libvips, libheif, or a C toolchain. The cost is AVIF/HEIF and a WebP encoder that is not libwebp.
+`image` is the recommended path for the formats whose output is already WebP, because those slices stay free of libvips, libheif, and a C toolchain. AVIF is a required later step on that same path or on the libvips path. The WebP encoder in `image-webp` is lossless only, so quality-75 byte identity is not available either way.
 
 ## What the TypeScript build actually does
 
@@ -33,7 +33,7 @@ Code allowlist and build support are different lists.
 | AVIF | sniff brand `avif`/`avis` or `image/avif` | `avif` or `heif` | 8x4 AVIF encoded; Sharp reported `format: heif`; WebP pipeline succeeded |
 | HEIF/HEIC | not sniffed; `image/heic` does not enter the pipeline | `heif` is accepted if Sharp already started | `.heif({ compression: 'hevc' })` failed: `heifsave: Unsupported compression` |
 | TIFF | neither sniff nor declared MIME | not in the allowlist | Sharp can encode and decode TIFF; `raster()` still rejects `tiff` |
-| SVG | session protocol rejects; legacy route stores download-only | not a raster format | this Sharp build can decode SVG (`metadata.format === svg`); the application still refuses to thumbnail it |
+| SVG | session protocol rejects any prefix match; legacy route stores declared `image/svg+xml` download-only and thumbnails a valid PNG that happens to contain `<svg/>` | not a raster format | this Sharp build can decode SVG (`metadata.format === svg`); a real SVG declared as a raster MIME is still `415` |
 
 Probe host: Ubuntu 24.04.3, `x86_64`, Node `v22.22.0`, `pnpm@11.1.0`, Sharp versions object:
 
@@ -59,7 +59,7 @@ Primary sources:
 - [kamadak-exif 0.6.1 crate docs](https://docs.rs/kamadak-exif/0.6.1/exif/)
 - crates.io on 2026-11-18: `image` 0.25.10, `kamadak-exif` 0.6.2
 
-`image` default features include `jpeg`, `png`, `gif`, `webp`, and `avif`. For this service, disable defaults and enable only `jpeg`, `png`, `gif`, and `webp`. That avoids compiling `ravif` until an AVIF slice exists.
+`image` default features include `jpeg`, `png`, `gif`, `webp`, and `avif`. The first crate commit can disable defaults and enable `jpeg`, `png`, `gif`, and `webp` so `ravif` is not compiled before the AVIF cases run. Final acceptance still enables AVIF decode. The feature to add then is `avif-native` (dav1d). The `avif` feature alone is the `ravif` encoder, and Dropit does not encode AVIF.
 
 Format facts from those pages:
 
@@ -114,9 +114,10 @@ Not recommended for the implementation slice.
 
 ## Packaging comparison
 
-| Path | Runtime packages | Build packages | Formats the first slice can honestly claim | License notes from upstream docs |
+| Path | Runtime packages | Build packages | Formats that path can honestly claim | License notes from upstream docs |
 | --- | --- | --- | --- | --- |
-| `image` + `kamadak-exif` | none for codecs | Rust toolchain, rustc 1.88+ for `image` 0.25.10 | JPEG, PNG, GIF, WebP decode; WebP encode is lossless only | `image` is MIT OR Apache-2.0. `kamadak-exif` crate page says BSD-2-Clause |
+| `image` + `kamadak-exif`, before `avif-native` | none for codecs | Rust toolchain, rustc 1.88+ for `image` 0.25.10 | JPEG, PNG, GIF, WebP decode; WebP encode is lossless only. AVIF is unfinished until the next row passes | `image` is MIT OR Apache-2.0. `kamadak-exif` crate page says BSD-2-Clause |
+| `image` with `avif-native` | dav1d | dav1d headers or the crate's bundled build | the previous row plus AVIF decode of `F-AVIF-8x4`, once a Rust test shows 8x4 | dav1d's license is its own; do not assume it matches `image` |
 | `libvips` crate + distro libvips | libvips and plugins | clang/pkg-config, libvips headers, and codec libraries | whatever that distro enabled; must be probed at test time | libvips itself is LGPL-2.1-or-later. A distro build can pull in further codec licenses. Do not assume the Sharp prebuilt set |
 | keep Sharp | Node 22 and the Sharp native addon | node-gyp only if prebuilds are unavailable | the prebuilt set measured above | Sharp is Apache-2.0; bundled libvips is LGPL-2.1-or-later. Already the current runtime |
 
@@ -130,9 +131,9 @@ The current server license is AGPL-3.0-only. Linking LGPL libvips is a distribut
 | First GIF frame | dimensions of the first frame; a known pixel color from the fixture | Sharp's GIF decoder version |
 | Pixel ceiling | `width * height > 16_777_216` becomes `415 INVALID_IMAGE` before a thumbnail exists | Sharp's error string |
 | WebP output | RIFF/WEBP sniff, dimensions inside the edge, no enlargement, aspect ratio preserved within 1 pixel | quality 75 lossy bytes |
-| AVIF | first slice: `415` and no item, with the gap documented | Sharp 0.34.5 on linux x64 can decode 8-bit AVIF |
+| AVIF | final target: 201, thumbnail 200, preview 200 at the oriented size. A slice that still returns `415` is unfinished and must say so | Sharp 0.34.5 on linux x64 decoded the 8x4 probe and the existing `backend.test.ts` AVIF case |
 | HEIC | declared `image/heic` today does not enter `raster()` unless sniff says AVIF. A download-only item is the compatible result for a non-AVIF HEIC | HEVC is unsupported in the measured prebuild |
-| SVG | session complete `415`; legacy upload 201 download-only, no thumbnail, media 404 | Sharp is able to rasterize SVG and must not be allowed to |
+| SVG | session complete `415` when the prefix matches; legacy declared SVG is 201 download-only with no thumbnail and media 404; a valid PNG containing `<svg/>` is thumbnailed on the legacy route | Sharp is able to rasterize a real SVG and must not be allowed to |
 | Original file | download bytes equal the uploaded bytes | thumbnail and preview are derived |
 
 ## Suggested dependency block
@@ -145,7 +146,21 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 kamadak-exif = "0.6"
 ```
 
-Do not enable `avif` or `avif-native` until a fixture proves decode and the coordinator accepts the extra native dependency (`dav1d` for `avif-native`, or the pure-Rust `ravif` encoder only). Decode of AVIF is the product gap; an AVIF encoder is not required, because output is WebP.
+AVIF decode is required before compatibility acceptance. Add it in the same crate when the fixture runs:
+
+```toml
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "avif-native"] }
+```
+
+`avif-native` links dav1d. That is a packaging dependency, not a reason to drop the AVIF cases. If `image` with `avif-native` cannot decode `F-AVIF-8x4` to the expected dimensions, switch that format to the libvips path in option B and probe the distro's libheif/libaom before claiming the case. An AVIF encoder is not required, because output is WebP. Do not enable the `avif` feature alone and treat encode support as decode support.
+
+### How to close the AVIF gap
+
+1. Generate `F-AVIF-8x4` with the same Sharp call the probe used: an 8x4 solid image, `.avif()`, brand `ftypavif`.
+2. Upload it on both the legacy route and the session protocol with `Content-Type: image/avif`. Expect 201 and `hasThumbnail=true`.
+3. GET thumbnail and preview. Expect 200, `image/webp`, dimensions 8x4, no enlargement.
+4. Load a schema-19 fixture that already contains an AVIF item and its thumbnail key. Download returns the original bytes. Thumbnail returns the stored WebP without re-encoding. Preview returns 200 from the original bytes.
+5. Record the crate feature, the dav1d version, and the decoded dimensions. If step 2 or 3 fails, the migration is not compatible yet.
 
 ## Unverified points, listed so they are not implied
 
