@@ -11,14 +11,28 @@ import { fixture, PASSWORD, NORMALIZED_PASSWORD } from './fixture.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const baseline = '37ce06ebfab2cd98b81e49ce54fb24ec5daeec68';
-// The reference must not silently replace the agreed TS behavior.
-assert.equal(execFileSync('git', ['diff', baseline, '--', 'apps/server/src', 'pnpm-lock.yaml'], { cwd: root, encoding: 'utf8' }), '');
-const require = createRequire(resolve(root, 'apps/server/package.json'));
-const Sqlite = require('better-sqlite3');
+let referenceRoot;
+let Sqlite;
 const rust = process.env.RUST_SERVER_BIN || resolve(root, 'rust/server/target/debug/dropit-server');
 await mkdir(resolve(root, 'rust/server/data'), { recursive: true });
 const temporary = await mkdtemp(resolve(root, 'rust/server/data/compat-'));
 const processes = new Set();
+
+async function prepareReference() {
+  const directory = resolve(temporary, 'ts-reference');
+  await mkdir(directory);
+  // git archive reads the fixed commit's objects, independent of this checkout and its lockfile.
+  const archive = execFileSync('git', ['archive', baseline, '--',
+    'apps/server', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml'],
+  { cwd: root, maxBuffer: 16 * 1024 * 1024 });
+  execFileSync('tar', ['-x', '-C', directory], { input: archive });
+  execFileSync('pnpm', ['install', '--frozen-lockfile', '--prefer-offline', '--filter', '@dropit/server...'],
+    { cwd: directory, stdio: 'pipe' });
+  execFileSync('pnpm', ['--filter', '@dropit/server', 'build'], { cwd: directory, stdio: 'pipe' });
+  console.log('PASS reference built from fixed TS commit ' + baseline + ' and its frozen lockfile');
+  return directory;
+}
+
 let checks = 0;
 
 async function start(kind, data, options = {}) {
@@ -29,7 +43,7 @@ async function start(kind, data, options = {}) {
   await new Promise((resolve, reject) => socket.close(error => error ? reject(error) : resolve()));
   const origin = options.APP_ORIGIN ?? 'http://dropit.test';
   const child = spawn(kind === 'rust' ? rust : process.execPath,
-    kind === 'rust' ? [] : [resolve(root, 'apps/server/dist/index.js')], {
+    kind === 'rust' ? [] : [resolve(referenceRoot, 'apps/server/dist/index.js')], {
       cwd: root,
       env: {
         PATH: process.env.PATH, NODE_ENV: 'test', DATA_DIR: data, HOST: '127.0.0.1', PORT: String(port),
@@ -134,6 +148,19 @@ async function mainFlow(kind, seed, metadata) {
     expectCode(record(await request(server, '/api/me', { cookie: oldCookie, headers: { authorization: 'invalid' } })), 401, 'UNAUTHENTICATED');
     record(await request(server, '/api/me', { cookie: oldCookie }));
 
+    // Hono treats an undecodable parameter as an unknown ID, after authentication.
+    for (const parameter of ['%FF', '%C3%28', '%GG', '%']) {
+      for (const suffix of ['', '/items', '/items/text']) {
+        const path = '/api/spaces/' + parameter + suffix;
+        const options = suffix.endsWith('/text') ? { method: 'POST', json: { text: 'denied' } } : {};
+        for (const cookie of [undefined, oldCookie]) {
+          const response = record(await request(server, path, { ...options, cookie }));
+          expectCode(response, cookie ? 404 : 401, cookie ? 'NOT_FOUND' : 'UNAUTHENTICATED');
+          assert.equal(response.headers['content-type'], 'application/json');
+        }
+      }
+    }
+
     const loginPath = '/api/auth/password/login';
     for (const json of [
       { email: 'alice@example.test', password: 'wrong-password' },
@@ -150,6 +177,21 @@ async function mainFlow(kind, seed, metadata) {
     expectCode(record(await request(server, loginPath, { method: 'POST', json: {}, origin: 'http://evil.test' })), 403, 'ORIGIN_REJECTED');
     expectCode(record(await request(server, loginPath, { method: 'POST', json: {}, origin: '' })), 403, 'ORIGIN_REJECTED');
     expectCode(record(await request(server, loginPath, { method: 'POST', json: { email: 'alice@example.test', password: PASSWORD, invite: 'invalid' } })), 403, 'INVITE_INVALID');
+
+    const overflowLogin = record(await request(server, loginPath, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      raw: JSON.stringify({ email: 'alice@example.test', password: NORMALIZED_PASSWORD }).slice(0, -1) +
+        ',"unused":1e400,"nested":{"value":-1e400}}',
+    }));
+    assert.equal(overflowLogin.status, 200);
+    const overflowCookie = overflowLogin.headers['set-cookie'].split(';')[0];
+    const overflowMe = record(await request(server, '/api/me', { cookie: overflowCookie }));
+    assert.equal(overflowMe.status, 200);
+    assert.equal(overflowMe.body.user.id, metadata.alice.id);
+    expectCode(record(await request(server, loginPath, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      raw: '{"email":"alice@example.test","password":1e400}',
+    })), 400, 'INVALID_INPUT');
 
     const alice = await login(server, '  ALICE@EXAMPLE.TEST  ');
     record(alice.response);
@@ -205,7 +247,26 @@ async function mainFlow(kind, seed, metadata) {
     expectCode(record(await request(server, '/api/auth/logout', { cookie: alice.cookie, method: 'POST' })), 401, 'UNAUTHENTICATED');
     expectCode(record(await request(server, '/api/no-such-route', { cookie: oldCookie })), 404, 'NOT_FOUND');
 
-    const ids = new Map([[item.id, '<new-item>'], [item.createdAt, '<created>'], [item.expiresAt, '<expiry>']]);
+    const overflowCreated = record(await request(server, space + '/items/text', {
+      cookie: oldCookie, method: 'POST', headers: { 'content-type': 'application/json' },
+      raw: '{"text":"unused overflow accepted 🦀","unused":1e400,"nested":[-1e400]}',
+    }));
+    assert.equal(overflowCreated.status, 201);
+    const overflowItem = overflowCreated.body.item;
+    assert.equal(overflowItem.text, 'unused overflow accepted 🦀');
+    const overflowSnapshot = record(await request(server, space + '/items', { cookie: oldCookie }));
+    assert.equal(overflowSnapshot.status, 200);
+    assert.deepEqual(overflowSnapshot.body.items.find(candidate => candidate.id === overflowItem.id), overflowItem);
+    expectCode(record(await request(server, space + '/items/text', {
+      cookie: oldCookie, method: 'POST', headers: { 'content-type': 'application/json' },
+      raw: '{"text":1e400}',
+    })), 400, 'INVALID_INPUT');
+
+    const ids = new Map([
+      [item.id, '<new-item>'], [item.createdAt, '<created>'], [item.expiresAt, '<expiry>'],
+      [overflowItem.id, '<overflow-item>'], [overflowItem.createdAt, '<overflow-created>'],
+      [overflowItem.expiresAt, '<overflow-expiry>'],
+    ]);
     return { transcript: normalize(transcript, ids), item, data, cookie: oldCookie, newCookie: bob.cookie };
   } finally {
     await stop(server);
@@ -214,7 +275,7 @@ async function mainFlow(kind, seed, metadata) {
 
 async function smallScenario(name, fixtureOptions, serverOptions, run) {
   const seed = resolve(temporary, name + '-seed');
-  const metadata = await fixture(seed, fixtureOptions);
+  const metadata = await fixture(seed, { ...fixtureOptions, referenceRoot });
   const results = [];
   for (const kind of ['ts', 'rust']) {
     const data = resolve(temporary, name + '-' + kind);
@@ -231,8 +292,11 @@ async function smallScenario(name, fixtureOptions, serverOptions, run) {
 }
 
 try {
+  referenceRoot = await prepareReference();
+  const require = createRequire(resolve(referenceRoot, 'apps/server/package.json'));
+  Sqlite = require('better-sqlite3');
   const seed = resolve(temporary, 'seed');
-  const metadata = await fixture(seed);
+  const metadata = await fixture(seed, { referenceRoot });
   const reference = await mainFlow('ts', seed, metadata);
   const actual = await mainFlow('rust', seed, metadata);
   assert.deepEqual(actual.transcript, reference.transcript);

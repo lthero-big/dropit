@@ -12,7 +12,7 @@ use std::{
 use axum::{
     Json, Router,
     body::to_bytes,
-    extract::{ConnectInfo, Extension, Path, Request, State},
+    extract::{ConnectInfo, Extension, Path, Request, State, rejection::PathRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -544,9 +544,10 @@ async fn spaces(
 async fn space(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
-    Path(space_id): Path<String>,
+    path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<Json<Value>> {
     let account = context.require_auth()?.account.clone();
+    let Path(space_id) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let quota = account.quota.unwrap_or(app.config.quota);
     let space = app
         .db
@@ -560,9 +561,10 @@ async fn space(
 async fn items(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
-    Path(space_id): Path<String>,
+    path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<Json<Value>> {
     let id = context.require_auth()?.account.user.id.clone();
+    let Path(space_id) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let snapshot = app
         .db
         .run(move |db| {
@@ -577,10 +579,11 @@ async fn items(
 async fn text(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
-    Path(space_id): Path<String>,
+    path: Result<Path<String>, PathRejection>,
     request: Request,
 ) -> ApiResult<impl IntoResponse> {
     let auth = context.require_auth()?;
+    let Path(space_id) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let id = auth.account.user.id.clone();
     let scope = space_id.clone();
     app.db
@@ -645,6 +648,7 @@ async fn read_json(request: Request, limit: usize) -> ApiResult<Map<String, Valu
                 ApiError::new(400, "INVALID_JSON")
             }
         })?;
+    // JSON.parse accepts huge numbers in unused fields. Keep them parseable before validating used fields.
     serde_json::from_str(&String::from_utf8_lossy(&bytes))
         .map_err(|_| ApiError::new(400, "INVALID_JSON"))
 }

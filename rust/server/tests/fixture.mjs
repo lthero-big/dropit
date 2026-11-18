@@ -1,19 +1,20 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { SqliteRepository } from '../../../apps/server/dist/repository.js';
-import { hashPasswordSync } from '../../../apps/server/dist/password.js';
-import { hash } from '../../../apps/server/dist/domain.js';
-import { ClipboardService } from '../../../apps/server/dist/service.js';
-import { loadConfig } from '../../../apps/server/dist/config.js';
-import { DiskFileStorage } from '../../../apps/server/dist/files.js';
-import { MemoryBroadcaster } from '../../../apps/server/dist/events.js';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
 export const PASSWORD = 'Ｐａｓｓｗｏｒｄ-é-🔐';
 export const NORMALIZED_PASSWORD = 'Password-e\u0301-🔐';
 
 /** Schema, hashes, sessions and seed items all come from the TS baseline. */
-export async function fixture(directory, { quota = null, itemLimit = null, sessionMs = null } = {}) {
+export async function fixture(directory, {
+  quota = null, itemLimit = null, sessionMs = null,
+  referenceRoot = fileURLToPath(new URL('../../../', import.meta.url)),
+} = {}) {
+  const load = name => import(pathToFileURL(resolve(referenceRoot, 'apps/server/dist/' + name + '.js')));
+  const [
+    { SqliteRepository }, { hashPasswordSync }, { hash }, { ClipboardService },
+    { loadConfig }, { DiskFileStorage }, { MemoryBroadcaster },
+  ] = await Promise.all(['repository', 'password', 'domain', 'service', 'config', 'files', 'events'].map(load));
   await mkdir(directory, { recursive: true });
   const repo = new SqliteRepository(resolve(directory, 'dropit.sqlite'));
   const time = Date.now();

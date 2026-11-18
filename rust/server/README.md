@@ -20,8 +20,9 @@ base64url SHA-256 hashes.
 ## Build and validate
 
 Rust 1.94.0 is pinned in rust-toolchain.toml. A C compiler is required for bundled
-SQLite. Node 22 and pnpm are required to generate the reference fixtures and run
-the compatibility tests. The Rust executable runs independently of Node.
+SQLite. Node 22, pnpm, git and tar are required to generate the reference fixtures
+and run the compatibility tests. The baseline Git object must be available locally.
+The Rust executable runs independently of Node.
 
 Run from the repository root.
 
@@ -45,8 +46,14 @@ gets a separate copy of that TS-generated fixture. It starts real HTTP processes
 checks status/JSON/security headers/cookies, then kills and restarts each process
 against its original files. It also starts TS on the Rust-written database,
 reads Rust sessions/text, writes through TS again, and reads those writes through
-Rust. The original TS sources and pnpm lock are checked against the recorded
-baseline before running.
+Rust. Before generating fixtures, the harness uses git archive to extract the fixed
+baseline commit's apps/server, package.json, pnpm-workspace.yaml and pnpm-lock.yaml
+into its temporary directory. It installs that reference with
+pnpm install --frozen-lockfile --prefer-offline --filter @dropit/server... and builds
+it there. Fixtures, HTTP processes and database inspection all use those archived
+sources and dependencies. Current frontend lockfile additions therefore allow the
+same fixed backend reference to run. pnpm uses cached packages where available and
+downloads missing baseline packages when necessary.
 
 Only random session values, new item IDs, new item timestamps and snapshot
 serverTime are normalized during comparison. The test independently checks the
@@ -63,12 +70,37 @@ The test credentials are synthetic and are defined in tests/fixture.mjs.
 On 2026-11-18, Rust 1.94.0, Node 22.22.0 and pnpm 11.1.0 were used on
 x86_64 Linux. cargo fmt --check, cargo build --locked and
 cargo clippy --locked --all-targets -- -D warnings passed. cargo test --locked --
---nocapture passed its one process-level integration test, checking 139 real HTTP
+--nocapture passed its one process-level integration test, checking 199 real HTTP
 responses across TS and Rust. The cases include wrong and missing credentials,
 JSON/body limits, CSRF, disabled and pending users, viewer/temporary-password
 restrictions, Unicode metadata, logout, an abrupt process restart, bidirectional
 TS/Rust data and sessions, eight concurrent quota-limited writes, item capacity,
 production cookies, trusted-proxy origin, auth rate limits and session expiry.
+
+## First review regressions
+
+The candidate includes integration commit ebf9b876da9c3918757d2c956d33f63d1948a97b
+and its frontend Playwright additions. The original whole-lockfile equality
+assertion failed on that candidate before any HTTP process started. Building the
+isolated fixed reference restores the original 139 HTTP checks on this candidate.
+
+The space, items and text routes now handle Path extraction rejection inside the
+handler after require_auth. Invalid UTF-8 and malformed percent parameters return
+the TS JSON error shape with 401 for unauthenticated requests and 404 for
+authenticated requests. Regression cases cover %FF, %C3%28, %GG and % on all three
+routes with and without a session.
+
+serde_json's arbitrary_precision feature accepts valid JSON numeric literals such
+as 1e400 in ignored fields, matching the TS handlers. Tests check successful login
+followed by me and successful text creation followed by a snapshot, including
+nested overflow numbers. Overflow numbers in required string fields still produce
+INVALID_INPUT. Existing JSON syntax and body-limit tests remain in the suite.
+
+The review also observed a difference for a JSON string containing an unpaired
+U+D800 code unit between a and b. TS accepts that input and Rust returns
+INVALID_JSON. The full TS write/read/restart behavior for that boundary remains
+unverified and is deferred to the coordinator's complete-migration contract.
+Normal Unicode roundtrip remains covered by the process test.
 
 ## Run locally
 
