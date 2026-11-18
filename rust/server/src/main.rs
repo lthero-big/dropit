@@ -1,3 +1,4 @@
+mod auth;
 mod browser;
 mod config;
 mod db;
@@ -111,6 +112,7 @@ struct StateData {
     app_tickets: Mutex<HashMap<String, AppTicket>>,
     chunk_work: uploads::ChunkWork,
     pin_lockouts: Mutex<HashMap<String, (u32, i64, i64)>>,
+    setup_code: Mutex<Option<String>>,
 }
 
 pub(crate) type App = Arc<StateData>;
@@ -170,7 +172,7 @@ pub(crate) struct RequestContext {
 }
 
 impl RequestContext {
-    fn require_auth(&self) -> ApiResult<&Auth> {
+    pub(crate) fn require_auth(&self) -> ApiResult<&Auth> {
         self.auth.as_ref().ok_or(ApiError::UNAUTHENTICATED)
     }
 }
@@ -179,6 +181,41 @@ impl RequestContext {
 async fn main() -> StartupResult<()> {
     let mut config = Config::load()?;
     let db = Database::open(&mut config)?;
+    let mut user_count = db
+        .run(|db| Ok(db::user_count(&*db)?))
+        .await
+        .map_err(|error| format!("database startup check failed: {error:?}"))?;
+    if user_count == 0
+        && let (Ok(email), Ok(raw_password)) = (
+            std::env::var("ADMIN_EMAIL"),
+            std::env::var("ADMIN_PASSWORD"),
+        )
+        && !email.trim().is_empty()
+        && !raw_password.is_empty()
+    {
+        let email = email.trim().to_lowercase();
+        let email_for_log = email.clone();
+        let password_hash = password::hash_password(&raw_password)
+            .map_err(|error| format!("admin bootstrap failed: {error:?}"))?;
+        db.run(move |db| auth::bootstrap_admin(db, &email, &password_hash, now()))
+            .await
+            .map_err(|error| format!("admin bootstrap failed: {error:?}"))?;
+        user_count = db
+            .run(|db| Ok(db::user_count(&*db)?))
+            .await
+            .map_err(|error| format!("database startup check failed: {error:?}"))?;
+        eprintln!(
+            "dropit: created the first admin {email_for_log} from ADMIN_EMAIL / ADMIN_PASSWORD"
+        );
+    }
+    let setup_code = if user_count == 0 {
+        let code = auth::setup_code()
+            .map_err(|error| format!("setup code generation failed: {error:?}"))?;
+        eprintln!("dropit setup code: {code}");
+        Some(code)
+    } else {
+        None
+    };
     let build = browser::build_info();
     let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port)).await?;
     let app = Arc::new(StateData {
@@ -193,11 +230,15 @@ async fn main() -> StartupResult<()> {
         app_tickets: Mutex::new(HashMap::new()),
         chunk_work: uploads::ChunkWork::default(),
         pin_lockouts: Mutex::new(HashMap::new()),
+        setup_code: Mutex::new(setup_code),
     });
     let routes = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/auth/password/login", post(login))
+        .route("/api/auth/password/register", post(auth::register))
         .route("/api/auth/logout", post(logout))
+        .route("/api/auth/{provider}", get(auth::oauth_start))
+        .route("/api/auth/{provider}/callback", get(auth::oauth_callback))
         .route("/api/auth/device/authorize", post(device_authorize))
         .route("/api/auth/device/token", post(device_token))
         .route("/api/auth/device", get(device_info))
@@ -291,6 +332,57 @@ async fn main() -> StartupResult<()> {
         .route("/api/site", get(browser::site))
         .route("/api/version", get(browser::version))
         .route("/api/setup", get(browser::setup))
+        .route("/api/setup", post(auth::setup))
+        .route("/api/me/password", put(auth::change_password))
+        .route("/api/me/identities", get(auth::identities))
+        .route(
+            "/api/me/identities/{provider}",
+            delete(auth::unlink_identity),
+        )
+        .route("/api/admin/oauth", get(auth::admin_oauth))
+        .route(
+            "/api/admin/oauth/{provider}",
+            put(auth::save_oauth).delete(auth::delete_oauth),
+        )
+        .route(
+            "/api/admin/oauth/{provider}/verify",
+            post(auth::verify_oauth),
+        )
+        .route("/api/sessions", get(auth::sessions))
+        .route("/api/sessions/{id}", delete(auth::revoke_session))
+        .route(
+            "/api/sessions/revoke-others",
+            post(auth::revoke_other_sessions),
+        )
+        .route(
+            "/api/admin/users",
+            get(auth::admin_users).post(auth::create_user),
+        )
+        .route("/api/admin/users/{id}", patch(auth::update_user))
+        .route("/api/admin/users/{id}/password", post(auth::reset_password))
+        .route("/api/admin/users/{id}/logout", post(auth::logout_user))
+        .route(
+            "/api/admin/users/{id}/sessions",
+            get(auth::admin_user_sessions),
+        )
+        .route(
+            "/api/admin/sessions/{id}",
+            delete(auth::admin_revoke_session),
+        )
+        .route(
+            "/api/admin/registration",
+            get(auth::registration).put(auth::save_registration),
+        )
+        .route(
+            "/api/admin/invites",
+            get(auth::admin_invites).post(auth::create_admin_invite),
+        )
+        .route("/api/admin/invites/{id}", delete(auth::revoke_admin_invite))
+        .route(
+            "/api/me/invites",
+            get(auth::my_invites).post(auth::create_personal_invite),
+        )
+        .route("/api/me/invites/{id}", delete(auth::revoke_personal_invite))
         .route("/api/me", get(me))
         .route("/api/spaces", get(spaces))
         .route("/api/spaces/{space}", get(space))
@@ -741,7 +833,7 @@ fn summarize_ip(ip: IpAddr) -> String {
     }
 }
 
-fn cookie_name(secure: bool) -> &'static str {
+pub(crate) fn cookie_name(secure: bool) -> &'static str {
     if secure {
         "__Host-dropit_session"
     } else {
@@ -749,7 +841,7 @@ fn cookie_name(secure: bool) -> &'static str {
     }
 }
 
-fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let value = header_value(headers, "cookie")?
         .split(';')
         .filter_map(|v| v.split_once('='))
@@ -761,7 +853,7 @@ fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     decode_uri_component(value).filter(|value| !value.is_empty())
 }
 
-fn set_cookie(secure: bool, token: &str, max_age: i64) -> HeaderMap {
+pub(crate) fn set_cookie(secure: bool, token: &str, max_age: i64) -> HeaderMap {
     let secure_attribute = if secure { "; Secure" } else { "" };
     let value = format!(
         "{}={token}; Max-Age={max_age}; Path=/; HttpOnly{secure_attribute}; SameSite=Lax",
@@ -1033,7 +1125,7 @@ async fn admin_delete_token(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn origin_for(app: &StateData, context: &RequestContext) -> String {
+pub(crate) fn origin_for(app: &StateData, context: &RequestContext) -> String {
     app.config
         .origin
         .as_ref()

@@ -11,6 +11,13 @@ under /api/app-session. Existing file reads and the private-space WebSocket
 are also retained.
 RHEA-230 adds GET /api/site, /api/version, /api/auth/providers, /api/setup
 and GET /api/spaces/:space/ws.
+RHEA-240 adds first-run setup, password registration and changes, GitHub/Google
+OAuth with state and PKCE, identity binding, registration invites, account
+administration and browser-session management. OAuth credentials can be supplied
+with the same `GITHUB_*` / `GOOGLE_*` environment variables as the TS service or
+stored through the admin OAuth routes; tests may override provider URLs with the
+corresponding `*_AUTHORIZE_URL`, `*_TOKEN_URL`, `*_PROFILE_URL` and
+`*_EMAILS_URL` variables.
 
 Existing password hashes, user/space IDs, browser sessions, membership roles,
 quota overrides, persisted limits, text, groups and device metadata retain the TS
@@ -332,17 +339,17 @@ busy, expiry cleanup, and restart resume.
 
 ## Coverage boundary
 
-OAuth, registration/setup writes, password changes, session-management APIs,
-room APIs, room chunk uploads, sharing, the remaining admin APIs, static web hosting,
+Room APIs, room chunk uploads, sharing, the remaining admin APIs, static web hosting,
 update endpoints and historical schema upgrades remain outside this
 slice. Unsupported routes return the existing JSON NOT_FOUND form. An invalid
 Authorization header returns UNAUTHENTICATED with WWW-Authenticate instead of
 falling back to a cookie.
 
 Periodic expiration/garbage collection and live admin-setting updates are also
-pending. The RHEA-237 test hook exercises upload-session expiry and unreferenced
-file cleanup; production maintenance remains in RHEA-238. The slice requires a
-schema-19 fixture and provides no first-run database bootstrap.
+pending in this compatibility slice. The RHEA-237 test hook exercises
+upload-session expiry and unreferenced-file cleanup; production maintenance
+remains in RHEA-238. Empty databases use `/api/setup` with the one-time code in
+the startup log, or the `ADMIN_EMAIL` / `ADMIN_PASSWORD` bootstrap pair.
 
 The tests establish the documented password/private-text HTTP flow and
 bidirectional database compatibility for synthetic schema-19 data. Existing-account Web login, text, realtime and reconnect are covered below.
@@ -511,8 +518,8 @@ checks, 316 room/share checks, and 353 upload/chunk checks. Browser smoke was
 rerun after the selector-stability fix in `719e583`; it passed 3 tests with the
 TS-only short-link test skipped.
 
-OAuth, account setup/registration and password lifecycle, remaining general
-administration, historical schema upgrades, scheduled maintenance, room chunk
-sessions, share presets, item editing/labels/group management and final Rust
-container packaging are separate migration work. This slice does not establish
+Remaining general administration, historical schema upgrades, scheduled
+maintenance, room chunk sessions, share presets, item editing/labels/group
+management and final Rust container packaging are separate migration work. This
+slice does not establish
 that the entire TS product can be switched to Rust yet.
