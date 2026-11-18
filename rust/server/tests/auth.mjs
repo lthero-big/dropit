@@ -2,12 +2,13 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { createServer as createTcpServer } from 'node:net';
 import { resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '../../..');
 const rust = process.env.RUST_SERVER_BIN || resolve(root, 'rust/server/target/debug/dropit-server');
+await mkdir(resolve(root, 'rust/server/data'), {recursive: true});
 const temporary = await mkdtemp(resolve(root, 'rust/server/data/auth-'));
 const mock = createServer(async (request, response) => {
   const path = new URL(request.url, 'http://mock').pathname;
