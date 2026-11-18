@@ -255,6 +255,9 @@ It builds the fixed TS reference, generates a schema-19 fixture, creates and
 reads credentials on both implementations, exercises cookie/Bearer precedence,
 scope failures, concurrent device consumption, a one-time WebView ticket and
 account disablement, and checks that raw credentials are absent from SQLite.
+The disablement case updates the synthetic fixture directly; this slice does not
+add an incomplete admin-user API. The same harness runs the existing CLI's
+`login`, `whoami`, `send` and `ls` commands against the Rust process.
 
 ## Coverage boundary
 

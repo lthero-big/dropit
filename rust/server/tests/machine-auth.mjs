@@ -10,6 +10,7 @@ import { createRequire } from 'node:module';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const baseline = '37ce06ebfab2cd98b81e49ce54fb24ec5daeec68';
 const rust = process.env.RUST_SERVER_BIN || resolve(root, 'rust/server/target/debug/dropit-server');
+await mkdir(resolve(root, 'rust/server/data'), { recursive: true });
 const temporary = await mkdtemp(resolve(root, 'rust/server/data/machine-auth-'));
 const processes = [];
 
@@ -85,6 +86,59 @@ async function stop(server) {
   if (!server || server.child.exitCode !== null) return;
   server.child.kill('SIGTERM');
   await once(server.child, 'exit');
+}
+
+function runCli(args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [resolvePath('apps/cli/dist/index.js'), ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', bytes => { stdout += bytes; });
+    child.stderr.on('data', bytes => { stderr += bytes; });
+    child.on('error', reject);
+    child.on('exit', code => code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`CLI exited ${code}\n${stdout}\n${stderr}`)));
+  });
+}
+
+function resolvePath(path) {
+  return resolve(root, path);
+}
+
+async function runCliLogin(server, configPath, cookieValue) {
+  execFileSync('pnpm', ['--filter', '@lthero-big/dropit-cli', 'build'], { cwd: root, stdio: 'pipe' });
+  const env = { ...process.env, DROPIT_CONFIG: configPath, DROPIT_URL: server.url };
+  const child = spawn(process.execPath, [resolvePath('apps/cli/dist/index.js'), 'login', '--url', server.url, '--json'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  let prompt;
+  const promptReady = new Promise(resolvePrompt => { prompt = resolvePrompt; });
+  child.stdout.on('data', bytes => {
+    stdout += bytes;
+    for (const line of stdout.split('\n')) {
+      try {
+        const value = JSON.parse(line);
+        if (value.user_code && value.verification_uri_complete) prompt?.(value);
+      } catch {
+        // Wait for a complete JSON line.
+      }
+    }
+  });
+  child.stderr.on('data', bytes => { stderr += bytes; });
+  const info = await Promise.race([
+    promptReady,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`CLI login prompt timed out\n${stdout}\n${stderr}`)), 10_000)),
+  ]);
+  const verification = new URL(info.verification_uri_complete);
+  const approved = await request(server, '/api/auth/device/approve', { method: 'POST', cookie: cookieValue, json: {
+    user_code: info.user_code,
+    verification_id: verification.searchParams.get('verification_id'),
+  }, origin: 'http://dropit.test' });
+  assert.equal(approved.status, 204);
+  const code = await new Promise((resolveExit, reject) => {
+    child.on('error', reject);
+    child.on('exit', resolveExit);
+  });
+  assert.equal(code, 0, `CLI login failed\n${stdout}\n${stderr}`);
 }
 
 async function request(server, path, { method = 'GET', cookie, token, json, origin = null } = {}) {
@@ -168,10 +222,24 @@ try {
   server = await start(seed);
   assert.equal((await request(server, '/api/me', { token: tsCreated.body.token })).status, 200);
 
-  assert.equal((await request(server, `/api/admin/users/${metadata.alice.id}`, { method: 'PATCH', cookie: aliceCookie, json: { disabled: true }, origin: 'http://dropit.test' })).status, 204);
+  const cliConfig = resolve(temporary, 'cli-config.json');
+  await runCliLogin(server, cliConfig, aliceCookie);
+  const cliEnv = { ...process.env, DROPIT_CONFIG: cliConfig, DROPIT_URL: server.url };
+  const cliWhoami = await runCli(['whoami'], cliEnv);
+  assert.match(cliWhoami.stdout, /alice@example\.test/);
+  const cliMarker = 'CLI machine text';
+  await runCli(['send', cliMarker], cliEnv);
+  const cliList = await runCli(['ls'], cliEnv);
+  assert.match(cliList.stdout, /CLI machine text/);
+
+  await stop(server);
+  const disableDb = new Sqlite(resolve(seed, 'dropit.sqlite'));
+  disableDb.prepare('UPDATE users SET disabled=1 WHERE id=?').run(metadata.alice.id);
+  disableDb.close();
+  server = await start(seed);
   assert.equal((await request(server, '/api/me', { token: pat })).status, 401);
   assert.equal((await request(server, '/api/me', { token: tsCreated.body.token })).status, 401);
-  console.log('PASS PAT, scopes, cookie precedence, TS/Rust token compatibility, device approval, one-time WebView ticket, disablement');
+  console.log('PASS PAT, scopes, cookie precedence, TS/Rust token compatibility, device approval, WebView ticket, CLI device login/commands, disablement');
 } finally {
   await stop(server);
   await rm(temporary, { recursive: true, force: true });

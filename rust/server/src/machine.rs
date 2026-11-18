@@ -507,28 +507,6 @@ pub fn create_browser_session(
     Ok(())
 }
 
-pub fn disable_user(db: &Connection, user_id: &str, disabled: bool) -> ApiResult<()> {
-    if db.execute(
-        "UPDATE users SET disabled=? WHERE id=?",
-        params![i64::from(disabled), user_id],
-    )? == 0
-    {
-        return Err(ApiError::NOT_FOUND);
-    }
-    if disabled {
-        db.execute("DELETE FROM sessions WHERE userId=?", [user_id])?;
-        db.execute(
-            "UPDATE access_tokens SET revoked=1 WHERE userId=?",
-            [user_id],
-        )?;
-        db.execute(
-            "UPDATE device_authorizations SET status='denied' WHERE userId=? AND status='approved'",
-            [user_id],
-        )?;
-    }
-    Ok(())
-}
-
 pub fn is_admin(account: &Account) -> bool {
     account.user.role == "admin" && account.user.disabled == 0
 }

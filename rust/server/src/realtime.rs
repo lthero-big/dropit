@@ -122,15 +122,6 @@ impl Realtime {
             }
         }
     }
-
-    pub fn revoke_user(&self, user_id: &str) {
-        let mut hub = self.hub.lock().unwrap();
-        for connection in hub.connections.values_mut() {
-            if connection.user == user_id {
-                let _ = connection.close.send(true);
-            }
-        }
-    }
 }
 
 impl Hub {

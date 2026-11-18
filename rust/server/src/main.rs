@@ -188,7 +188,6 @@ async fn main() -> StartupResult<()> {
         .route("/api/tokens/{id}", patch(rename_token).delete(delete_token))
         .route("/api/admin/tokens", get(admin_tokens))
         .route("/api/admin/tokens/{id}", delete(admin_delete_token))
-        .route("/api/admin/users/{id}", patch(admin_update_user))
         .route("/api/auth/providers", get(browser::auth_providers))
         .route("/api/site", get(browser::site))
         .route("/api/version", get(browser::version))
@@ -789,31 +788,6 @@ async fn admin_delete_token(
         .run(move |db| machine::revoke_token(db, &revoke_id, None))
         .await?;
     app.realtime.revoke_token(&id);
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn admin_update_user(
-    State(app): State<App>,
-    Extension(context): Extension<RequestContext>,
-    path: Result<Path<String>, PathRejection>,
-    request: Request,
-) -> ApiResult<impl IntoResponse> {
-    admin_session(&context)?;
-    let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    let body = read_json(request, 2048).await?;
-    let disabled = body
-        .get("disabled")
-        .and_then(Value::as_bool)
-        .ok_or(ApiError::INVALID_INPUT)?;
-    app.db
-        .run({
-            let id = id.clone();
-            move |db| machine::disable_user(db, &id, disabled)
-        })
-        .await?;
-    if disabled {
-        app.realtime.revoke_user(&id);
-    }
     Ok(StatusCode::NO_CONTENT)
 }
 
