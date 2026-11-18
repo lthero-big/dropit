@@ -77,7 +77,7 @@ test('password login, private clipboard text, reload and logout', async ({ page 
   const send = page.getByRole('button', { name: '发送', exact: true })
   const posted = await clickAndWaitForPost(page, send, /^\/api\/spaces\/[^/]+\/items\/text$/)
   expect(posted.status(), 'POST /api/spaces/:space/items/text').toBe(201)
-  const clip = page.getByText(text, { exact: true })
+  const clip = page.getByRole('list').getByText(text, { exact: true })
   await expect(clip).toBeVisible()
 
   snapshotHasText = false
