@@ -1065,6 +1065,14 @@ fn check_writer(
                     name: row.get(1)?,
                     expires_at: row.get(2)?,
                     owner_id: row.get(3)?,
+                    room_key: None,
+                    device_hash: None,
+                    room_code: None,
+                    pin_hash: None,
+                    created_at: None,
+                    last_active_at: None,
+                    closed_at: None,
+                    created_by: None,
                 })
             },
         )
