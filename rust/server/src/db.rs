@@ -224,24 +224,80 @@ pub fn spaces(db: &Connection, user_id: &str) -> ApiResult<Vec<Value>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+#[allow(dead_code)]
 pub struct Space {
     pub id: String,
     pub name: String,
     pub expires_at: Option<i64>,
     pub owner_id: Option<String>,
+    pub room_key: Option<String>,
+    pub device_hash: Option<String>,
+    pub room_code: Option<String>,
+    pub pin_hash: Option<String>,
+    pub created_at: Option<i64>,
+    pub last_active_at: Option<i64>,
+    pub closed_at: Option<i64>,
+    pub created_by: Option<String>,
 }
 
 pub fn space(db: &Connection, id: &str, user_id: &str, write: bool) -> ApiResult<Space> {
     let (space, read_only) = db.query_row(
-        "SELECT s.id,s.name,s.expiresAt,s.ownerId, coalesce(s.ownerId<>m.userId,1) AND m.role='viewer'
+        "SELECT s.id,s.name,s.expiresAt,s.ownerId,s.roomKey,s.deviceHash,s.roomCode,s.pinHash,
+         s.createdAt,s.lastActiveAt,s.closedAt,s.createdBy,
+         coalesce(s.ownerId<>m.userId,1) AND m.role='viewer'
          FROM spaces s JOIN members m ON m.spaceId=s.id WHERE s.id=? AND m.userId=? AND coalesce(s.roomKey,'')=''",
         params![id, user_id],
-        |row| Ok((Space { id: row.get(0)?, name: row.get(1)?, expires_at: row.get(2)?, owner_id: row.get(3)? }, row.get::<_, bool>(4)?)),
+        |row| Ok((Space {
+            id: row.get(0)?, name: row.get(1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
+            room_key: row.get(4)?, device_hash: row.get(5)?, room_code: row.get(6)?, pin_hash: row.get(7)?,
+            created_at: row.get(8)?, last_active_at: row.get(9)?, closed_at: row.get(10)?, created_by: row.get(11)?,
+        }, row.get::<_, bool>(12)?)),
     ).optional()?.ok_or(ApiError::NOT_FOUND)?;
     if write && read_only {
         return Err(ApiError::new(403, "READ_ONLY"));
     }
     Ok(space)
+}
+
+/// Load a live temporary room after its URL capability has been checked by
+/// the rooms module. No member row exists for an anonymous room.
+pub fn room(db: &Connection, id: &str, time: i64) -> ApiResult<Space> {
+    db.query_row(
+        "SELECT id,name,expiresAt,ownerId,roomKey,deviceHash,roomCode,pinHash,createdAt,lastActiveAt,closedAt,createdBy
+         FROM spaces WHERE id=? AND roomKey IS NOT NULL AND closedAt IS NULL AND expiresAt>?",
+        params![id, time],
+        |row| Ok(Space {
+            id: row.get(0)?, name: row.get(1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
+            room_key: row.get(4)?, device_hash: row.get(5)?, room_code: row.get(6)?, pin_hash: row.get(7)?,
+            created_at: row.get(8)?, last_active_at: row.get(9)?, closed_at: row.get(10)?, created_by: row.get(11)?,
+        }),
+    ).optional()?.ok_or(ApiError::NOT_FOUND)
+}
+
+pub fn room_by_code(db: &Connection, code: &str, time: i64) -> ApiResult<Option<Space>> {
+    db.query_row(
+        "SELECT id,name,expiresAt,ownerId,roomKey,deviceHash,roomCode,pinHash,createdAt,lastActiveAt,closedAt,createdBy
+         FROM spaces WHERE roomCode=? AND roomKey IS NOT NULL AND closedAt IS NULL AND expiresAt>?",
+        params![code, time],
+        |row| Ok(Space {
+            id: row.get(0)?, name: row.get(1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
+            room_key: row.get(4)?, device_hash: row.get(5)?, room_code: row.get(6)?, pin_hash: row.get(7)?,
+            created_at: row.get(8)?, last_active_at: row.get(9)?, closed_at: row.get(10)?, created_by: row.get(11)?,
+        }),
+    ).optional().map_err(Into::into)
+}
+
+pub fn device_room(db: &Connection, device_hash: &str, time: i64) -> ApiResult<Option<Space>> {
+    db.query_row(
+        "SELECT id,name,expiresAt,ownerId,roomKey,deviceHash,roomCode,pinHash,createdAt,lastActiveAt,closedAt,createdBy
+         FROM spaces WHERE deviceHash=? AND roomKey IS NOT NULL AND closedAt IS NULL AND expiresAt>?",
+        params![device_hash, time],
+        |row| Ok(Space {
+            id: row.get(0)?, name: row.get(1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
+            room_key: row.get(4)?, device_hash: row.get(5)?, room_code: row.get(6)?, pin_hash: row.get(7)?,
+            created_at: row.get(8)?, last_active_at: row.get(9)?, closed_at: row.get(10)?, created_by: row.get(11)?,
+        }),
+    ).optional().map_err(Into::into)
 }
 
 /// A private-space file that the caller may read. Keys stay off the JSON item.
@@ -289,25 +345,25 @@ pub struct Device {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
-    id: String,
-    space_id: String,
-    user_id: Option<String>,
-    kind: String,
-    text: Option<String>,
-    filename: Option<String>,
-    mime: Option<String>,
-    size: i64,
-    created_at: i64,
-    updated_at: i64,
-    expires_at: i64,
-    pinned: bool,
-    tags: Vec<String>,
-    has_thumbnail: bool,
-    group: Option<String>,
-    device: Option<Device>,
+    pub id: String,
+    pub space_id: String,
+    pub user_id: Option<String>,
+    pub kind: String,
+    pub text: Option<String>,
+    pub filename: Option<String>,
+    pub mime: Option<String>,
+    pub size: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub expires_at: i64,
+    pub pinned: bool,
+    pub tags: Vec<String>,
+    pub has_thumbnail: bool,
+    pub group: Option<String>,
+    pub device: Option<Device>,
 }
 
-fn item(row: &Row<'_>) -> rusqlite::Result<Item> {
+pub fn item(row: &Row<'_>) -> rusqlite::Result<Item> {
     let tags = row.get::<_, String>("tags")?;
     let tags = match serde_json::from_str::<Value>(&tags) {
         Ok(Value::Array(values)) => values
@@ -350,6 +406,16 @@ fn item(row: &Row<'_>) -> rusqlite::Result<Item> {
             .is_some_and(|v| !v.is_empty()),
         device,
     })
+}
+
+pub fn item_by_id(db: &Connection, item_id: &str, time: i64) -> ApiResult<Option<Item>> {
+    Ok(db
+        .query_row(
+            "SELECT * FROM items WHERE id=? AND expiresAt>?",
+            params![item_id, time],
+            item,
+        )
+        .optional()?)
 }
 
 pub fn snapshot(db: &Connection, space: Space) -> ApiResult<Value> {
@@ -432,6 +498,54 @@ pub fn insert_text(
     Ok(inserted)
 }
 
+pub fn insert_room_text(
+    db: &mut Connection,
+    config: &Config,
+    space_id: &str,
+    input: TextInput,
+) -> ApiResult<Item> {
+    let time = now();
+    if let Some(group) = &input.group {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        room(&tx, space_id, time)?;
+        ensure_group(&tx, space_id, group, time)?;
+        tx.commit()?;
+    }
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let space = room(&tx, space_id, time)?;
+    let (used, reserved): (i64, i64) = tx.query_row(
+        "SELECT coalesce(sum(storedBytes),0),coalesce((SELECT sum(size) FROM uploads WHERE spaceId=? AND expiresAt>?),0) FROM items WHERE spaceId=?",
+        params![space_id, time, space_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let size = input.text.len() as i64;
+    if used + reserved + size > config.room_quota {
+        return Err(ApiError::new(413, "QUOTA_EXCEEDED"));
+    }
+    let count: i64 = tx.query_row(
+        "SELECT count(*) + (SELECT count(*) FROM uploads WHERE spaceId=? AND expiresAt>?) FROM items WHERE spaceId=?",
+        params![space_id, time, space_id], |row| row.get(0),
+    )?;
+    if count >= config.max_items.min(100) {
+        return Err(ApiError::new(413, "ITEM_LIMIT"));
+    }
+    let id = Uuid::new_v4().to_string();
+    let expires_at = space
+        .expires_at
+        .unwrap_or(i64::MAX)
+        .min(time + config.retention);
+    let device = input.device.as_ref();
+    tx.execute(
+        "INSERT INTO items (id,spaceId,userId,kind,text,size,storedBytes,createdAt,expiresAt,updatedAt,groupName,deviceId,deviceName,deviceKind)
+         VALUES (?1,?2,NULL,'text',?3,?4,?4,?5,?6,?5,?7,?8,?9,?10)",
+        params![id, space_id, input.text, size, time, expires_at, input.group,
+            device.map(|d| &d.id), device.map(|d| &d.name), device.map(|d| &d.kind)],
+    )?;
+    let inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    tx.commit()?;
+    Ok(inserted)
+}
+
 pub struct FileInput {
     pub filename: String,
     pub mime: String,
@@ -441,6 +555,83 @@ pub struct FileInput {
     pub thumbnail_key: Option<String>,
     pub group: Option<String>,
     pub device: Option<Device>,
+}
+
+pub fn insert_room_file(
+    db: &mut Connection,
+    config: &Config,
+    space_id: &str,
+    input: FileInput,
+) -> ApiResult<Item> {
+    let time = now();
+    if let Some(group) = &input.group {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        room(&tx, space_id, time)?;
+        ensure_group(&tx, space_id, group, time)?;
+        tx.commit()?;
+    }
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let space = room(&tx, space_id, time)?;
+    let (used, reserved): (i64, i64) = tx.query_row(
+        "SELECT coalesce(sum(storedBytes),0),coalesce((SELECT sum(size) FROM uploads WHERE spaceId=? AND expiresAt>?),0) FROM items WHERE spaceId=?",
+        params![space_id, time, space_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if used + reserved + input.stored_bytes > config.room_quota {
+        return Err(ApiError::new(413, "QUOTA_EXCEEDED"));
+    }
+    let count: i64 = tx.query_row(
+        "SELECT count(*) + (SELECT count(*) FROM uploads WHERE spaceId=? AND expiresAt>?) FROM items WHERE spaceId=?",
+        params![space_id, time, space_id], |row| row.get(0),
+    )?;
+    if count >= config.max_items.min(100) {
+        return Err(ApiError::new(413, "ITEM_LIMIT"));
+    }
+    let id = Uuid::new_v4().to_string();
+    let expires_at = space
+        .expires_at
+        .unwrap_or(i64::MAX)
+        .min(time + config.retention);
+    let device = input.device.as_ref();
+    tx.execute(
+        "INSERT INTO items (id,spaceId,userId,kind,filename,mime,size,storedBytes,fileKey,thumbnailKey,createdAt,expiresAt,updatedAt,groupName,deviceId,deviceName,deviceKind)
+         VALUES (?1,?2,NULL,'file',?3,?4,?5,?6,?7,?8,?9,?10,?9,?11,?12,?13,?14)",
+        params![id, space_id, input.filename, input.mime, input.size, input.stored_bytes,
+            input.file_key, input.thumbnail_key, time, expires_at, input.group,
+            device.map(|d| &d.id), device.map(|d| &d.name), device.map(|d| &d.kind)],
+    )?;
+    let inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    tx.commit()?;
+    Ok(inserted)
+}
+
+pub fn delete_room_item(
+    db: &mut Connection,
+    space_id: &str,
+    item_id: &str,
+) -> ApiResult<Vec<String>> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    room(&tx, space_id, now())?;
+    let (file_key, thumbnail_key): (Option<String>, Option<String>) = tx
+        .query_row(
+            "SELECT fileKey,thumbnailKey FROM items WHERE id=? AND spaceId=? AND expiresAt>?",
+            params![item_id, space_id, now()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or(ApiError::NOT_FOUND)?;
+    let mut keys = Vec::new();
+    for key in [file_key, thumbnail_key]
+        .into_iter()
+        .flatten()
+        .filter(|key| !key.is_empty())
+    {
+        tx.execute("INSERT OR IGNORE INTO garbage (key) VALUES (?)", [&key])?;
+        keys.push(key);
+    }
+    tx.execute("DELETE FROM items WHERE id=?", [item_id])?;
+    tx.commit()?;
+    Ok(keys)
 }
 
 pub fn insert_file(
@@ -880,6 +1071,14 @@ fn check_writer(
                     name: row.get(1)?,
                     expires_at: row.get(2)?,
                     owner_id: row.get(3)?,
+                    room_key: None,
+                    device_hash: None,
+                    room_code: None,
+                    pin_hash: None,
+                    created_at: None,
+                    last_active_at: None,
+                    closed_at: None,
+                    created_by: None,
                 })
             },
         )

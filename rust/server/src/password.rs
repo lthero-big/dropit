@@ -16,6 +16,23 @@ pub fn session_token() -> ApiResult<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// Hash a short room PIN using the same self-describing scrypt format as the
+/// TypeScript service. Room PINs are credentials, so they must not be stored
+/// as the fast request hash used for tokens and sessions.
+pub fn hash_password(password: &str) -> ApiResult<String> {
+    let mut salt = [0; 16];
+    getrandom::fill(&mut salt).map_err(ApiError::internal)?;
+    let params = Params::new(14, 8, 1, 64).map_err(ApiError::internal)?;
+    let normalized: String = password.nfkc().collect();
+    let mut key = [0; 64];
+    scrypt(normalized.as_bytes(), &salt, &params, &mut key).map_err(ApiError::internal)?;
+    Ok(format!(
+        "scrypt$16384$8$1${}${}",
+        URL_SAFE_NO_PAD.encode(salt),
+        URL_SAFE_NO_PAD.encode(key)
+    ))
+}
+
 pub fn verify(password: &str, stored: Option<&str>) -> ApiResult<bool> {
     // Missing or malformed hashes still incur the default work.
     let (params, salt, expected, valid) = match stored.and_then(parse) {
