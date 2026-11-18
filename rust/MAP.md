@@ -80,4 +80,19 @@ RHEA-235 remains `in_review` for human acceptance with its original assignee and
 
 Continue with full authentication/machine access, first-run and historical database upgrades, spaces/rooms/permissions, organization/sharing, uploads/image generation, runtime administration and complete data/client/container acceptance. Refine each next task against the latest accepted implementation.
 
+## Third wave
+
+RHEA-230, RHEA-231, RHEA-232 and the accepted upload test stability work are integrated. RHEA-233 and RHEA-234 are active implementations. RHEA-235 is integrated after independent test review.
+
+| Work | Owner | Stage | Independent acceptance |
+| --- | --- | ---: | --- |
+| RHEA-234: PAT, device code and app session tickets | DE 后端工程师 | 3 | Existing CLI/mobile device login and scoped machine access work against TS-created data and Rust, including revocation and one-time tickets |
+| RHEA-233: direct upload, image preview and retract | DE代码高手-grok | 3 | Existing private-space upload, preview and retract behavior with real TS/Rust comparisons |
+| RHEA-236: spaces, rooms and sharing | DE 后端工程师 | 4 | Members, roles, rooms, PINs, share links and revocation preserve client-visible behavior |
+| RHEA-237: resumable uploads and image processing | DE代码高手-grok | 4 | Chunk concurrency, resume/cancel, quota atomicity, cleanup and image boundary behavior |
+| RHEA-238: historical migration and maintenance | DE 后端工程师 | 4 | Schema 1–19 upgrades, cleanup, runtime settings, graceful shutdown and isolated image/container checks |
+| RHEA-239: final client and container acceptance | DE 前端工程师 | 4 | Web/CLI/mobile protocol checks, CI evidence, Docker health/volume/signal checks and release report |
+
+Stage 4 items are backlog until their stated stage-3 data/auth/upload boundaries are integrated. They have separate owners and independent acceptance surfaces. Promote them as dependencies become real, and keep the parent in progress through final acceptance.
+
 The preliminary full-migration estimate is 12–20 person-days, or 15–25 with contingency. Re-estimate after the first runnable Rust slice. It is not a schedule commitment or a claim that the first wave completes the server migration.
