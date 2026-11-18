@@ -21,11 +21,9 @@ scrypt, with constant-time derived-key comparison and dummy work for missing
 accounts. Session secrets are random 32-byte base64url strings, stored as
 base64url SHA-256 hashes. Machine credentials use the same 32-byte base64url
 format. Only token digests are stored in access_tokens and
-device_authorizations. Bearer authentication takes precedence over a cookie,
-enforces read/write scopes before routing, and does not use browser Origin
-checks. Browser-only token administration and device approval still require a
-cookie session. Revocation, expiry and account disablement are rechecked for
-writes and live WebSocket connections.
+device_authorizations.
+
+Bearer authentication takes precedence over a cookie, enforces read/write scopes before routing, and does not use browser Origin checks. Browser-only token administration and device approval still require a cookie session. Revocation, expiry and account disablement are rechecked for writes and live WebSocket connections.
 
 ## Build and validate
 
@@ -33,6 +31,18 @@ Rust 1.94.0 is pinned in rust-toolchain.toml. A C compiler is required for bundl
 SQLite. Node 22, pnpm, git and tar are required to generate the reference fixtures
 and run the compatibility tests. The baseline Git object must be available locally.
 The Rust executable runs independently of Node.
+
+AVIF decode links the system dav1d library. The build needs pkg-config and a
+dav1d.pc that reports at least 1.3.0. On Debian and Ubuntu, install those
+packages before the Cargo commands:
+
+~~~sh
+sudo apt-get update
+sudo apt-get install -y pkg-config libdav1d-dev
+pkg-config --exists 'dav1d >= 1.3.0'
+~~~
+
+The Rust CI job installs the same packages before fmt, clippy, build, and test.
 
 Run from the repository root.
 
@@ -47,8 +57,8 @@ cargo test --locked -- --nocapture
 ~~~
 
 cargo test runs tests/http.rs, which launches tests/compat.mjs with the built Rust
-binary. It also runs tests/files-http.rs and tests/machine-auth.rs, which launch
-the fixed TypeScript fixture and exercise file and machine-access compatibility.
+binary. It also runs tests/files-http.rs, tests/uploads-http.rs and
+tests/machine-auth.rs, which launch fixed fixtures for file, upload and machine-access compatibility.
 The same harnesses can be invoked from the repository root with
 node rust/server/tests/compat.mjs and node rust/server/tests/files-compat.mjs.
 RUST_SERVER_BIN can select a release build.
@@ -82,11 +92,9 @@ The test credentials are synthetic and are defined in tests/fixture.mjs.
 
 On 2026-11-18, Rust 1.94.0, Node 22.22.0 and pnpm 11.1.0 were used on
 x86_64 Linux. cargo fmt --check, cargo build --locked and
-cargo clippy --locked --all-targets -- -D warnings passed. The fixed-history
-HTTP harness checked 199 real responses, the file harness checked 228 responses,
-and the machine-auth harness checked PAT scopes and precedence, device approval,
-concurrent one-time consumption, one-time WebView tickets and disablement. The
-cases include wrong and missing credentials,
+cargo clippy --locked --all-targets -- -D warnings passed. cargo test --locked --
+--nocapture passed its one process-level integration test, checking 199 real HTTP
+responses across TS and Rust. The cases include wrong and missing credentials,
 JSON/body limits, CSRF, disabled and pending users, viewer/temporary-password
 restrictions, Unicode metadata, logout, an abrupt process restart, bidirectional
 TS/Rust data and sessions, eight concurrent quota-limited writes, item capacity,
@@ -225,8 +233,8 @@ empty 416 body, and Axum sets Content-Length on JSON errors. Hono leaves both
 unset. The compared bytes are empty or identical, and the harness normalizes
 those two length headers.
 
-Upload, chunked upload, preview, dynamic image re-encode, AVIF decode, share
-links and rooms remain outside this slice.
+Chunked upload, share links and rooms remain outside this slice. Direct upload,
+preview and retract are in the RHEA-233 section.
 
 ## Machine access slice (RHEA-234)
 
@@ -245,24 +253,15 @@ is checked again. A valid ticket creates a normal browser cookie only when the
 request has no browser session or currently has a bearer session. This keeps an
 existing browser account from being replaced by an app token.
 
-The independent machine harness is:
-
-~~~sh
-cargo test --locked --test machine-auth -- --nocapture
-~~~
-
-It builds the fixed TS reference, generates a schema-19 fixture, creates and
-reads credentials on both implementations, exercises cookie/Bearer precedence,
-scope failures, concurrent device consumption, a one-time WebView ticket and
-account disablement, and checks that raw credentials are absent from SQLite.
-The disablement case updates the synthetic fixture directly; this slice does not
-add an incomplete admin-user API. The same harness runs the existing CLI's
-`login`, `whoami`, `send` and `ls` commands against the Rust process.
+The independent machine harness runs the existing CLI's `login`, `whoami`,
+`send` and `ls` commands against Rust, and directly mutates only the synthetic
+fixture for account-disablement verification; this slice does not add an
+incomplete admin-user API.
 
 ## Coverage boundary
 
 OAuth, registration/setup writes, password changes, session-management APIs,
-room APIs, file and chunked uploads, sharing, the remaining admin APIs, static web hosting,
+room APIs, chunked uploads, sharing, the remaining admin APIs, static web hosting,
 update endpoints and historical schema upgrades remain outside this
 slice. Unsupported routes return the existing JSON NOT_FOUND form. An invalid
 Authorization header returns UNAUTHENTICATED with WWW-Authenticate instead of
@@ -343,3 +342,70 @@ reconnect snapshot after offline writes. The TS-only short-download assertion is
 intentionally skipped for Rust. The same smoke runs unchanged against TS by
 omitting the explicit backend target. These tests require free local ports 15173
 and 18878 (18787 for the default TS smoke).
+
+## Direct upload, preview, and retract (RHEA-233)
+
+Private-space `POST /api/spaces/:space/items/file` streams the body onto disk
+with exclusive create, mode `0o600`, and SHA-256. The async request thread does
+not perform the image decode. A disconnect, empty body, or over-limit write
+removes the staged original and any thumbnail. Declared `image/jpeg`,
+`image/png`, `image/webp`, `image/gif`, and `image/avif` receive a 320-edge
+WebP thumbnail. SVG and HTML declared as themselves stay download-only. A
+declared raster whose bytes are not an allowed still or AVIF, including SVG
+bytes labeled `image/png`, is 415. The commit transaction rechecks the session,
+membership, quota including upload reservations, and the item cap. A named
+group is committed before that capacity check.
+
+`GET /api/spaces/:space/items/:id/preview` derives a 2048-edge WebP in memory.
+It does not write a file or change quota, then rechecks that the item is still
+live. `DELETE /api/spaces/:space/items/:id` retracts text and files. The author
+or owner may delete. Another editor receives FORBIDDEN. A viewer receives
+READ_ONLY. After delete, download, thumbnail, and preview are 404, and both
+stored keys are removed.
+
+AVIF is rejected from the `ispe` pixel product before `dav1d` allocates a
+picture. The decoder also sets a frame-size limit and counts allocations. An
+8-bit still AVIF is converted locally. 10-bit, 12-bit, and animated AVIF are
+not decoded. Successful creation publishes `groups` when a group was added,
+then `item.created`. Retract publishes `item.deleted`. Both hold the existing
+realtime snapshot gate. Chunk sessions are not implemented, so the
+session-complete SVG prefix rule is not applied here.
+
+`cargo test --locked` runs `tests/uploads-http.rs`, which launches
+`tests/uploads-compat.mjs` against archived commit
+37ce06ebfab2cd98b81e49ce54fb24ec5daeec68. On 2026-11-18, Rust 1.94.0, Node
+22.22.0, and pnpm 12.18.0, that comparison passed 168 HTTP responses. The same
+run also passed the existing 228 file-read responses, 199 login/text responses,
+and 526 realtime checks. Commands from `rust/server`:
+
+~~~sh
+cargo fmt --all
+cargo clippy --locked --all-targets -- -D warnings
+cargo build --locked
+cargo test --locked -- --nocapture --test-threads=1
+~~~
+
+The CI dependency repair reran `cargo fmt --check`, strict locked clippy,
+locked build, and the same test command. That run passed 7 unit tests, 228
+file-read responses, 199 login/text responses, 528 realtime checks, and 168
+upload responses.
+
+The image fixtures are real decodable files: a 500x400 PNG, an orientation-6
+3000x1500 JPEG, a two-frame GIF whose first pixel is red, an 8x4 AVIF, a
+4096-edge PNG, and a small-`ispe` container carrying a 4097-edge AV1 payload.
+The harness compares status, JSON, dimensions, orientation, stripped metadata,
+and first-frame color. Lossless WebP bytes differ from Sharp quality 75.
+
+The oversized AVIF paths logged `avif picture allocations=0 reason=ispe` and
+`avif picture allocations=0 reason=dav1d Unknown error -34`. Preview of a
+stored TS thumbnail did not add a file or change quota. Concurrent uploads
+stopped at the quota. A client disconnect left no item. Restart preserved the
+uploaded file.
+
+Chunked upload sessions, room and share preview, HEIC decode, AVIF mirror,
+10/12-bit and animated AVIF, and maintenance expiry remain out of scope. The
+1 MiB thumbnail write cap is checked and was not reached by a 320-edge image.
+A clean body shorter than Content-Length returns UPLOAD_INCOMPLETE; an
+HTTP/1.1 close of a short Content-Length is a stream error and returns 404.
+The upload harness does not open a WebSocket. File create and delete use the
+same publish calls as text.

@@ -26,3 +26,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 unicode-normalization = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+kamadak-exif = "0.6"
+dav1d = "0.11"
+mp4parse = "0.17"

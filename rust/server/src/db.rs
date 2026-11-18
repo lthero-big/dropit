@@ -228,14 +228,15 @@ pub struct Space {
     pub id: String,
     pub name: String,
     pub expires_at: Option<i64>,
+    pub owner_id: Option<String>,
 }
 
 pub fn space(db: &Connection, id: &str, user_id: &str, write: bool) -> ApiResult<Space> {
     let (space, read_only) = db.query_row(
-        "SELECT s.id,s.name,s.expiresAt, coalesce(s.ownerId<>m.userId,1) AND m.role='viewer'
+        "SELECT s.id,s.name,s.expiresAt,s.ownerId, coalesce(s.ownerId<>m.userId,1) AND m.role='viewer'
          FROM spaces s JOIN members m ON m.spaceId=s.id WHERE s.id=? AND m.userId=? AND coalesce(s.roomKey,'')=''",
         params![id, user_id],
-        |row| Ok((Space { id: row.get(0)?, name: row.get(1)?, expires_at: row.get(2)? }, row.get::<_, bool>(3)?)),
+        |row| Ok((Space { id: row.get(0)?, name: row.get(1)?, expires_at: row.get(2)?, owner_id: row.get(3)? }, row.get::<_, bool>(4)?)),
     ).optional()?.ok_or(ApiError::NOT_FOUND)?;
     if write && read_only {
         return Err(ApiError::new(403, "READ_ONLY"));
@@ -429,6 +430,174 @@ pub fn insert_text(
     let inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
     tx.commit()?;
     Ok(inserted)
+}
+
+pub struct FileInput {
+    pub filename: String,
+    pub mime: String,
+    pub size: i64,
+    pub stored_bytes: i64,
+    pub file_key: String,
+    pub thumbnail_key: Option<String>,
+    pub group: Option<String>,
+    pub device: Option<Device>,
+}
+
+pub fn insert_file(
+    db: &mut Connection,
+    config: &Config,
+    session_hash: &str,
+    space_id: &str,
+    input: FileInput,
+) -> ApiResult<Item> {
+    let time = now();
+    // Named groups are created before the capacity check, matching insert_text.
+    if let Some(group) = &input.group {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let account = writable_account(&tx, Some(session_hash), None)?;
+        space(&tx, space_id, &account.user.id, true)?;
+        ensure_group(&tx, space_id, group, time)?;
+        tx.commit()?;
+    }
+
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let account = writable_account(&tx, Some(session_hash), None)?;
+    let space = space(&tx, space_id, &account.user.id, true)?;
+    if space.expires_at.is_some_and(|expiry| expiry <= time) {
+        return Err(ApiError::NOT_FOUND);
+    }
+    let (used, reserved) = usage(&tx, &account.user.id, time)?;
+    let quota = account.quota.unwrap_or(config.quota);
+    if used
+        .saturating_add(reserved)
+        .saturating_add(input.stored_bytes)
+        > quota
+    {
+        return Err(ApiError::new(413, "QUOTA_EXCEEDED"));
+    }
+    let count: i64 = tx.query_row(
+        "SELECT (SELECT count(*) FROM items WHERE spaceId=?1)
+        + (SELECT count(*) FROM uploads WHERE spaceId=?1 AND expiresAt>?2)",
+        params![space_id, time],
+        |row| row.get(0),
+    )?;
+    if count >= config.max_items {
+        return Err(ApiError::new(413, "ITEM_LIMIT"));
+    }
+    let id = Uuid::new_v4().to_string();
+    let expires_at = space
+        .expires_at
+        .unwrap_or(i64::MAX)
+        .min(time + config.retention);
+    let device = input.device.as_ref();
+    tx.execute(
+        "INSERT INTO items (id,spaceId,userId,kind,filename,mime,size,storedBytes,fileKey,thumbnailKey,createdAt,expiresAt,updatedAt,groupName,deviceId,deviceName,deviceKind)
+         VALUES (?1,?2,?3,'file',?4,?5,?6,?7,?8,?9,?10,?11,?10,?12,?13,?14,?15)",
+        params![
+            id,
+            space_id,
+            account.user.id,
+            input.filename,
+            input.mime,
+            input.size,
+            input.stored_bytes,
+            input.file_key,
+            input.thumbnail_key,
+            time,
+            expires_at,
+            input.group,
+            device.map(|device| &device.id),
+            device.map(|device| &device.name),
+            device.map(|device| &device.kind),
+        ],
+    )?;
+    let inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    tx.commit()?;
+    Ok(inserted)
+}
+
+pub fn delete_item(
+    db: &mut Connection,
+    session_hash: &str,
+    space_id: &str,
+    item_id: &str,
+) -> ApiResult<Vec<String>> {
+    let time = now();
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let account = writable_account(&tx, Some(session_hash), None)?;
+    let space = space(&tx, space_id, &account.user.id, true)?;
+    let (author, file_key, thumbnail_key): (Option<String>, Option<String>, Option<String>) = tx
+        .query_row(
+            "SELECT userId, fileKey, thumbnailKey FROM items WHERE id=? AND spaceId=? AND expiresAt>?",
+            params![item_id, space_id, time],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or(ApiError::NOT_FOUND)?;
+    if author.as_deref() != Some(account.user.id.as_str())
+        && space.owner_id.as_deref() != Some(account.user.id.as_str())
+    {
+        return Err(ApiError::new(403, "FORBIDDEN"));
+    }
+    let mut keys = Vec::new();
+    for key in [file_key, thumbnail_key].into_iter().flatten() {
+        if key.is_empty() {
+            continue;
+        }
+        tx.execute("INSERT OR IGNORE INTO garbage (key) VALUES (?)", [&key])?;
+        keys.push(key);
+    }
+    tx.execute("DELETE FROM items WHERE id=?", [item_id])?;
+    tx.commit()?;
+    Ok(keys)
+}
+
+pub fn forget_garbage(db: &Connection, key: &str) -> ApiResult<()> {
+    db.execute("DELETE FROM garbage WHERE key=?", [key])?;
+    Ok(())
+}
+
+pub struct PreviewSource {
+    pub item_id: String,
+    pub file_key: String,
+    pub expires_at: i64,
+}
+
+pub fn preview_source(
+    db: &Connection,
+    space_id: &str,
+    user_id: &str,
+    item_id: &str,
+) -> ApiResult<PreviewSource> {
+    let time = now();
+    space(db, space_id, user_id, false)?;
+    let (file_key, thumbnail_key, expires_at): (Option<String>, Option<String>, i64) = db
+        .query_row(
+            "SELECT fileKey, thumbnailKey, expiresAt FROM items WHERE id=? AND spaceId=? AND expiresAt>?",
+            params![item_id, space_id, time],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or(ApiError::NOT_FOUND)?;
+    let file_key = file_key
+        .filter(|key| !key.is_empty())
+        .ok_or(ApiError::NOT_FOUND)?;
+    if thumbnail_key.as_deref().is_none_or(|key| key.is_empty()) {
+        return Err(ApiError::NOT_FOUND);
+    }
+    Ok(PreviewSource {
+        item_id: item_id.to_owned(),
+        file_key,
+        expires_at,
+    })
+}
+
+pub fn item_live(db: &Connection, item_id: &str) -> ApiResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM items WHERE id=? AND expiresAt>?)",
+        params![item_id, now()],
+        |row| row.get(0),
+    )?)
 }
 
 fn writable_account(
