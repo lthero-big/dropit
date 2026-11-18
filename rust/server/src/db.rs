@@ -1,9 +1,10 @@
 use std::{
+    fs,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -12,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     ApiError, ApiResult,
     config::{Config, StartupResult},
-    now,
+    migrations, now,
 };
 
 #[derive(Clone)]
@@ -23,14 +24,16 @@ pub struct Database {
 
 impl Database {
     pub fn open(config: &mut Config) -> StartupResult<Self> {
-        let connection = Connection::open_with_flags(
-            config.data.join("dropit.sqlite"),
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?;
-        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != 19 {
-            return Err(format!("Expected a TS schema-19 fixture, found schema {version}").into());
+        let data_dir_existed = config.data.exists();
+        fs::create_dir_all(&config.data)?;
+        if !data_dir_existed {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&config.data, fs::Permissions::from_mode(0o700))?;
+            }
         }
+        let connection = migrations::open(&config.data.join("dropit.sqlite"))?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -764,6 +767,107 @@ pub fn referenced_file_keys(db: &Connection) -> ApiResult<Vec<String>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+pub struct ExpiredItem {
+    pub space_id: String,
+    pub id: String,
+}
+
+/// Remove expired database state in one immediate transaction.
+///
+/// File objects are never removed while this transaction is running.  Their
+/// keys are first put in `garbage`, so a process stop between the database
+/// commit and the filesystem pass is safe and retryable.
+pub fn expire(db: &mut Connection, time: i64) -> ApiResult<Vec<ExpiredItem>> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+    let items = {
+        let mut statement = tx.prepare(
+            "SELECT id,spaceId,fileKey,thumbnailKey FROM items
+             WHERE expiresAt<=? OR spaceId IN (SELECT id FROM spaces WHERE expiresAt<=?)",
+        )?;
+        let rows = statement.query_map(params![time, time], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (_, _, file_key, thumbnail_key) in &items {
+        for key in [file_key.as_deref(), thumbnail_key.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|key| !key.is_empty())
+        {
+            tx.execute("INSERT OR IGNORE INTO garbage (key) VALUES (?)", [key])?;
+        }
+    }
+    tx.execute(
+        "DELETE FROM items WHERE expiresAt<=? OR spaceId IN (SELECT id FROM spaces WHERE expiresAt<=?)",
+        params![time, time],
+    )?;
+
+    let uploads = {
+        let mut statement = tx.prepare(
+            "SELECT DISTINCT u.id FROM uploads u
+             LEFT JOIN spaces s ON s.id=u.spaceId
+             LEFT JOIN users owner ON owner.id=u.userId
+             WHERE u.expiresAt<=? OR s.expiresAt<=? OR owner.disabled=1
+                OR u.principal IN (SELECT 'user:' || id FROM users WHERE disabled=1)",
+        )?;
+        let rows = statement.query_map(params![time, time], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for id in &uploads {
+        let mut chunks = tx.prepare("SELECT key FROM upload_chunks WHERE uploadId=?")?;
+        let keys = chunks
+            .query_map([id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for key in keys {
+            tx.execute("INSERT OR IGNORE INTO garbage (key) VALUES (?)", [key])?;
+        }
+        tx.execute("DELETE FROM uploads WHERE id=?", [id])?;
+    }
+
+    // Deleting an expired room is safe only after its items and uploads have
+    // been queued.  Members and item groups cascade as in the TS schema.
+    tx.execute("DELETE FROM spaces WHERE expiresAt<=?", [time])?;
+
+    // Shares intentionally have no FK to items after migration 18.  Remove
+    // links that can no longer be opened while preserving valid share history.
+    tx.execute(
+        "DELETE FROM shares WHERE expiresAt<=? OR NOT EXISTS (
+            SELECT 1 FROM items i JOIN spaces s ON s.id=i.spaceId
+            WHERE i.id=shares.itemId AND s.id=shares.spaceId
+              AND (i.expiresAt IS NULL OR i.expiresAt>?)
+              AND (s.expiresAt IS NULL OR s.expiresAt>?) AND s.closedAt IS NULL
+              AND (shares.createdBy IS NULL OR s.roomKey IS NOT NULL OR s.ownerId=shares.createdBy
+                OR EXISTS (SELECT 1 FROM members m WHERE m.spaceId=s.id AND m.userId=shares.createdBy))
+        )",
+        params![time, time, time],
+    )?;
+    tx.execute("DELETE FROM sessions WHERE expiresAt<=?", [time])?;
+    tx.execute("DELETE FROM flows WHERE expiresAt<=?", [time])?;
+    tx.execute(
+        "DELETE FROM device_authorizations WHERE expiresAt<=?",
+        [time],
+    )?;
+    // Spent invites are retained as usage history; unused revoked/expired
+    // invites have no observable value after cleanup.
+    tx.execute(
+        "DELETE FROM invites WHERE uses=0 AND (expiresAt<=? OR revoked=1)",
+        [time],
+    )?;
+    tx.commit()?;
+
+    Ok(items
+        .into_iter()
+        .map(|(id, space_id, _, _)| ExpiredItem { space_id, id })
+        .collect())
+}
+
 pub struct UploadSession {
     pub id: String,
     pub space_id: String,
@@ -1231,4 +1335,68 @@ fn ensure_group(db: &Connection, space: &str, group: &str, time: i64) -> ApiResu
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    #[test]
+    fn expiry_queues_objects_before_deleting_rows() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "dropit-expiry-{}-{stamp}.sqlite",
+            std::process::id()
+        ));
+        let mut connection = crate::migrations::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO users (id,email,name,role,disabled,createdAt,pending) VALUES ('u','u@test','User','user',0,0,0);
+                 INSERT INTO spaces (id,name,ownerId,expiresAt,roomKey) VALUES ('s','Space','u',NULL,NULL);
+                 INSERT INTO members (spaceId,userId,role) VALUES ('s','u','editor');
+                 INSERT INTO items (id,spaceId,userId,kind,text,size,storedBytes,fileKey,thumbnailKey,createdAt,expiresAt,updatedAt,pinned,tags)
+                   VALUES ('i','s','u','file',NULL,2,2,'01234567-89ab-cdef-0123-456789abcdef',NULL,0,1,0,0,'[]');
+                 INSERT INTO uploads (id,spaceId,userId,principal,filename,mime,size,chunkSize,createdAt,expiresAt)
+                   VALUES ('upload','s','u','user:u','x.bin','application/octet-stream',2,2,0,1);
+                 INSERT INTO upload_chunks (uploadId,\"index\",key,size,sha256)
+                   VALUES ('upload',0,'abcdef01-2345-6789-abcd-ef0123456789',2,'hash');",
+            )
+            .unwrap();
+
+        let expired = expire(&mut connection, 1000).unwrap();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].id, "i");
+        let keys = garbage_keys(&connection).unwrap();
+        assert!(
+            keys.iter()
+                .any(|key| key == "01234567-89ab-cdef-0123-456789abcdef")
+        );
+        assert!(
+            keys.iter()
+                .any(|key| key == "abcdef01-2345-6789-abcd-ef0123456789")
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM items", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM uploads", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(connection);
+        let _ = fs::remove_file(path);
+    }
 }

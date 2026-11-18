@@ -143,16 +143,27 @@ Send Origin matching APP_ORIGIN on POST requests and retain the returned session
 cookie. Ctrl-C stops the local process.
 
 The service opens DATA_DIR/dropit.sqlite read/write and accepts schema 19. It
-requires an existing fixture and reports a startup error for a missing database or
-another schema version. DATA_DIR defaults to ./data relative to the working
+creates a new database when the path is empty, upgrades historical versions, and
+reports a startup error for a newer or malformed schema. DATA_DIR defaults to ./data relative to the working
 directory. HOST defaults to loopback and PORT defaults to 8787. The loopback
 default is a local-slice implementation choice.
+
+The migration candidate now upgrades schema versions 0 through 19 at startup.
+For versions below 17 it writes a `dropit.sqlite.pre-v<version>-<timestamp>.bak`
+copy before the schema-16 spaces rebuild, then enables foreign-key checks before
+serving. Expired rows and file keys are cleaned by the durable maintenance loop;
+see [the runtime boundary](../../docs/rust-migration.md) for the restart and
+container procedure and the intentionally unported administration surface.
 
 APP_ORIGIN and TRUST_PROXY have the reference meanings, including the stored
 appOrigin setting taking precedence, optional request-origin fallback and
 RESET_APP_ORIGIN. NODE_ENV=production selects __Host-dropit_session plus Secure
 when the effective origin uses HTTPS. Login and logout retain HttpOnly,
 SameSite=Lax, Path=/ and Max-Age semantics.
+
+STATIC_DIR selects the React output directory (default `public`), and the Rust
+fallback serves the SPA for non-API routes. `CLEANUP_INTERVAL_MS` controls the
+maintenance loop and defaults to 60000 milliseconds.
 
 The supported limit environment variables are MAX_FILE_BYTES, MAX_TEXT_BYTES,
 MAX_ITEMS, USER_QUOTA_BYTES, RETENTION_HOURS, SESSION_HOURS, RATE_WINDOW_MS,
