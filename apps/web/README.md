@@ -38,4 +38,14 @@ pnpm --filter @dropit/web smoke
 
 指定目标后，smoke 只启动 Vite，所有请求都发往所选后端。测试会跳过 TS 基线专用的短链接断言。运行结束后，停止手动启动的 Rust 进程并删除这份 fixture 副本。
 
-按首轮契约，Rust 的浏览器缺项包括站点元数据 `GET /api/site`、登录初始化 `GET /api/auth/providers`、空库设置 `/api/setup`，以及私人空间的 `/api/spaces/:space/ws` 和刷新所需的 `snapshot`。smoke 会报告缺失的站点元数据或登录初始化接口。登录可用后，缺失的 WS 快照会使刷新断言失败。OAuth、看板分组、文件上传和短链接下载等也在首轮契约之外。完整浏览器流程的实测基线为 TS。
+RHEA-230 已补齐 `GET /api/site`、`GET /api/auth/providers`、`GET /api/setup`（只读状态）、`GET /api/version` 以及私人空间 WebSocket。Rust 实测覆盖现有密码账号登录、发送文本、刷新快照、退出、两个独立浏览器的实时同步和断网重连。新增 `smoke/realtime.spec.mjs` 对 TS 与 Rust 使用相同入口，原 TS 基线仍可复跑。
+
+可由脚本自动创建 TS schema-19 fixture、启动唯一 Rust 后端、运行完整 smoke 并清理服务与数据（端口 `18878` 和 `15173` 需空闲）：
+
+```sh
+pnpm --filter @dropit/server build
+(cd rust/server && cargo build --locked)
+node rust/server/tests/browser.mjs
+```
+
+OAuth、首次创建账号、看板编辑/分组管理、文件上传、房间、分享及设置/管理等仍待后续迁移。读取登录方式会忠实显示数据库/环境中已配置的 OAuth provider；本切片尚未实现其登录流程，浏览器验收仅覆盖既有密码账号。

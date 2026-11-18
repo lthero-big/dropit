@@ -62,6 +62,17 @@ impl Database {
     }
 }
 
+pub fn user_count(db: &Connection) -> rusqlite::Result<i64> {
+    db.query_row("SELECT count(*) FROM users", [], |row| row.get(0))
+}
+
+pub fn setting(db: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    db.query_row("SELECT value FROM app_settings WHERE key=?", [key], |row| {
+        row.get(0)
+    })
+    .optional()
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct User {
@@ -119,6 +130,26 @@ pub fn session(db: &Connection, hash: &str, ip: Option<&str>) -> ApiResult<Optio
         )?;
     }
     Ok(account)
+}
+
+pub fn session_member(
+    db: &Connection,
+    hash: &str,
+    space_id: &str,
+    user_id: &str,
+) -> ApiResult<bool> {
+    let Some(account) = session(db, hash, None)? else {
+        return Ok(false);
+    };
+    if account.user.id != user_id {
+        return Ok(false);
+    }
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM spaces s JOIN members m ON m.spaceId=s.id
+         WHERE s.id=? AND m.userId=? AND coalesce(s.roomKey,'')='')",
+        params![space_id, user_id],
+        |row| row.get(0),
+    )?)
 }
 
 pub fn accept_invite(db: &Connection, hash: &str, user_id: &str, time: i64) -> ApiResult<()> {
@@ -185,7 +216,7 @@ pub fn space(db: &Connection, id: &str, user_id: &str, write: bool) -> ApiResult
     Ok(space)
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Device {
     pub id: String,
     pub name: String,
@@ -263,15 +294,19 @@ pub fn snapshot(db: &Connection, space: Space) -> ApiResult<Value> {
     let items = items
         .query_map(params![space.id, now()], item)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut groups = db.prepare(
-        "SELECT name FROM item_groups WHERE spaceId=? ORDER BY position, createdAt, name",
-    )?;
-    let groups = groups
-        .query_map([space.id], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let groups = groups(db, &space.id)?;
     Ok(
         json!({ "type": "snapshot", "items": items, "groups": groups, "serverTime": now(), "expiresAt": space.expires_at }),
     )
+}
+
+pub fn groups(db: &Connection, space: &str) -> ApiResult<Vec<String>> {
+    let mut stmt = db.prepare(
+        "SELECT name FROM item_groups WHERE spaceId=? ORDER BY position, createdAt, name",
+    )?;
+    Ok(stmt
+        .query_map([space], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 pub struct TextInput {
