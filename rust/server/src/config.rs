@@ -18,12 +18,17 @@ pub struct Config {
     pub max_text: usize,
     pub max_items: i64,
     pub quota: i64,
+    pub room_max_file: i64,
+    pub room_quota: i64,
+    pub room_retention: i64,
     pub retention: i64,
     pub session: i64,
     pub rate_window: i64,
     pub rate_general: u32,
     pub rate_auth: u32,
+    pub rate_invite: u32,
     pub rate_upload: u32,
+    pub rate_room: u32,
     pub rate_token: u32,
     pub rate_chunk: u32,
     pub upload_chunk_bytes: i64,
@@ -33,6 +38,8 @@ pub struct Config {
     pub upload_chunks_global: u32,
     pub upload_sessions_per_user: i64,
     pub upload_sessions_global: i64,
+    pub pin_lock_failures: u32,
+    pub pin_lock_ms: i64,
 }
 
 impl Config {
@@ -83,12 +90,17 @@ impl Config {
             max_text: 0,
             max_items: 0,
             quota: 0,
+            room_max_file: 0,
+            room_quota: 0,
+            room_retention: 0,
             retention: 0,
             session: 0,
             rate_window: 0,
             rate_general: 0,
             rate_auth: 0,
+            rate_invite: 0,
             rate_upload: 0,
+            rate_room: 0,
             rate_token: 0,
             rate_chunk: 0,
             upload_chunk_bytes: 0,
@@ -98,6 +110,8 @@ impl Config {
             upload_chunks_global: 0,
             upload_sessions_per_user: 0,
             upload_sessions_global: 0,
+            pin_lock_failures: 0,
+            pin_lock_ms: 0,
         })
     }
 
@@ -136,6 +150,21 @@ impl Config {
         self.max_text = limit("maxTextBytes", "MAX_TEXT_BYTES", 65536, 1, 1 << 20)? as usize;
         self.max_items = limit("maxItems", "MAX_ITEMS", 1000, 1, 100000)?;
         self.quota = limit("userQuotaBytes", "USER_QUOTA_BYTES", 1 << 30, 1, 100 << 30)?;
+        self.room_max_file = limit(
+            "roomMaxFileBytes",
+            "ROOM_MAX_FILE_BYTES",
+            5 << 20,
+            1,
+            1 << 30,
+        )?;
+        self.room_quota = limit("roomQuotaBytes", "ROOM_QUOTA_BYTES", 50 << 20, 1, 100 << 30)?;
+        self.room_retention = limit(
+            "roomRetentionMs",
+            "ROOM_RETENTION_HOURS",
+            24,
+            3600000,
+            365 * 86400000,
+        )?;
         self.retention = limit(
             "retentionMs",
             "RETENTION_HOURS",
@@ -147,7 +176,9 @@ impl Config {
         self.rate_window = limit("rateWindowMs", "RATE_WINDOW_MS", 60000, 1, 3600000)?;
         self.rate_general = limit("rateGeneral", "RATE_GENERAL", 240, 1, 1000000)? as u32;
         self.rate_auth = limit("rateAuth", "RATE_AUTH", 20, 1, 1000000)? as u32;
+        self.rate_invite = limit("rateInvite", "RATE_INVITE", 10, 1, 1000000)? as u32;
         self.rate_upload = limit("rateUpload", "RATE_UPLOAD", 30, 1, 1000000)? as u32;
+        self.rate_room = limit("rateRoom", "RATE_ROOM", 10, 1, 1000000)? as u32;
         self.rate_token = limit("rateToken", "RATE_TOKEN", 120, 1, 1000000)? as u32;
         self.rate_chunk = limit("rateChunk", "RATE_CHUNK", 2000, 1, 1000000)? as u32;
         self.upload_chunk_bytes = limit(
@@ -192,8 +223,14 @@ impl Config {
             1,
             10000,
         )?;
+        self.pin_lock_failures =
+            limit("pinLockFailures", "PIN_LOCK_FAILURES", 10, 1, 1000000)? as u32;
+        self.pin_lock_ms = limit("pinLockMs", "PIN_LOCK_MINUTES", 15, 60000, 7 * 86400000)?;
         if self.rate_auth >= self.rate_general || self.rate_upload >= self.rate_general {
             return Err("Invalid rate limits".into());
+        }
+        if self.room_max_file >= self.max_file {
+            return Err("Invalid room file limit".into());
         }
         if reset {
             db.execute("DELETE FROM app_settings WHERE key='appOrigin'", [])?;

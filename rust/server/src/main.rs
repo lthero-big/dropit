@@ -6,6 +6,9 @@ mod images;
 mod machine;
 mod password;
 mod realtime;
+mod rooms;
+mod sharing;
+mod spaces;
 mod uploads;
 
 use std::{
@@ -105,6 +108,7 @@ struct StateData {
     preview_slots: AtomicU32,
     app_tickets: Mutex<HashMap<String, AppTicket>>,
     chunk_work: uploads::ChunkWork,
+    pin_lockouts: Mutex<HashMap<String, (u32, i64)>>,
 }
 
 pub(crate) type App = Arc<StateData>;
@@ -186,6 +190,7 @@ async fn main() -> StartupResult<()> {
         preview_slots: AtomicU32::new(0),
         app_tickets: Mutex::new(HashMap::new()),
         chunk_work: uploads::ChunkWork::default(),
+        pin_lockouts: Mutex::new(HashMap::new()),
     });
     let routes = Router::new()
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
@@ -198,6 +203,85 @@ async fn main() -> StartupResult<()> {
         .route("/api/auth/device/deny", post(device_deny))
         .route("/api/app-session/ticket", post(app_session_ticket))
         .route("/api/app-session", get(app_session))
+        .route(
+            "/api/invites/{token}",
+            get(spaces::invite_info).post(spaces::accept_invite),
+        )
+        .route(
+            "/api/spaces/{space}/invites",
+            get(spaces::list_invites).post(spaces::create_invite),
+        )
+        .route(
+            "/api/spaces/{space}/invites/{id}",
+            delete(spaces::revoke_invite),
+        )
+        .route("/api/spaces/{space}/members", get(spaces::members))
+        .route(
+            "/api/spaces/{space}/members/{userId}",
+            patch(spaces::set_member_role).delete(spaces::remove_member),
+        )
+        .route("/api/spaces/{space}/membership", delete(spaces::leave))
+        .route("/api/rooms", post(rooms::create))
+        .route("/api/rooms/enter", post(rooms::enter))
+        .route("/api/rooms/{room}/code", put(rooms::change_code))
+        .route("/api/rooms/{room}", get(rooms::info))
+        .route("/api/rooms/{room}/items", get(rooms::items))
+        .route("/api/rooms/{room}/items/text", post(rooms::text))
+        .route("/api/rooms/{room}/items/file", post(uploads::upload_room))
+        .route("/api/rooms/{room}/items/{id}", delete(rooms::delete_item))
+        .route(
+            "/api/rooms/{room}/items/{id}/download",
+            get(rooms::download).head(rooms::download),
+        )
+        .route(
+            "/api/rooms/{room}/items/{id}/thumbnail",
+            get(rooms::thumbnail).head(rooms::thumbnail),
+        )
+        .route("/api/rooms/{room}/items/{id}/preview", get(rooms::preview))
+        .route(
+            "/api/rooms/{room}/items/{id}/media",
+            get(rooms::media).head(rooms::media),
+        )
+        .route("/api/rooms/{room}/ws", get(realtime::room_websocket))
+        .route("/api/admin/rooms", get(rooms::admin_rooms))
+        .route("/api/admin/rooms/{id}/close", post(rooms::admin_close))
+        .route("/api/admin/rooms/{id}/reopen", post(rooms::admin_reopen))
+        .route("/api/admin/rooms/{id}", delete(rooms::admin_delete))
+        .route(
+            "/api/spaces/{space}/items/{id}/shares",
+            get(sharing::list_private).post(sharing::create_private),
+        )
+        .route(
+            "/api/spaces/{space}/shares/{shareId}",
+            delete(sharing::revoke_private),
+        )
+        .route(
+            "/api/rooms/{room}/items/{id}/shares",
+            get(sharing::list_room).post(sharing::create_room),
+        )
+        .route(
+            "/api/rooms/{room}/shares/{shareId}",
+            delete(sharing::revoke_room),
+        )
+        .route("/api/shares", get(sharing::managed_shares))
+        .route("/api/shares/{shareId}/link", get(sharing::managed_link))
+        .route(
+            "/api/shares/{shareId}/revoke",
+            post(sharing::managed_revoke),
+        )
+        .route("/api/shares/{shareId}", delete(sharing::managed_delete))
+        .route("/api/s/{token}", get(sharing::open_public))
+        .route(
+            "/api/s/{token}/file",
+            get(sharing::file).head(sharing::file),
+        )
+        .route("/api/s/{token}/thumbnail", get(sharing::thumbnail))
+        .route("/api/s/{token}/preview", get(sharing::preview))
+        .route(
+            "/api/s/{token}/media",
+            get(sharing::media).head(sharing::media),
+        )
+        .route("/d/{token}", get(sharing::file).head(sharing::file))
         .route("/api/tokens", get(tokens).post(create_token))
         .route("/api/tokens/{id}", patch(rename_token).delete(delete_token))
         .route("/api/admin/tokens", get(admin_tokens))

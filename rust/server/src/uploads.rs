@@ -195,6 +195,99 @@ pub async fn upload_file(
     Ok((StatusCode::CREATED, Json(json!({ "item": item }))))
 }
 
+pub async fn upload_room(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<UrlPath<String>, PathRejection>,
+    request: Request,
+) -> ApiResult<impl IntoResponse> {
+    let UrlPath(room_token) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let room = crate::rooms::load_room(&app, &room_token).await?;
+    app.limit("room-write:ip", &context.ip, app.config.rate_room)?;
+    let headers = request.headers().clone();
+    let expected = expected_length(
+        header_value(&headers, "content-length"),
+        app.config.room_max_file,
+    )?;
+    let filename = decoded_filename(header_value(&headers, "x-file-name"))?;
+    let mime = declared_mime(header_value(&headers, "content-type"))?;
+    let group = decoded_group(header_value(&headers, "x-dropit-group"))?;
+    let device = parse_device(&headers);
+    let slot = acquire(&app, false, UPLOAD_SLOTS, "UPLOAD_BUSY")?;
+    let directory = downloads::files_dir(&app.config.data);
+    let stored = write_body(
+        &directory,
+        request.into_body(),
+        app.config.room_max_file as u64,
+    )
+    .await?;
+    if stored.size == 0 {
+        return Err(ApiError::new(400, "EMPTY_FILE"));
+    }
+    if let Some(expected) = expected
+        && stored.size != expected
+    {
+        return Err(ApiError::new(400, "UPLOAD_INCOMPLETE"));
+    }
+    let mut thumbnail: Option<(String, Staged, i64)> = None;
+    if wants_thumbnail(&mime) {
+        let source = stored.staged.path.clone();
+        let derived = tokio::task::spawn_blocking(move || images::derive_file(&source, 320))
+            .await
+            .map_err(ApiError::internal)?
+            .map_err(ApiError::from)?;
+        if derived.len() > images::THUMBNAIL_BYTES {
+            return Err(ApiError::new(413, "FILE_TOO_LARGE"));
+        }
+        let thumb = write_bytes(&directory, &derived).await?;
+        thumbnail = Some((thumb.key, thumb.staged, derived.len() as i64));
+    }
+    let group = group
+        .filter(|value| !value.is_empty())
+        .map(|value| clean_group(&value))
+        .transpose()?;
+    let thumb_size = thumbnail.as_ref().map(|(_, _, size)| *size).unwrap_or(0);
+    let input = db::FileInput {
+        filename: clean_filename(&filename),
+        mime,
+        size: stored.size as i64,
+        stored_bytes: stored.size as i64 + thumb_size,
+        file_key: stored.key.clone(),
+        thumbnail_key: thumbnail.as_ref().map(|(key, _, _)| key.clone()),
+        group,
+        device,
+    };
+    let channel = room.id.clone();
+    let config = app.config.clone();
+    let _gate = app.realtime.gate.lock().await;
+    let (item, groups) = app
+        .db
+        .run({
+            let channel = channel.clone();
+            move |db| {
+                let before = db::groups(db, &channel)?;
+                let item = db::insert_room_file(db, &config, &channel, input);
+                let after = db::groups(db, &channel)?;
+                Ok((item, (before != after).then_some(after)))
+            }
+        })
+        .await?;
+    if let Some(groups) = groups {
+        app.realtime
+            .publish(&channel, json!({ "type": "groups", "groups": groups }));
+    }
+    let item = item?;
+    app.realtime
+        .publish(&channel, json!({ "type": "item.created", "item": item }));
+    drop(_gate);
+    let _slot = slot;
+    forget_staged(stored.staged);
+    if let Some((_, staged, _)) = thumbnail {
+        forget_staged(staged);
+    }
+    Ok((StatusCode::CREATED, Json(json!({ "item": item }))))
+}
+
 fn forget_staged(mut staged: Staged) {
     staged.keep = true;
 }

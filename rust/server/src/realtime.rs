@@ -122,6 +122,13 @@ impl Realtime {
             }
         }
     }
+
+    pub fn revoke_space(&self, space: &str) {
+        let mut hub = self.hub.lock().unwrap();
+        for connection in hub.connections.values_mut().filter(|c| c.space == space) {
+            let _ = connection.close.send(true);
+        }
+    }
 }
 
 impl Hub {
@@ -237,6 +244,66 @@ pub async fn websocket(
                 device,
             )
         })
+        .into_response())
+}
+
+pub async fn room_websocket(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<Path<String>, PathRejection>,
+    RawQuery(query): RawQuery,
+    upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> ApiResult<Response> {
+    let (expected, source) = app
+        .config
+        .origin
+        .as_ref()
+        .map(|(origin, source)| (origin.as_str(), *source))
+        .unwrap_or((
+            context.request_origin.as_deref().unwrap_or_default(),
+            "request",
+        ));
+    let received = context.received_origin.as_deref().unwrap_or_default();
+    let allowed = !received.is_empty()
+        && (received == expected
+            || (source == "request"
+                && expected
+                    .strip_prefix("http://")
+                    .is_some_and(|host| received == format!("https://{host}"))));
+    if !allowed {
+        let mut error = ApiError::new(403, "ORIGIN_REJECTED");
+        error.details = Some(Box::new(serde_json::Map::from_iter([
+            ("expected".into(), expected.into()),
+            ("received".into(), received.into()),
+            ("source".into(), source.into()),
+        ])));
+        return Err(error);
+    }
+    let Path(room) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let room_space = crate::rooms::load_room(&app, &room).await?;
+    let auth = context.auth.clone();
+    let user = auth
+        .as_ref()
+        .map(|auth| auth.account.user.id.clone())
+        .unwrap_or_else(|| format!("room:{}", context.ip));
+    let bearer = auth
+        .as_ref()
+        .and_then(|auth| auth.bearer.as_ref())
+        .map(|bearer| bearer.id.clone());
+    let device = parse_device(query.as_deref());
+    let subscription = Realtime::subscribe(
+        app.clone(),
+        room_space.id,
+        context.ip,
+        user.clone(),
+        bearer,
+        device,
+    )?;
+    let upgrade = upgrade.map_err(|_| ApiError::new(500, "INTERNAL_ERROR"))?;
+    Ok(upgrade
+        .max_message_size(1024)
+        .max_frame_size(1024)
+        .on_upgrade(move |socket| run_room(socket, subscription, room, user))
         .into_response())
 }
 
@@ -375,6 +442,84 @@ async fn run(
             }
         }
     }
+}
+
+async fn run_room(mut socket: WebSocket, mut sub: Subscription, room_token: String, user: String) {
+    let app = sub.app.clone();
+    let snapshot = {
+        let _gate = app.realtime.gate.lock().await;
+        if crate::rooms::load_room(&app, &room_token).await.is_err() {
+            close(&mut socket, 1008, "Authorization expired").await;
+            return;
+        }
+        while let Ok(payload) = sub.receiver.try_recv() {
+            consume(&sub, payload.len());
+        }
+        let token = room_token.clone();
+        app.db
+            .run(move |db| {
+                let id = token
+                    .split_once('.')
+                    .map(|(id, _)| id)
+                    .ok_or(ApiError::NOT_FOUND)?
+                    .to_owned();
+                db::snapshot(db, db::room(db, &id, crate::now())?)
+            })
+            .await
+    };
+    let Ok(snapshot) = snapshot else {
+        close(&mut socket, 1011, "Snapshot unavailable").await;
+        return;
+    };
+    if send(&mut socket, Message::Text(snapshot.to_string().into()))
+        .await
+        .is_err()
+    {
+        close(&mut socket, 1013, "Slow consumer").await;
+        return;
+    }
+    {
+        let mut hub = app.realtime.hub.lock().unwrap();
+        if let Some(connection) = hub.connections.get_mut(&sub.id) {
+            connection.active = true;
+        }
+        let channel = room_token
+            .split_once('.')
+            .map(|(id, _)| id)
+            .unwrap_or_default();
+        hub.presence(channel);
+    }
+    let mut validation = tokio::time::interval(Duration::from_secs(1));
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(30),
+        Duration::from_secs(30),
+    );
+    validation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut alive = true;
+    loop {
+        tokio::select! {
+            biased;
+            _ = sub.close.changed() => { close(&mut socket, 1013, "Slow consumer").await; break; }
+            _ = validation.tick() => { if crate::rooms::load_room(&app, &room_token).await.is_err() { close(&mut socket, 1008, "Authorization expired").await; break; } }
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_))) => { let _ = tokio::time::timeout(SEND_TIMEOUT, socket.flush()).await; break; }
+                Some(Err(error)) => { let inner = error.into_inner(); match inner.downcast_ref::<tungstenite::Error>() { Some(tungstenite::Error::Capacity(_)) => close(&mut socket, 1009, "Max payload size exceeded").await, Some(tungstenite::Error::Utf8(_)) => close(&mut socket, 1007, "Invalid UTF-8").await, _ => {} } break; }
+                Some(Ok(Message::Pong(_))) => alive = true,
+                Some(Ok(Message::Ping(data))) => { if send(&mut socket, Message::Pong(data)).await.is_err() { break; } }
+                Some(Ok(Message::Text(_))) | Some(Ok(Message::Binary(_))) => { close(&mut socket, 1008, "Read-only channel").await; break; }
+                _ => break,
+            },
+            _ = heartbeat.tick() => { if !alive { break; } alive = false; if send(&mut socket, Message::Ping(Vec::new().into())).await.is_err() { break; } }
+            payload = sub.receiver.recv() => {
+                let Some(payload) = payload else { break; };
+                consume(&sub, payload.len());
+                if crate::rooms::load_room(&app, &room_token).await.is_err() { close(&mut socket, 1008, "Authorization expired").await; break; }
+                if send(&mut socket, Message::Text(payload.to_string().into())).await.is_err() { close(&mut socket, 1013, "Slow consumer").await; break; }
+            }
+        }
+    }
+    let _ = user;
 }
 
 fn consume(sub: &Subscription, bytes: usize) {
