@@ -2,13 +2,15 @@ mod browser;
 mod config;
 mod db;
 mod downloads;
+mod images;
 mod password;
 mod realtime;
+mod uploads;
 
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicU32},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -19,7 +21,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use percent_encoding::percent_decode_str;
 use rusqlite::{TransactionBehavior, params};
@@ -92,6 +94,8 @@ struct StateData {
     realtime: Realtime,
     limiter: Mutex<HashMap<(&'static str, String), Bucket>>,
     password_slots: Arc<Semaphore>,
+    upload_slots: AtomicU32,
+    preview_slots: AtomicU32,
 }
 
 type App = Arc<StateData>;
@@ -162,6 +166,8 @@ async fn main() -> StartupResult<()> {
         config: Arc::new(config),
         limiter: Mutex::new(HashMap::new()),
         password_slots: Arc::new(Semaphore::new(4)),
+        upload_slots: AtomicU32::new(0),
+        preview_slots: AtomicU32::new(0),
     });
     let routes = Router::new()
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
@@ -176,6 +182,12 @@ async fn main() -> StartupResult<()> {
         .route("/api/spaces/{space}", get(space))
         .route("/api/spaces/{space}/items", get(items))
         .route("/api/spaces/{space}/items/text", post(text))
+        .route("/api/spaces/{space}/items/file", post(uploads::upload_file))
+        .route("/api/spaces/{space}/items/{id}", delete(uploads::retract))
+        .route(
+            "/api/spaces/{space}/items/{id}/preview",
+            get(uploads::preview),
+        )
         .route("/api/spaces/{space}/ws", get(realtime::websocket))
         .route(
             "/api/spaces/{space}/items/{id}/download",
