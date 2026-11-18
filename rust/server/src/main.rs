@@ -4,6 +4,8 @@ mod db;
 mod downloads;
 mod images;
 mod machine;
+mod maintenance;
+mod migrations;
 mod password;
 mod realtime;
 mod rooms;
@@ -30,7 +32,7 @@ use axum::{
 use percent_encoding::percent_decode_str;
 use rusqlite::{TransactionBehavior, params};
 use serde_json::{Map, Value, json};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
@@ -193,7 +195,7 @@ async fn main() -> StartupResult<()> {
         pin_lockouts: Mutex::new(HashMap::new()),
     });
     let routes = Router::new()
-        .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
+        .route("/healthz", get(healthz))
         .route("/api/auth/password/login", post(login))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/device/authorize", post(device_authorize))
@@ -326,21 +328,127 @@ async fn main() -> StartupResult<()> {
             "/api/spaces/{space}/items/{id}/media",
             get(media).head(media),
         )
-        .fallback(not_found)
+        .fallback(static_or_not_found)
         .method_not_allowed_fallback(not_found)
         .layer(middleware::from_fn_with_state(app.clone(), request_context))
-        .with_state(app);
+        .with_state(app.clone());
     println!("dropit listening on port {}", listener.local_addr()?.port());
-    axum::serve(
+    let (shutdown, shutdown_rx) = watch::channel(false);
+    let maintenance_app = app.clone();
+    let maintenance_task = tokio::spawn(maintenance::run_loop(maintenance_app, shutdown_rx));
+    let server_result = axum::serve(
         listener,
         routes.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .await?;
+    .with_graceful_shutdown(shutdown_signal(app.clone()))
+    .await;
+    let _ = shutdown.send(true);
+    let _ = maintenance_task.await;
+    if let Err(error) = maintenance::run_once(&app).await {
+        eprintln!("dropit: final maintenance failed; durable garbage will retry on restart");
+        let _ = error;
+    }
+    server_result?;
     Ok(())
+}
+
+async fn healthz(State(app): State<App>) -> ApiResult<Json<Value>> {
+    app.db
+        .run(|db| {
+            db.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
+            Ok(())
+        })
+        .await?;
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+async fn shutdown_signal(app: App) {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    {
+        let terminate = async {
+            if let Ok(mut signal) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                signal.recv().await;
+            }
+        };
+        tokio::select! {
+            _ = ctrl_c => app.realtime.close_all(),
+            _ = terminate => app.realtime.close_all(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await;
+        app.realtime.close_all();
+    }
 }
 
 async fn not_found() -> ApiError {
     ApiError::NOT_FOUND
+}
+
+async fn static_or_not_found(State(app): State<App>, request: Request) -> Response {
+    if request.uri().path().starts_with("/api/") || request.uri().path().starts_with("/d/") {
+        return ApiError::NOT_FOUND.into_response();
+    }
+    if !matches!(request.method(), &Method::GET | &Method::HEAD) {
+        return ApiError::NOT_FOUND.into_response();
+    }
+
+    let requested = percent_decode_str(request.uri().path().trim_start_matches('/'))
+        .decode_utf8()
+        .ok();
+    let Some(requested) = requested else {
+        return ApiError::NOT_FOUND.into_response();
+    };
+    if requested.contains(['\0', '\\']) || requested.split('/').any(|component| component == "..") {
+        return ApiError::NOT_FOUND.into_response();
+    }
+
+    let requested = if requested.is_empty() {
+        "index.html"
+    } else {
+        requested.as_ref()
+    };
+    let candidate = app.config.static_dir.join(requested);
+    let (bytes, content_path) = match tokio::fs::read(&candidate).await {
+        Ok(bytes) => (bytes, candidate),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !requested.contains('.') => {
+            let index = app.config.static_dir.join("index.html");
+            match tokio::fs::read(&index).await {
+                Ok(bytes) => (bytes, index),
+                Err(_) => return ApiError::NOT_FOUND.into_response(),
+            }
+        }
+        Err(_) => return ApiError::NOT_FOUND.into_response(),
+    };
+    let content_type = match content_path.extension().and_then(|value| value.to_str()) {
+        Some("css") => "text/css; charset=utf-8",
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "application/octet-stream",
+    };
+    let body = if request.method() == Method::HEAD {
+        axum::body::Body::empty()
+    } else {
+        axum::body::Body::from(bytes)
+    };
+    let mut response = body.into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
 }
 
 async fn request_context(

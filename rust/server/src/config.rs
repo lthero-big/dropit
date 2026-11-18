@@ -11,6 +11,7 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub data: PathBuf,
+    pub static_dir: PathBuf,
     pub production: bool,
     pub origin: Option<(String, &'static str)>,
     pub trusted_proxies: Vec<IpNet>,
@@ -23,6 +24,7 @@ pub struct Config {
     pub room_retention: i64,
     pub retention: i64,
     pub session: i64,
+    pub cleanup_interval_ms: i64,
     pub rate_window: i64,
     pub rate_general: u32,
     pub rate_auth: u32,
@@ -83,6 +85,9 @@ impl Config {
             data: env::var_os("DATA_DIR")
                 .filter(|dir| !dir.is_empty())
                 .map_or_else(|| PathBuf::from("data"), PathBuf::from),
+            static_dir: env::var_os("STATIC_DIR")
+                .filter(|dir| !dir.is_empty())
+                .map_or_else(|| PathBuf::from("public"), PathBuf::from),
             production: env::var("NODE_ENV").is_ok_and(|v| v == "production"),
             origin,
             trusted_proxies,
@@ -95,6 +100,7 @@ impl Config {
             room_retention: 0,
             retention: 0,
             session: 0,
+            cleanup_interval_ms: 0,
             rate_window: 0,
             rate_general: 0,
             rate_auth: 0,
@@ -173,6 +179,7 @@ impl Config {
             365 * 86400000,
         )?;
         self.session = limit("sessionMs", "SESSION_HOURS", 168, 3600000, 365 * 86400000)?;
+        self.cleanup_interval_ms = env_limit("CLEANUP_INTERVAL_MS", 60000, 1, 86400000)?;
         self.rate_window = limit("rateWindowMs", "RATE_WINDOW_MS", 60000, 1, 3600000)?;
         self.rate_general = limit("rateGeneral", "RATE_GENERAL", 240, 1, 1000000)? as u32;
         self.rate_auth = limit("rateAuth", "RATE_AUTH", 20, 1, 1000000)? as u32;

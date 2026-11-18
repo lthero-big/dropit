@@ -122,6 +122,13 @@ impl Realtime {
             }
         }
     }
+
+    pub fn close_all(&self) {
+        let mut hub = self.hub.lock().unwrap();
+        for connection in hub.connections.values_mut() {
+            let _ = connection.close.send(true);
+        }
+    }
 }
 
 impl Hub {
