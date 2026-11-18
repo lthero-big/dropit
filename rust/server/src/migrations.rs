@@ -19,11 +19,6 @@ pub const CURRENT_SCHEMA: i64 = 19;
 pub fn open(path: &Path) -> StartupResult<Connection> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        }
     }
     let mut db = Connection::open_with_flags(
         path,

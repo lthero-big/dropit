@@ -1,4 +1,5 @@
 use std::{
+    fs,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -23,6 +24,15 @@ pub struct Database {
 
 impl Database {
     pub fn open(config: &mut Config) -> StartupResult<Self> {
+        let data_dir_existed = config.data.exists();
+        fs::create_dir_all(&config.data)?;
+        if !data_dir_existed {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&config.data, fs::Permissions::from_mode(0o700))?;
+            }
+        }
         let connection = migrations::open(&config.data.join("dropit.sqlite"))?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
