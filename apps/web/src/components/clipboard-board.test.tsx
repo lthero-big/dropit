@@ -5,6 +5,7 @@ import { ClipboardBoard } from './clipboard-board.tsx'
 import { ApiError, UploadCancelled, uploadFile } from '@/lib/api.ts'
 import { memoryStore, resumeKey, type ChunkTransport, type ResumeRecord, type ResumeStore } from '@/lib/chunked-upload.ts'
 import { CLAIMS_KEY } from '@/lib/upload-claims.ts'
+import { UPLOAD_DONE_MS } from '@/lib/upload-queue.ts'
 import type { Item } from '@/lib/types.ts'
 
 class FakeSocket {
@@ -141,6 +142,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -198,12 +200,27 @@ describe('upload queue', () => {
     await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'd.txt' })).toBeNull())
     expect(gate.held.map((entry) => entry.name)).not.toContain('d.txt')
 
-    fireEvent.click(screen.getByRole('button', { name: '取消 a.txt' }))
+    // Control the queue's retention timer, then restore real timers before
+    // waiting for AnimatePresence to finish the card's exit animation.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '取消 a.txt' }))
+    })
     expect(gate.held[0]?.signal.aborted).toBe(true)
+    expect(gate.active).toBe(2)
     expect(rowFor('a.txt').textContent).toContain('已取消')
     expect(document.getElementById('clip-item-a.txt')).toBeNull()
-    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'a.txt' })).toBeNull(), { timeout: 4000 })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UPLOAD_DONE_MS - 1)
+    })
+    expect(rowFor('a.txt').textContent).toContain('已取消')
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1)
+    })
+    vi.useRealTimers()
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'a.txt' })).toBeNull())
     expect(document.getElementById('clip-item-a.txt')).toBeNull()
+    expect(gate.held.map((entry) => entry.name)).toEqual(['a.txt', 'b.txt', 'c.txt'])
   })
 
   it('cancel-all drops queued rows and aborts the active ones', async () => {
