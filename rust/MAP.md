@@ -119,4 +119,6 @@ Remaining stage 4 items stay backlog until their stated data/auth/upload boundar
 - RHEA-233 direct upload, image preview and retract is integrated as `b8ec9222613a68f57208e53b9a89f96da3e1d3ed` from PR #84.
 - RHEA-237 delivered PR #86 with its private-space chunk session comparison and passing checks; the coordinator resolved the later integration conflict and accepted it as `7412f12`, with the final MAP record in this file. RHEA-236 is now running because its authentication and realtime dependencies are integrated. RHEA-238 and RHEA-239 remain backlog until upload and space boundaries are stable.
 
+The RHEA-237 conflict was resolved and PR #86 merged as `7412f123be88c50876d253ec230a2db9ce9de1d4`. RHEA-236 PR #87 currently has a merge conflict and a failed Rust HTTP compatibility check, so it is in a repair run. RHEA-238 and RHEA-239 remain backlog until the space/share and upload boundaries are accepted.
+
 The preliminary full-migration estimate is 12–20 person-days, or 15–25 with contingency. Re-estimate after the first runnable Rust slice. It is not a schedule commitment or a claim that the first wave completes the server migration.
