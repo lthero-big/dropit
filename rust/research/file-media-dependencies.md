@@ -65,7 +65,8 @@ Format facts from those pages:
 
 - WebP decode in `image-webp` covers lossless, lossy, alpha, and animation. WebP encode in that crate is lossless only. There is no lossy WebP encoder in the current `image-webp` README.
 - `image` AVIF is encode through `ravif` and, with `avif-native`, decode through `dav1d`. The README does not list a HEIF/HEIC decoder. `image-extras` is the documented place for extra decoders, and this research did not verify an `image-extras` HEIC decoder against Dropit's files.
-- `Limits` strict checks are `max_image_width` and `max_image_height`. Default is no width or height limit. Default `max_alloc` is 512 MiB and is documented as non-strict. A 4097x4097 image is under both a 4097-pixel edge cap and the 512 MiB allocation cap, so it would pass `image` defaults. The Dropit ceiling is `width * height > 16_777_216`. The implementer must check that product before `read_image`, using dimensions from the decoder. Setting only `max_alloc` does not reproduce the Sharp error.
+- `Limits` strict checks are `max_image_width` and `max_image_height`. Default is no width or height limit. Default `max_alloc` is 512 MiB and is documented as non-strict. A 4097x4097 image is under both a 4097-pixel edge cap and the 512 MiB allocation cap, so it would pass `image` defaults. The Dropit ceiling is `width * height > 16_777_216`. Setting only `max_alloc` does not reproduce the Sharp error.
+- For JPEG, PNG, GIF, and WebP, read dimensions from the still decoder and reject before `read_image` when the product exceeds 16,777,216. That order is not safe for AVIF. See the next section.
 - `GifDecoder` implements `AnimationDecoder`. `DynamicImage::from_decoder` uses the still-image decoder path. Whether that path is always the first GIF frame, including a frame that does not start at (0, 0), was not executed in Rust here. The acceptance case must compare the first composited frame, not merely "decode succeeded".
 - `image` does not apply EXIF orientation by itself. `kamadak-exif` parses a raw EXIF block and can read JPEG, HEIF, PNG, WebP, and TIFF containers via `Reader::read_from_container`. Orientation is a field the application must honor. Values 2, 4, 5, and 7 include mirrors. The current TypeScript test only pins orientation 6 (rotate 90 degrees clockwise, width and height swap).
 
@@ -152,7 +153,33 @@ AVIF decode is required before compatibility acceptance. Add it in the same crat
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "avif-native"] }
 ```
 
-`avif-native` links dav1d. That is a packaging dependency, not a reason to drop the AVIF cases. If `image` with `avif-native` cannot decode `F-AVIF-8x4` to the expected dimensions, switch that format to the libvips path in option B and probe the distro's libheif/libaom before claiming the case. An AVIF encoder is not required, because output is WebP. Do not enable the `avif` feature alone and treat encode support as decode support.
+`avif-native` links dav1d. That is a packaging dependency, not a reason to drop the AVIF cases. If the direct decoder below cannot decode `F-AVIF-8x4` to the expected dimensions, switch that format to the libvips path in option B and probe the distro's libheif/libaom before claiming the case. An AVIF encoder is not required, because output is WebP. Do not enable the `avif` feature alone and treat encode support as decode support.
+
+### AVIF pixel check before native decode
+
+`ImageReader` cannot apply the Dropit pixel ceiling before AVIF's native decode. In `image` 0.25.10, `AvifDecoder::new` calls `mp4parse::read_avif`, then `dav1d::Decoder::new`, `send_data`, and `read_until_ready` before the struct exists. `ImageReader::into_decoder` calls `set_limits` only after `make_decoder` returns that struct. `into_dimensions` goes through `into_decoder`. Sources: [`AvifDecoder::new`](https://github.com/image-rs/image/blob/v0.25.10/src/codecs/avif/decoder.rs#L76-L121) and [`ImageReader::into_decoder`](https://github.com/image-rs/image/blob/v0.25.10/src/io/image_reader_type.rs#L218-L223). `AvifDecoder::dimensions` reads the already decoded `dav1d::Picture`, so it is not a pre-check.
+
+Do not call `ImageReader::decode`, `into_decoder`, or `AvifDecoder::new` on an upload. Use this order instead:
+
+1. Sniff the `ftyp` brand. Only `avif` and `avis` enter this path, matching `media.ts`.
+2. Parse the ISOBMFF container with `mp4parse::read_avif` (`mp4parse` 0.17.0, the version `image` 0.25.10 names). This reads boxes. It does not decode AV1.
+3. Read the primary item's `ispe` width and height before requesting coded bytes. `read_avif` stores that property ([`read_ispe`](https://docs.rs/crate/mp4parse/0.17.0/source/src/lib.rs), HEIF ISO 23008-12 § 6.5.3). `spatial_extents_ptr` can see it, but `ImageSpatialExtentsProperty` keeps the fields private, so the service needs a small local `ispe` reader or a parser whose width and height are public. Missing, duplicate, or truncated `ispe` is `415`, not a cue to fall through to dav1d.
+4. If `width == 0`, `height == 0`, or `width as u64 * height as u64 > 16_777_216`, return `415 INVALID_IMAGE` now. Do not call `primary_item_coded_data` and do not construct `dav1d::Decoder`.
+5. Only when the product fits, copy the primary item's coded data and decode it with `dav1d` 0.11.0, the version `image` 0.25.10 names. Build the decoder with `Settings`, not `Decoder::new`:
+
+```rust
+let mut settings = dav1d::Settings::new();
+settings.set_frame_size_limit(16_777_216);
+let mut decoder = dav1d::Decoder::with_settings(&settings)?;
+```
+
+`set_frame_size_limit` maps to `Dav1dSettings.frame_size_limit`, documented as the maximum frame size in pixels, with 0 meaning unlimited ([dav1d 0.11.0 `Settings`](https://docs.rs/dav1d/0.11.0/dav1d/struct.Settings.html), [dav1d `dav1d.h`](https://github.com/videolan/dav1d/blob/1.5.1/include/dav1d/dav1d.h)). In dav1d 1.5.1, `src/obu.c` compares `width[1] * height` with that limit after the frame header and returns `ERANGE` before the frame OBU continues ([`src/obu.c`](https://github.com/videolan/dav1d/blob/1.5.1/src/obu.c)). `Decoder::new` leaves the limit at 0, which is why `AvifDecoder::new` does not stop an oversized frame.
+6. Map a header-check failure or a dav1d `ERANGE` to `415 INVALID_IMAGE`. Delete the temporary file and release the upload reservation, the same way other raster failures do.
+7. For an 8x4 file that passes step 4, continue with the same rotate, resize, and WebP encode used for JPEG.
+
+This is a source-derived call order. It is not a memory measurement. The implementation test must show that an oversized AVIF returns 415 without a picture allocation, using a counting `dav1d::PictureAllocator` or an equivalent allocation counter around step 5. Until that counter runs, "no native allocation" stays unverified. A forged `ispe` that is small while the AV1 frame header is large must still die at step 5 with the same 415 and no picture allocation; the `ispe` check is necessary and not sufficient.
+
+If libvips is the fallback, set its pixel limit from the same 16,777,216 product before load. The exact libvips call was not executed here, so that fallback also needs the allocation counter before it can claim the same property.
 
 ### How to close the AVIF gap
 

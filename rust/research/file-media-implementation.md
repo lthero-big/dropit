@@ -18,8 +18,8 @@ Do not start with libvips. The measured Sharp prebuild cannot encode HEVC, and t
 4. Implement the upload session tables already defined in migration 8. Preserve the immediate-transaction reservation, the frozen chunk size, and the "complete failure deletes the session" rule.
 5. Implement download and Range with `parseByteRange` semantics, including "malformed Range means 200 of the whole file".
 6. Implement sniffing as a direct port of `media.ts`. Unit-test the magic bytes without an image crate.
-7. Implement thumbnail and preview for JPEG, PNG, GIF, and WebP. Check `width * height` before full decode. If the product is greater than 16,777,216, return `415 INVALID_IMAGE` and store nothing.
-8. Add AVIF decode before calling the migration compatible. Enable `image` feature `avif-native` and run E10, E12, and F12. If that decode fails, follow the libvips path in `file-media-dependencies.md` and probe the distro codecs. A temporary `415` is an open gap, not the acceptance target.
+7. Implement thumbnail and preview for JPEG, PNG, GIF, and WebP. Read dimensions from the still decoder and, if `width * height` is greater than 16,777,216, return `415 INVALID_IMAGE` before `read_image`. Store nothing.
+8. Add AVIF decode before calling the migration compatible. Do not use `ImageReader` or `AvifDecoder::new` for it. Follow the header-then-dav1d order in `file-media-dependencies.md`: `ispe` product check, then `dav1d::Settings::set_frame_size_limit(16_777_216)`, then decode. Run E10, E12, E13, and F12. If `F-AVIF-8x4` still fails, use the libvips path and probe the distro codecs before load. A temporary `415` on a valid 8x4 AVIF is an open gap, not the acceptance target.
 9. Keep legacy SVG and HTML download-only. Apply the SVG prefix regex only on session complete. A valid PNG that contains `<svg/>` is a thumbnail on the legacy route and `415` on session complete.
 10. Run the case list below against the Rust process. Where a case needs a derived image, also run it against the TypeScript server on an isolated port and compare the observable fields, not the WebP bytes. Every row names the input that makes its expected status unique.
 
@@ -60,6 +60,7 @@ Store generated fixtures under the Rust crate's test data once implementation st
 | `F-WEBP-8x4` | lossless WebP, 8x4 | sniff and preview |
 | `F-GIF-STILL` | one-frame GIF, 48x24, solid red | F1 still-GIF preview |
 | `F-AVIF-8x4` | 8-bit AVIF, 8x4, `ftypavif`, produced by Sharp `.avif()` on a solid 8x4 image | final target: 201, thumbnail, preview 8x4 |
+| `F-AVIF-4097` | 8-bit AVIF whose `ispe` and AV1 frame header both say 4097x4097, generated in the test process | pixel ceiling before native picture allocation, `415` |
 | `F-AVIF-STORED` | schema-19 row whose `fileKey` is `F-AVIF-8x4` and whose `thumbnailKey` is the WebP the TypeScript server stored for it | historical download, thumbnail, and preview after migration |
 | `F-SVG` | `<svg onload="alert(1)"></svg>` and `<svg/>` | policy split between routes |
 | `F-HTML` | `<html><script>alert(1)</script></html>` | download-only, media 404 |
@@ -175,6 +176,7 @@ Share media with `access` and `Range: bytes=-4` is 206 and does not change the v
 | E8c | session complete | the same PNG-plus-`<svg/>` bytes, declared `image/png` | 415 `INVALID_IMAGE`, no item, reservation 0 |
 | E9 | legacy POST | `F-PNG-500x400` with `Content-Type: image/png` | 201, thumbnail `image/webp`, width 320, height 256, thumbnail `Cache-Control: no-store` |
 | E10 | legacy POST and session complete | `F-AVIF-8x4` with `Content-Type: image/avif` | final target: 201, `hasThumbnail=true`, thumbnail 200, preview 200 at 8x4. TypeScript on this host already does that. A Rust slice that returns 415 has not finished AVIF decode |
+| E13 | legacy POST and session complete | `F-AVIF-4097` with `Content-Type: image/avif` | 415 `INVALID_IMAGE`, no item, reservation 0, temporary file removed. The rejection must be visible before dav1d picture allocation. A counting allocator or allocation counter is the evidence. Until that counter runs, this timing is unverified. A second fixture with a small `ispe` and a 4097x4097 AV1 frame header has the same expected result |
 | E11 | legacy POST | TIFF, if a fixture is added | 201 download-only if MIME is `image/tiff` or octet-stream. 415 if a future change adds `image/tiff` to the declared-MIME list. Current code does neither sniff nor list it, so download-only is the compatible result |
 | E12 | already stored `F-AVIF-STORED` | GET download, thumbnail, and preview | download 200 equals the original AVIF bytes; thumbnail 200 equals the stored WebP and does not re-encode; preview 200 `image/webp` at 8x4. A missing decoder must not turn a stored thumbnail into 404 |
 
@@ -220,5 +222,5 @@ F12 is part of final acceptance. A slice that still returns 415 from E10 cannot 
 
 - Exact commit, Rust toolchain, and `cargo test` output.
 - The TypeScript comparison command and the fixture ids that were compared.
-- A short gap list that is still open: HEIC, lossy WebP bytes, and any GIF disposal case not covered by `F-GIF-2FRAME`. AVIF is closed only when E10, E12, and F12 pass. A 415 on those cases is an open gap, not a pass.
+- A short gap list that is still open: HEIC, lossy WebP bytes, and any GIF disposal case not covered by `F-GIF-2FRAME`. AVIF is closed only when E10, E12, E13, and F12 pass. A 415 on E10 or F12 is an open gap. E13's 415 is a pass only with the allocation-counter evidence.
 - Confirmation that no production database or `DATA_DIR` was opened.
