@@ -40,6 +40,18 @@ The parent issue's children are the live ownership/status records. Each child ha
 
 Each task starts from the accepted first-wave baseline and can be verified independently. The two server tasks may add minimal route registration and Cargo features in their own PRs. Preserve existing shared authentication/state APIs, and coordinate any required interface change. The coordinator resolves shared registration/dependency edits during integration and reruns the relevant checks.
 
+RHEA-231 passed its second independent review on head `aaaa1190cceca49facf86813a7f5fd980dba013b`. PR #77 was merged as `8eadad49a2e1ed4cd720d6bc95f8990c039ffd7c`. The coordinator reran Rust 1.94 fmt, strict locked clippy and locked tests: 3 download unit tests, 228 real TS/Rust file HTTP responses and the existing 199 login/text responses passed. This covers existing private-space downloads, stored thumbnails, MIME-sniffed media, GET/HEAD Range including padded numbers and unsafe-integer boundaries, authorization and file release after a client abort.
+
+The fixture records two response-framing differences (Content-Length on empty 416/JSON errors) and the missing-object behavior (TS drops the download socket; Rust returns JSON 404). These remain explicit compatibility exceptions. Image generation, upload, rooms, shares and bearer access are outside RHEA-231. RHEA-230 and RHEA-232 continue under their existing owners and review rules.
+
+## Third wave
+
+| Work | Owner | Main paths | Independent acceptance |
+| --- | --- | --- | --- |
+| RHEA-233: private-space direct upload, image preview and file retraction | DE代码高手-grok | Separate upload/image modules and fixture/tests; minimal route/DB integration | Real TS/Rust upload-download-delete flow, derived-image dimensions/orientation/metadata/AVIF limits, authorization, quotas and cleanup |
+
+RHEA-233 starts from the accepted #77 integration and implements the next file behavior from the reviewed #75 plan. It can be validated using the existing cookie-authenticated HTTP service, so it does not wait for the other second-wave tasks or their human `done` state. Preserve the pending realtime owner's modules; reuse an integrated event interface where available, and identify any file-event hookup for coordinator integration. Chunked/resumable upload remains a subsequent behavior. Full authentication/machine access and rooms/shares are next coordination priorities once the relevant owners finish their current work.
+
 ## Remaining work
 
 Continue with full authentication/machine access, first-run and historical database upgrades, spaces/rooms/permissions, organization/sharing, uploads/image generation, runtime administration and complete data/client/container acceptance. Refine each next task against the latest accepted implementation.
