@@ -5,7 +5,11 @@
 //! cookies or logs; only SHA-256 digests of session/OAuth flow values reach
 //! SQLite.
 
-use std::{collections::HashMap, env};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    time::Duration,
+};
 
 use axum::{
     Extension, Json,
@@ -189,6 +193,46 @@ fn oauth_error(app: &crate::StateData, context: &RequestContext, code: &str) -> 
     redirect(format!("{}/login?error={code}", origin(app, context)))
 }
 
+fn oauth_failure(
+    app: &crate::StateData,
+    context: &RequestContext,
+    linking: bool,
+    code: &str,
+) -> Response {
+    let mut response = if linking {
+        redirect(format!(
+            "{}/settings?link_error={code}#login-methods",
+            origin(app, context)
+        ))
+    } else {
+        oauth_error(app, context, code)
+    };
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
+    response
+}
+
+fn oauth_error_code(error: &ApiError) -> &'static str {
+    match error.code {
+        "OAUTH_STATE_INVALID"
+        | "OAUTH_DENIED"
+        | "OAUTH_PROVIDER_ERROR"
+        | "INVITE_INVALID"
+        | "INVITATION_REQUIRED"
+        | "USER_DISABLED"
+        | "VERIFIED_EMAIL_REQUIRED"
+        | "ACCOUNT_EXISTS"
+        | "IDENTITY_IN_USE"
+        | "PROVIDER_ALREADY_LINKED"
+        | "UNAUTHENTICATED"
+        | "REGISTRATION_CLOSED"
+        | "INVITE_NEEDS_ACCOUNT"
+        | "RATE_LIMITED" => error.code,
+        _ => "INTERNAL_ERROR",
+    }
+}
+
 fn provider_supported(provider: &str) -> bool {
     matches!(provider, "github" | "google")
 }
@@ -325,6 +369,7 @@ async fn exchange(
     let (_, token_url, profile_url, emails_url) = oauth_urls(&app.provider)?;
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(10))
         .build()
         .map_err(ApiError::internal)?;
     let token = client
@@ -452,7 +497,14 @@ pub async fn oauth_start(
     Path(provider): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> ApiResult<Response> {
-    app.limit("auth", &context.ip, app.config.rate_auth)?;
+    if let Err(error) = app.limit("auth", &context.ip, app.config.rate_auth) {
+        return Ok(oauth_failure(
+            &app,
+            &context,
+            false,
+            oauth_error_code(&error),
+        ));
+    }
     let Some(oauth) = oauth_app(&app, &provider).await? else {
         return Err(ApiError::new(404, "PROVIDER_UNAVAILABLE"));
     };
@@ -516,19 +568,27 @@ pub async fn oauth_callback(
     Query(query): Query<HashMap<String, String>>,
     request: axum::extract::Request,
 ) -> ApiResult<Response> {
+    if let Err(error) = app.limit("auth", &context.ip, app.config.rate_auth) {
+        return Ok(oauth_failure(
+            &app,
+            &context,
+            false,
+            oauth_error_code(&error),
+        ));
+    }
     let flow_cookie = flow_cookie_from_request(&context, request.headers());
     let state = query.get("state").cloned();
     let Some(oauth) = oauth_app(&app, &provider).await? else {
-        return Ok(oauth_error(&app, &context, "PROVIDER_UNAVAILABLE"));
+        return Ok(oauth_failure(&app, &context, false, "OAUTH_PROVIDER_ERROR"));
     };
     if !oauth.enabled {
-        return Ok(oauth_error(&app, &context, "PROVIDER_UNAVAILABLE"));
+        return Ok(oauth_failure(&app, &context, false, "OAUTH_PROVIDER_ERROR"));
     }
     let Some(state) = state else {
-        return Ok(oauth_error(&app, &context, "OAUTH_STATE_INVALID"));
+        return Ok(oauth_failure(&app, &context, false, "OAUTH_STATE_INVALID"));
     };
     let Some(browser_raw) = flow_cookie else {
-        return Ok(oauth_error(&app, &context, "OAUTH_STATE_INVALID"));
+        return Ok(oauth_failure(&app, &context, false, "OAUTH_STATE_INVALID"));
     };
     let state_hash = password::hash(&state);
     let browser_hash = password::hash(&browser_raw);
@@ -538,32 +598,32 @@ pub async fn oauth_callback(
         let flow = tx.query_row("SELECT stateHash,browserHash,provider,verifier,inviteHash,expiresAt,linkUserId FROM flows WHERE stateHash=? AND browserHash=? AND provider=? AND expiresAt>?",
             params![state_hash, browser_hash, provider_for_db, now()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, i64>(5)?, row.get::<_, Option<String>>(6)?))).optional()?;
         if flow.is_some() { tx.execute("DELETE FROM flows WHERE stateHash=?", [state_hash])?; }
+        tx.commit()?;
         Ok(flow)
     }).await?;
     let Some((_, _, _, verifier, invite_hash, _, link_user_id)) = flow else {
-        return Ok(oauth_error(&app, &context, "OAUTH_STATE_INVALID"));
+        return Ok(oauth_failure(&app, &context, false, "OAUTH_STATE_INVALID"));
     };
     let mut response = redirect(format!("{}/", origin(&app, &context)));
     response
         .headers_mut()
         .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
     if query.contains_key("error") || !query.contains_key("code") {
-        return Ok(if link_user_id.is_some() {
-            let mut r = redirect(format!(
-                "{}/settings?link_error=OAUTH_DENIED#login-methods",
-                origin(&app, &context)
-            ));
-            r.headers_mut()
-                .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
-            r
-        } else {
-            oauth_error(&app, &context, "OAUTH_DENIED")
-        });
+        return Ok(oauth_failure(
+            &app,
+            &context,
+            link_user_id.is_some(),
+            "OAUTH_DENIED",
+        ));
     }
-    let code = query
-        .get("code")
-        .filter(|v| v.len() <= 4096)
-        .ok_or(ApiError::new(400, "OAUTH_DENIED"))?;
+    let Some(code) = query.get("code").filter(|v| v.len() <= 4096) else {
+        return Ok(oauth_failure(
+            &app,
+            &context,
+            link_user_id.is_some(),
+            "OAUTH_DENIED",
+        ));
+    };
     let identity = match exchange(
         &oauth,
         code,
@@ -574,29 +634,38 @@ pub async fn oauth_callback(
     {
         Ok(identity) => identity,
         Err(_) => {
-            return Ok(if link_user_id.is_some() {
-                let mut r = redirect(format!(
-                    "{}/settings?link_error=OAUTH_PROVIDER_ERROR#login-methods",
-                    origin(&app, &context)
-                ));
-                r.headers_mut()
-                    .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
-                r
-            } else {
-                oauth_error(&app, &context, "OAUTH_PROVIDER_ERROR")
-            });
+            return Ok(oauth_failure(
+                &app,
+                &context,
+                link_user_id.is_some(),
+                "OAUTH_PROVIDER_ERROR",
+            ));
         }
     };
     if let Some(user_id) = link_user_id {
-        let current = browser(&context)?;
+        let current = match browser(&context) {
+            Ok(current) => current,
+            Err(_) => return Ok(oauth_failure(&app, &context, true, "UNAUTHENTICATED")),
+        };
         if current.account.user.id != user_id {
-            return Ok(oauth_error(&app, &context, "UNAUTHENTICATED"));
+            return Ok(oauth_failure(&app, &context, true, "UNAUTHENTICATED"));
         }
         let identity_for_db = identity.clone();
-        let result = app
+        let result = match app
             .db
             .run(move |db| link_identity(db, &user_id, &identity_for_db, now()))
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return Ok(oauth_failure(
+                    &app,
+                    &context,
+                    true,
+                    oauth_error_code(&error),
+                ));
+            }
+        };
         let suffix = if result {
             String::new()
         } else {
@@ -625,7 +694,7 @@ pub async fn oauth_callback(
         .collect::<Vec<_>>();
     let identity_for_db = identity.clone();
     let session_ms = app.config.session;
-    let _account = app
+    let _account = match app
         .db
         .run(move |db| {
             oauth_login(
@@ -640,7 +709,18 @@ pub async fn oauth_callback(
                 &ip,
             )
         })
-        .await?;
+        .await
+    {
+        Ok(account) => account,
+        Err(error) => {
+            return Ok(oauth_failure(
+                &app,
+                &context,
+                false,
+                oauth_error_code(&error),
+            ));
+        }
+    };
     let session_cookie = set_cookie(context.secure_cookie, &token, app.config.session / 1000);
     response.headers_mut().append(
         header::SET_COOKIE,
@@ -937,23 +1017,28 @@ fn oauth_login(
         )?;
     }
     if user_id.is_none() {
-        user_id = tx
+        let pending = tx
             .query_row(
-                "SELECT id FROM users WHERE pending=1 AND lower(email)=lower(?)",
+                "SELECT id,disabled FROM users WHERE pending=1 AND lower(email)=lower(?)",
                 [&identity.email],
-                |row| row.get(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
             )
             .optional()?;
-        if let Some(id) = user_id.as_deref() {
-            tx.execute("UPDATE users SET pending=0 WHERE id=?", [id])?;
+        if let Some((id, disabled)) = pending {
+            if disabled {
+                return Err(ApiError::new(403, "USER_DISABLED"));
+            }
+            user_id = Some(id.clone());
+            tx.execute("UPDATE users SET pending=0 WHERE id=?", [&id])?;
             tx.execute("INSERT INTO identities (provider,subject,userId,email,linkedAt) VALUES (?,?,?,?,?)", params![identity.provider, identity.subject, id, identity.email, time])?;
         }
     }
+    let first = tx.query_row("SELECT count(*) FROM users", [], |row| row.get::<_, i64>(0))? == 0;
     let invite_row = invite_hash
         .map(|hash| invite(&tx, hash, time))
         .transpose()?
         .flatten();
-    if invite_hash.is_some() && invite_row.is_none() {
+    if invite_hash.is_some() && invite_row.is_none() && !first {
         return Err(ApiError::new(403, "INVITE_INVALID"));
     }
     if user_id.is_none() {
@@ -965,8 +1050,6 @@ fn oauth_login(
                 ApiError::new(409, "ACCOUNT_EXISTS")
             });
         }
-        let first =
-            tx.query_row("SELECT count(*) FROM users", [], |row| row.get::<_, i64>(0))? == 0;
         let listed = admins.iter().any(|email| email == &identity.email);
         let policy = db::setting(&tx, "registration")?.unwrap_or_else(|| "invite".into());
         if !first && !listed && policy == "closed" {
@@ -978,7 +1061,9 @@ fn oauth_login(
         if !first
             && !listed
             && policy != "open"
-            && invite_row.is_some_and(|(_, _, join, admin, _)| join || !admin)
+            && invite_row
+                .as_ref()
+                .is_some_and(|(_, _, join, admin, _)| *join || !*admin)
         {
             return Err(ApiError::new(403, "INVITE_NEEDS_ACCOUNT"));
         }
@@ -998,7 +1083,9 @@ fn oauth_login(
         user_id = Some(id);
         created = true;
     }
-    if let Some(hash) = invite_hash {
+    if let Some(hash) = invite_hash
+        && invite_row.is_some()
+    {
         spend_invite(&tx, hash, user_id.as_deref().unwrap(), time, created)?;
     }
     tx.execute("INSERT INTO sessions (sessionHash,userId,expiresAt,id,createdAt,lastSeenAt,userAgent,ipSummary) VALUES (?,?,?, ?,?,?,?,?)", params![session_hash, user_id.as_deref().unwrap(), expires, Uuid::new_v4().to_string(), time, time, user_agent, ip])?;
@@ -1040,6 +1127,15 @@ fn link_identity(
     }
     if owner.is_some() {
         return Err(ApiError::new(409, "IDENTITY_IN_USE"));
+    }
+    let disabled: bool = tx
+        .query_row("SELECT disabled FROM users WHERE id=?", [user_id], |row| {
+            row.get(0)
+        })
+        .optional()?
+        .ok_or(ApiError::UNAUTHENTICATED)?;
+    if disabled {
+        return Err(ApiError::new(403, "USER_DISABLED"));
     }
     if tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM identities WHERE userId=? AND provider=?)",
@@ -1114,9 +1210,16 @@ pub async fn identities(
     let auth = browser(&context)?;
     let id = auth.account.user.id.clone();
     let values = app.db.run(move |db| linked_identities(db, &id)).await?;
-    Ok(Json(
-        json!({"identities": values, "available": ["github", "google"]}),
-    ))
+    let mut available = Vec::new();
+    for provider in ["github", "google"] {
+        if oauth_app(&app, provider)
+            .await?
+            .is_some_and(|app| app.enabled)
+        {
+            available.push(provider);
+        }
+    }
+    Ok(Json(json!({"identities": values, "available": available})))
 }
 
 pub async fn unlink_identity(
@@ -1162,6 +1265,25 @@ pub async fn unlink_identity(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn secret_hint(secret: &str) -> Option<String> {
+    if secret.is_empty() {
+        return None;
+    }
+    let suffix: String = secret
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    Some(if secret.chars().count() >= 16 {
+        format!("••••••••{suffix}")
+    } else {
+        "••••••••".into()
+    })
+}
+
 fn view_oauth(app: &crate::StateData, rows: Vec<OAuthApp>, context: &RequestContext) -> Value {
     let origin = origin(app, context);
     Value::Array(rows.into_iter().map(|app| json!({
@@ -1176,7 +1298,7 @@ fn view_oauth(app: &crate::StateData, rows: Vec<OAuthApp>, context: &RequestCont
         "active": app.enabled && !app.client_id.is_empty() && !app.client_secret.is_empty(),
         "clientId": app.client_id,
         "secretSet": !app.client_secret.is_empty(),
-        "secretHint": if app.client_secret.is_empty() { Value::Null } else if app.client_secret.len() >= 16 { format!("••••••••{}", &app.client_secret[app.client_secret.len()-4..]).into() } else { "••••••••".into() },
+        "secretHint": secret_hint(&app.client_secret),
         "envConfigured": oauth_env(&app.provider, "CLIENT_ID").is_some() && oauth_env(&app.provider, "CLIENT_SECRET").is_some(),
         "updatedAt": app.updated_at,
         "check": app.checked_at.map(|at| json!({"at": at, "ok": app.check_ok, "code": app.check_code})),
@@ -1288,7 +1410,10 @@ pub async fn verify_oauth(
         return Err(ApiError::new(400, "PROVIDER_UNAVAILABLE"));
     };
     let (_, token_url, _, _) = oauth_urls(&provider)?;
-    let code = match Client::new()
+    let code = match Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(ApiError::internal)?
         .post(token_url)
         .header("Accept", "application/json")
         .form(&[
@@ -1310,14 +1435,15 @@ pub async fn verify_oauth(
     {
         Ok(response) => {
             let body: Value = response.json().await.unwrap_or_default();
-            if body.get("error").and_then(Value::as_str) == Some("invalid_grant")
-                || body.get("error").and_then(Value::as_str) == Some("bad_verification_code")
-            {
-                (true, "CREDENTIALS_OK")
-            } else if body.get("error").is_some() {
-                (false, "INVALID_CLIENT")
-            } else {
-                (false, "UNEXPECTED_RESPONSE")
+            match body.get("error").and_then(Value::as_str) {
+                Some("invalid_grant") | Some("bad_verification_code") => (true, "CREDENTIALS_OK"),
+                Some("redirect_uri_mismatch") => (false, "REDIRECT_MISMATCH"),
+                Some("invalid_request") if provider == "google" => (false, "REDIRECT_NOT_ALLOWED"),
+                Some("incorrect_client_credentials")
+                | Some("invalid_client")
+                | Some("unauthorized_client") => (false, "INVALID_CLIENT"),
+                Some(_) => (false, "UNEXPECTED_RESPONSE"),
+                None => (false, "UNEXPECTED_RESPONSE"),
             }
         }
         Err(_) => (false, "PROVIDER_UNREACHABLE"),
@@ -1337,14 +1463,45 @@ pub async fn verify_oauth(
     ))
 }
 
-fn session_value(row: &Row<'_>, current: Option<&str>) -> rusqlite::Result<Value> {
+fn describe_agent(user_agent: Option<&str>) -> (&'static str, &'static str) {
+    let user_agent = user_agent.unwrap_or_default();
+    let browser = if user_agent.contains("Firefox") {
+        "Firefox"
+    } else if user_agent.contains("Chrome") {
+        "Chrome"
+    } else if user_agent.contains("Safari") {
+        "Safari"
+    } else if user_agent.contains("curl") {
+        "curl"
+    } else {
+        "Unknown"
+    };
+    let os = if user_agent.contains("Android") {
+        "Android"
+    } else if user_agent.contains("iPhone") || user_agent.contains("iPad") {
+        "iOS"
+    } else if user_agent.contains("Windows") {
+        "Windows"
+    } else if user_agent.contains("Mac OS") {
+        "macOS"
+    } else if user_agent.contains("Linux") {
+        "Linux"
+    } else {
+        "Unknown"
+    };
+    (browser, os)
+}
+
+fn session_value(row: &Row<'_>, current: Option<&str>, online: bool) -> rusqlite::Result<Value> {
     let id: String = row.get("id")?;
+    let session_hash: String = row.get("sessionHash")?;
     let device_id: Option<String> = row.get("deviceId")?;
     let device_name: Option<String> = row.get("deviceName")?;
     let device_kind: Option<String> = row.get("deviceKind")?;
     let device = device_id.map(|id| json!({"id": id, "name": device_name.unwrap_or_else(|| "未命名设备".into()), "kind": device_kind.unwrap_or_else(|| "pc".into())}));
+    let (browser, os) = describe_agent(row.get::<_, Option<String>>("userAgent")?.as_deref());
     Ok(
-        json!({"id": id, "current": current == Some(id.as_str()), "online": false, "createdAt": row.get::<_, Option<i64>>("createdAt")?, "lastSeenAt": row.get::<_, Option<i64>>("lastSeenAt")?, "expiresAt": row.get::<_, i64>("expiresAt")?, "ipSummary": row.get::<_, Option<String>>("ipSummary")?, "browser": "Unknown", "os": "Unknown", "device": device}),
+        json!({"id": id, "current": current == Some(id.as_str()), "online": online && !session_hash.is_empty(), "createdAt": row.get::<_, Option<i64>>("createdAt")?, "lastSeenAt": row.get::<_, Option<i64>>("lastSeenAt")?, "expiresAt": row.get::<_, i64>("expiresAt")?, "ipSummary": row.get::<_, Option<String>>("ipSummary")?, "browser": browser, "os": os, "device": device}),
     )
 }
 
@@ -1353,7 +1510,8 @@ async fn list_sessions(
     user_id: String,
     current: Option<String>,
 ) -> ApiResult<Vec<Value>> {
-    app.db.run(move |db| { let mut stmt = db.prepare("SELECT id,createdAt,lastSeenAt,expiresAt,ipSummary,deviceId,deviceName,deviceKind FROM sessions WHERE userId=? AND expiresAt>? ORDER BY coalesce(lastSeenAt,createdAt,0) DESC,id")?; Ok(stmt.query_map(params![user_id, now()], |row| session_value(row, current.as_deref()))?.collect::<rusqlite::Result<Vec<_>>>()?) }).await
+    let online: HashSet<String> = app.realtime.online_sessions(&user_id);
+    app.db.run(move |db| { let mut stmt = db.prepare("SELECT id,sessionHash,createdAt,lastSeenAt,expiresAt,ipSummary,userAgent,deviceId,deviceName,deviceKind FROM sessions WHERE userId=? AND expiresAt>? ORDER BY coalesce(lastSeenAt,createdAt,0) DESC,id")?; Ok(stmt.query_map(params![user_id, now()], |row| { let session_hash: String = row.get("sessionHash")?; session_value(row, current.as_deref(), online.contains(&session_hash)) })?.collect::<rusqlite::Result<Vec<_>>>()?) }).await
 }
 
 pub async fn sessions(
@@ -1738,6 +1896,42 @@ fn invite_view(row: &Row<'_>, kind: &str, token: Option<&str>) -> rusqlite::Resu
     Ok(value)
 }
 
+fn invite_status(
+    uses: i64,
+    max_uses: i64,
+    expires_at: i64,
+    revoked: i64,
+    time: i64,
+) -> &'static str {
+    if revoked != 0 {
+        "revoked"
+    } else if uses >= max_uses {
+        "exhausted"
+    } else if expires_at <= time {
+        "expired"
+    } else {
+        "active"
+    }
+}
+
+fn admin_invite_view(row: &Row<'_>) -> rusqlite::Result<Value> {
+    let uses: i64 = row.get(3)?;
+    let max_uses: i64 = row.get(2)?;
+    let expires_at: i64 = row.get(4)?;
+    let revoked: i64 = row.get(5)?;
+    let join_space: i64 = row.get(7)?;
+    let creator_role: Option<String> = row.get(11)?;
+    Ok(json!({
+        "id": row.get::<_, String>(0)?, "spaceId": row.get::<_, String>(1)?, "maxUses": max_uses,
+        "uses": uses, "expiresAt": expires_at, "revoked": revoked != 0, "createdBy": row.get::<_, String>(6)?,
+        "joinSpace": join_space, "createdAt": row.get::<_, Option<i64>>(8)?, "role": row.get::<_, Option<String>>(9)?,
+        "createdByEmail": row.get::<_, Option<String>>(10)?, "creatorAdmin": creator_role.as_deref() == Some("admin"),
+        "kind": if join_space == 0 { "registration" } else { "space" },
+        "status": invite_status(uses, max_uses, expires_at, revoked, now()),
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn create_invite_for(
     app: &App,
     creator: &Auth,
@@ -1745,6 +1939,7 @@ async fn create_invite_for(
     max_uses: i64,
     hours: i64,
     role: Option<&str>,
+    space_id: Option<String>,
     origin: String,
 ) -> ApiResult<Value> {
     let raw = random_token()?;
@@ -1753,7 +1948,14 @@ async fn create_invite_for(
     let role = role.map(str::to_owned);
     let raw_for_db = raw.clone();
     let value = app.db.run(move |db| {
-        let space: String = db.query_row("SELECT id FROM spaces WHERE ownerId=? AND roomKey IS NULL LIMIT 1", [&creator_id], |row| row.get(0)).optional()?.ok_or(ApiError::NOT_FOUND)?;
+        let space = match space_id {
+            Some(space) => {
+                let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM spaces WHERE id=? AND roomKey IS NULL)", [&space], |row| row.get(0))?;
+                if !exists { return Err(ApiError::NOT_FOUND); }
+                space
+            }
+            None => db.query_row("SELECT id FROM spaces WHERE ownerId=? AND roomKey IS NULL LIMIT 1", [&creator_id], |row| row.get(0)).optional()?.ok_or(ApiError::NOT_FOUND)?,
+        };
         let id = Uuid::new_v4().to_string();
         let now = now();
         db.execute("INSERT INTO invites (id,tokenHash,spaceId,maxUses,uses,expiresAt,revoked,createdBy,joinSpace,createdAt,role) VALUES (?,?,?, ?,0,?,0,?,?,?,?)", params![id, token_hash, space, max_uses, now+hours*3_600_000, creator_id, if registration { 0 } else { 1 }, now, role])?;
@@ -1773,7 +1975,10 @@ pub async fn admin_invites(
     Extension(context): Extension<RequestContext>,
 ) -> ApiResult<Json<Value>> {
     let auth = admin(&context)?;
-    let values = app.db.run(|db| { let mut stmt = db.prepare("SELECT id,spaceId,maxUses,uses,expiresAt,revoked,createdBy,joinSpace,createdAt,role FROM invites ORDER BY expiresAt DESC")?; Ok(stmt.query_map([], |row| invite_view(row, if row.get::<_,i64>(7)? == 0 { "registration" } else { "space" }, None))?.collect::<rusqlite::Result<Vec<_>>>()?) }).await?;
+    let values = app.db.run(|db| {
+        let mut stmt = db.prepare("SELECT i.id,i.spaceId,i.maxUses,i.uses,i.expiresAt,i.revoked,i.createdBy,i.joinSpace,i.createdAt,i.role,u.email,u.role FROM invites i LEFT JOIN users u ON u.id=i.createdBy ORDER BY i.expiresAt DESC")?;
+        Ok(stmt.query_map([], admin_invite_view)?.collect::<rusqlite::Result<Vec<_>>>()?)
+    }).await?;
     let _ = auth;
     Ok(Json(json!({"invites":values})))
 }
@@ -1797,13 +2002,27 @@ pub async fn create_admin_invite(
     {
         return Err(ApiError::INVALID_INPUT);
     }
+    let space_id = if kind == "space" {
+        Some(input_string(body.get("spaceId"), 64)?.to_owned())
+    } else {
+        None
+    };
+    let role = if kind == "space" {
+        match body.get("role").and_then(Value::as_str).unwrap_or("editor") {
+            "viewer" | "editor" => body.get("role").and_then(Value::as_str),
+            _ => return Err(ApiError::INVALID_INPUT),
+        }
+    } else {
+        None
+    };
     let invite = create_invite_for(
         &app,
         &auth,
         kind == "registration",
         max,
         hours,
-        None,
+        role,
+        space_id,
         origin(&app, &context),
     )
     .await?;
@@ -1829,17 +2048,29 @@ pub async fn create_personal_invite(
 ) -> ApiResult<impl IntoResponse> {
     let auth = admin(&context)?;
     let body = read_json(request, 1024).await?;
-    let max = body.get("maxUses").and_then(Value::as_i64).unwrap_or(1);
+    let max = 1;
     let hours = body
         .get("expiresInHours")
         .and_then(Value::as_i64)
         .unwrap_or(168);
-    if !(1..=100).contains(&max) || !(1..=720).contains(&hours) {
+    if !(1..=720).contains(&hours) {
         return Err(ApiError::INVALID_INPUT);
     }
     Ok((
         StatusCode::CREATED,
-        Json(create_invite_for(&app, &auth, true, max, hours, None, origin(&app, &context)).await?),
+        Json(
+            create_invite_for(
+                &app,
+                &auth,
+                true,
+                max,
+                hours,
+                None,
+                None,
+                origin(&app, &context),
+            )
+            .await?,
+        ),
     ))
 }
 

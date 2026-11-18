@@ -41,6 +41,7 @@ struct Connection {
     space: String,
     ip: String,
     user: String,
+    session_hash: Option<String>,
     bearer: Option<String>,
     device: Option<Device>,
     active: bool,
@@ -74,6 +75,7 @@ impl Realtime {
         space: String,
         ip: String,
         user: String,
+        session_hash: Option<String>,
         bearer: Option<String>,
         device: Option<Device>,
     ) -> ApiResult<Subscription> {
@@ -94,6 +96,7 @@ impl Realtime {
                 space,
                 ip,
                 user,
+                session_hash,
                 bearer,
                 device,
                 sender,
@@ -121,6 +124,17 @@ impl Realtime {
                 let _ = connection.close.send(true);
             }
         }
+    }
+
+    pub fn online_sessions(&self, user_id: &str) -> std::collections::HashSet<String> {
+        self.hub
+            .lock()
+            .unwrap()
+            .connections
+            .values()
+            .filter(|connection| connection.user == user_id && connection.active)
+            .filter_map(|connection| connection.session_hash.clone())
+            .collect()
     }
 
     pub fn close_all(&self) {
@@ -214,6 +228,7 @@ pub async fn websocket(
     }
     let Path(space) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let user = auth.account.user.id.clone();
+    let session_hash = (!auth.session_hash.is_empty()).then(|| auth.session_hash.clone());
     let bearer = auth.bearer.as_ref().map(|bearer| bearer.id.clone());
     let scope = space.clone();
     let id = user.clone();
@@ -226,6 +241,7 @@ pub async fn websocket(
         space.clone(),
         context.ip,
         user.clone(),
+        session_hash,
         bearer.clone(),
         device.clone(),
     )?;
@@ -295,12 +311,16 @@ pub async fn room_websocket(
         .as_ref()
         .and_then(|auth| auth.bearer.as_ref())
         .map(|bearer| bearer.id.clone());
+    let session_hash = auth
+        .as_ref()
+        .and_then(|auth| (!auth.session_hash.is_empty()).then(|| auth.session_hash.clone()));
     let device = parse_device(query.as_deref());
     let subscription = Realtime::subscribe(
         app.clone(),
         room_space.id,
         context.ip,
         user.clone(),
+        session_hash,
         bearer.clone(),
         device,
     )?;
@@ -587,6 +607,7 @@ mod tests {
                 close,
                 space: "s".into(),
                 user: "u".into(),
+                session_hash: None,
                 bearer: None,
                 ip: "i".into(),
                 device: None,
