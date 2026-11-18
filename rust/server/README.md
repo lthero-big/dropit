@@ -37,8 +37,10 @@ cargo test --locked -- --nocapture
 ~~~
 
 cargo test runs tests/http.rs, which launches tests/compat.mjs with the built Rust
-binary. The same harness can be invoked from the repository root with
-node rust/server/tests/compat.mjs. RUST_SERVER_BIN can select a release build.
+binary. It also runs tests/files-http.rs, which launches tests/files-compat.mjs.
+The same harnesses can be invoked from the repository root with
+node rust/server/tests/compat.mjs and node rust/server/tests/files-compat.mjs.
+RUST_SERVER_BIN can select a release build.
 
 The harness generates schema 19 using the original SqliteRepository,
 hashPasswordSync, ClipboardService and session creation code. Each implementation
@@ -164,13 +166,59 @@ justify a connection pool later.
 and [transaction behavior](https://docs.rs/rusqlite/0.37.0/rusqlite/enum.TransactionBehavior.html)
 describe the underlying API choices.
 
+## Existing file reads
+
+Private-space download, stored thumbnail, and media reads are in
+src/downloads.rs. The routes are GET and HEAD
+/api/spaces/:space/items/:id/download, /thumbnail, and /media. They reuse the
+existing cookie session, private-space membership, and expiresAt filter. A
+viewer may read. A temporary-password session still receives
+PASSWORD_CHANGE_REQUIRED. The file key comes from the item row, never from the
+client path.
+
+Download uses application/octet-stream and an attachment disposition. Media
+sniffs the stored prefix and sets Cache-Control: private, no-store. Thumbnail
+streams the stored WebP with Content-Type: image/webp and does not re-encode.
+Range follows parseByteRange: a single satisfiable range is 206, an
+unsatisfiable range is 416 with Content-Range: bytes */size, and an absent,
+malformed, or multi-range header is a full 200. HEAD returns the same status
+and headers with an empty body. Dropping the response body closes the file.
+
+cargo test also runs tests/files-http.rs. That test launches
+tests/files-compat.mjs with the built binary. The script archives the same
+fixed TS commit, generates a schema-19 fixture, inserts file rows, writes
+objects under files/, and compares status, the listed headers, and body bytes.
+The direct command from rust/server is:
+
+~~~sh
+cargo test --locked --test files-http -- --nocapture
+~~~
+
+On 2026-11-18 that comparison passed 180 HTTP responses. The cases cover
+download, thumbnail, and media for the seeded types, single and suffix ranges,
+out-of-bounds ranges, HEAD, anonymous, cross-account, viewer, temporary-password,
+empty filename, missing file key, expired records, and a client abort. After
+the abort, /proc/<pid>/fd no longer listed the stored file, /healthz stayed
+200, and a later bytes=0-1 read returned the first two stored bytes.
+
+A recorded file key whose disk object is missing makes the TS createReadStream
+path drop the socket. Rust returns the JSON 404. The harness records that
+difference and still requires the Rust 404. Hyper adds Content-Length: 0 on an
+empty 416 body, and Axum sets Content-Length on JSON errors. Hono leaves both
+unset. The compared bytes are empty or identical, and the harness normalizes
+those two length headers.
+
+Upload, chunked upload, preview, dynamic image re-encode, AVIF decode, share
+links, rooms, and PAT/bearer authentication remain outside this slice. An
+Authorization header still selects the unsupported bearer path.
+
 ## Coverage boundary
 
 OAuth, PAT/device-code authentication, registration/setup, password changes,
 session-management APIs, room APIs, WebSocket broadcasts/revocation, file and
-chunked uploads, downloads/Range/media, sharing, admin APIs, static web hosting,
-version/update endpoints and historical schema upgrades remain outside this
-slice. Unsupported routes return the existing JSON NOT_FOUND form. An
+chunked uploads, sharing, admin APIs, static web hosting, version/update
+endpoints and historical schema upgrades remain outside this slice.
+Unsupported routes return the existing JSON NOT_FOUND form. An
 Authorization header selects the unsupported bearer path and returns
 UNAUTHENTICATED with WWW-Authenticate instead of falling back to a cookie.
 
