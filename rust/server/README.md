@@ -179,10 +179,13 @@ client path.
 Download uses application/octet-stream and an attachment disposition. Media
 sniffs the stored prefix and sets Cache-Control: private, no-store. Thumbnail
 streams the stored WebP with Content-Type: image/webp and does not re-encode.
-Range follows parseByteRange: a single satisfiable range is 206, an
-unsatisfiable range is 416 with Content-Range: bytes */size, and an absent,
-malformed, or multi-range header is a full 200. HEAD returns the same status
-and headers with an empty body. Dropping the response body closes the file.
+Range follows parseByteRange. A single satisfiable range is 206. A start at or
+above the file size, including a non-safe integer that Number still compares as
+at least the size, is 416 with Content-Range: bytes */size. An absent,
+malformed, multi-range, or unsafe suffix header is a full 200. Leading zeros
+do not change the numeric value, so bytes=00000000000000000- is the whole file.
+HEAD returns the same status and headers with an empty body. Dropping the
+response body closes the file.
 
 cargo test also runs tests/files-http.rs. That test launches
 tests/files-compat.mjs with the built binary. The script archives the same
@@ -194,12 +197,13 @@ The direct command from rust/server is:
 cargo test --locked --test files-http -- --nocapture
 ~~~
 
-On 2026-11-18 that comparison passed 180 HTTP responses. The cases cover
+On 2026-11-18 that comparison passed 228 HTTP responses. The cases cover
 download, thumbnail, and media for the seeded types, single and suffix ranges,
-out-of-bounds ranges, HEAD, anonymous, cross-account, viewer, temporary-password,
-empty filename, missing file key, expired records, and a client abort. After
-the abort, /proc/<pid>/fd no longer listed the stored file, /healthz stayed
-200, and a later bytes=0-1 read returned the first two stored bytes.
+leading-zero ranges, ranges at and above the safe-integer limit, out-of-bounds
+ranges, HEAD, anonymous, cross-account, viewer, temporary-password, empty
+filename, missing file key, expired records, and a client abort. After the
+abort, /proc/<pid>/fd no longer listed the stored file, /healthz stayed 200,
+and a later bytes=0-1 read returned the first two stored bytes.
 
 A recorded file key whose disk object is missing makes the TS createReadStream
 path drop the socket. Rust returns the JSON 404. The harness records that

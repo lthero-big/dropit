@@ -75,45 +75,66 @@ pub fn parse_byte_range(header: Option<&str>, size: u64) -> RangeDecision {
         return RangeDecision::Unsatisfiable;
     }
     if start_text.is_empty() {
-        let Some(suffix) = safe_integer(end_text) else {
+        // `!Number.isSafeInteger(suffix) || suffix <= 0` ignores the range.
+        let Some(suffix) = js_number(end_text) else {
             return RangeDecision::Whole;
         };
-        if suffix == 0 {
+        if !is_safe_integer(suffix) || suffix == 0.0 {
             return RangeDecision::Whole;
         }
-        let length = suffix.min(size);
+        let length = (suffix as u64).min(size);
         return RangeDecision::Partial(ByteRange {
             start: size - length,
             end: size - 1,
         });
     }
-    let Some(start) = safe_integer(start_text) else {
+    // `Number.isSafeInteger(start)` fails for values at or above 2^53, but the
+    // following `start >= size` still selects unsatisfiable. Leading zeros do
+    // not change `Number(text)`.
+    let Some(start) = js_number(start_text) else {
         return RangeDecision::Whole;
     };
-    if start >= size {
-        return RangeDecision::Unsatisfiable;
+    if !is_safe_integer(start) || start < 0.0 || start >= size as f64 {
+        return if start >= size as f64 {
+            RangeDecision::Unsatisfiable
+        } else {
+            RangeDecision::Whole
+        };
     }
+    let start = start as u64;
     let end = if end_text.is_empty() {
         size - 1
     } else {
-        let Some(end) = safe_integer(end_text) else {
+        let Some(end) = js_number(end_text) else {
             return RangeDecision::Whole;
         };
-        if end < start {
+        if !is_safe_integer(end) || end < start as f64 {
             return RangeDecision::Unsatisfiable;
         }
-        end.min(size - 1)
+        (end as u64).min(size - 1)
     };
     RangeDecision::Partial(ByteRange { start, end })
 }
 
-/// JavaScript `Number.isSafeInteger` for a decimal digit string.
-fn safe_integer(text: &str) -> Option<u64> {
-    if text.is_empty() || text.len() > 16 {
+/// JavaScript `Number(text)` for a non-empty decimal digit string.
+///
+/// `Number` ignores leading zeros and rounds integers past the 53-bit mantissa.
+/// Overflow is `Infinity`. A string that is only zeros is zero.
+fn js_number(text: &str) -> Option<f64> {
+    if text.is_empty() || text.bytes().any(|byte| !byte.is_ascii_digit()) {
         return None;
     }
-    let value = text.parse::<u64>().ok()?;
-    (value < (1_u64 << 53)).then_some(value)
+    let digits = text.trim_start_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    Some(digits.parse::<f64>().unwrap_or(f64::INFINITY))
+}
+
+fn is_safe_integer(value: f64) -> bool {
+    if !value.is_finite() {
+        return false;
+    }
+    let truncated = value.trunc();
+    value.to_bits() == truncated.to_bits() && value.abs() < (1_u64 << 53) as f64
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -586,8 +607,44 @@ mod tests {
         );
         assert_eq!(parse_byte_range(Some("bytes=-0"), 10), RangeDecision::Whole);
         assert_eq!(
+            parse_byte_range(Some("bytes=9007199254740991-"), 10),
+            RangeDecision::Unsatisfiable
+        );
+        assert_eq!(
             parse_byte_range(Some("bytes=9007199254740992-"), 10),
+            RangeDecision::Unsatisfiable
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=00000000000000000-"), 10),
+            RangeDecision::Partial(ByteRange { start: 0, end: 9 })
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=-00000000000000001"), 10),
+            RangeDecision::Partial(ByteRange { start: 9, end: 9 })
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=00000000000000002-00000000000000004"), 10),
+            RangeDecision::Partial(ByteRange { start: 2, end: 4 })
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=00000000000000010-"), 10),
+            RangeDecision::Unsatisfiable
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=0009007199254740992-"), 10),
+            RangeDecision::Unsatisfiable
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=-0009007199254740992"), 10),
             RangeDecision::Whole
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=1-0009007199254740992"), 10),
+            RangeDecision::Unsatisfiable
+        );
+        assert_eq!(
+            parse_byte_range(Some("bytes=1-00000000000000004"), 10),
+            RangeDecision::Partial(ByteRange { start: 1, end: 4 })
         );
     }
 

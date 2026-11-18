@@ -252,7 +252,7 @@ try {
     }
     await compareAuth(path, {});
   }
-  const ranges = [undefined, 'bytes=2-5', 'bytes=7-', 'bytes=-3', 'bytes=8-99', 'bytes=10-', 'bytes=5-2', 'bytes=0-1,4-5', 'not-a-range', 'bytes=-0', 'bytes='];
+  const ranges = [undefined, 'bytes=2-5', 'bytes=7-', 'bytes=-3', 'bytes=8-99', 'bytes=10-', 'bytes=5-2', 'bytes=0-1,4-5', 'not-a-range', 'bytes=-0', 'bytes=', 'bytes=00000000000000000-', 'bytes=-00000000000000001', 'bytes=00000000000000002-00000000000000004', 'bytes=00000000000000010-', 'bytes=0009007199254740992-', 'bytes=-0009007199254740992'];
   for (const range of ranges) {
     const headers = range ? { range } : {};
     await compareAuth(`${space}/items/file-range/download`, { headers });
