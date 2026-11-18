@@ -40,7 +40,14 @@ async function start(kind, data, extra = {}) {
   child.stdout.on('data', b => output += b); child.stderr.on('data', b => output += b);
   for (let n = 0; n < 200; n++) {
     if (child.exitCode !== null || child.signalCode !== null) throw new Error(output);
-    if (output.includes('dropit listening on port')) return { url: `http://127.0.0.1:${port}`, child, data };
+    if (output.includes('dropit listening on port')) {
+      // The TS entry point logs before Node's actual listen callback.
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/healthz`, {signal:AbortSignal.timeout(1000)});
+        await response.text();
+        if (response.status === 200) return { url: `http://127.0.0.1:${port}`, child, data };
+      } catch { /* readiness has not arrived yet */ }
+    }
     await delay(25);
   }
   throw new Error('Readiness timeout: ' + output);
@@ -235,7 +242,8 @@ try {
   Sqlite=require('better-sqlite3'); WebSocket=require('ws');
   const seed=resolve(temporary,'seed'); const meta=await fixture(seed,{referenceRoot:reference});
   for(const kind of ['ts','rust']) { await flow(kind,seed,meta); await emptySetup(kind); }
-  await Promise.all(['ts','rust'].map(kind=>stress(kind,seed,meta)));
+  const stressResults = await Promise.allSettled(['ts','rust'].map(kind=>stress(kind,seed,meta)));
+  for (const result of stressResults) if (result.status === 'rejected') throw result.reason;
   console.log(`PASS ${checks} real HTTP/WebSocket checks against fixed TS and Rust`);
 } finally {
   for(const ws of sockets) ws.terminate();
