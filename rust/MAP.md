@@ -68,6 +68,14 @@ RHEA-233 starts from the accepted #77 integration and implements the next file b
 
 RHEA-234 is the backend owner's next dispatch now that RHEA-230 has passed independent acceptance and integration, without waiting for its human `done` state. It covers one complete machine-access flow, while OAuth/account lifecycle remains separate remaining work. RHEA-235 has been independently accepted and integrated and does not modify Rust functionality. Each new child has one continuous `in_review` rule capped at three independent reviews. Reuse the existing parent coordination check at 2026-11-18 13:48:51 UTC to evaluate readiness and continue implementation; do not create a duplicate timer.
 
+### RHEA-233 acceptance
+
+RHEA-233 passed independent review after the CI environment repair. PR #84 was merged into `migration/rhea-226-rust` at `b8ec9222613a68f57208e53b9a89f96da3e1d3ed`, from final head `790839a5f5be4af6734086c31eb170f2c6366fb8`. The implementation adds private-space direct file POST, on-demand WebP preview, and the existing item DELETE retract protocol in `rust/server/src/uploads.rs`, `images.rs`, and the required route/database integration. The CI repair installs `pkg-config` and `libdav1d-dev` and checks `dav1d >= 1.3.0`; the README records the same prerequisite.
+
+The coordinator verified the fixed TS reference `37ce06ebfab2cd98b81e49ce54fb24ec5daeec68` with real decodable fixtures: orientation-6 JPEG, two-frame GIF, 8×4 AVIF, and a 4096-edge PNG. The locked suite passed 7 unit tests, 228 existing file-read responses, 199 login/text responses, 528 realtime HTTP/WebSocket checks, and 168 upload/preview/retract responses. Coverage includes quota and item-capacity races, disconnected-body cleanup, viewer/owner authorization, concurrent previews, retract-to-404 behavior, restart persistence and file mode 0600 / directory mode 0700. The AVIF allocation evidence remains `allocations=0 reason=ispe` and `allocations=0 reason=dav1d Unknown error -34`. Both push and pull-request CI runs passed, including Rust verification, application tests and the Docker image job.
+
+This acceptance covers direct uploads only. Chunked/resumable upload, room/share previews, maintenance expiry, HEIC decoding, high-bit-depth and animated AVIF, and AVIF `imir` remain explicit follow-up boundaries. WebP bytes may differ from Sharp quality 75. The Rust image path does not claim a boundary run for the 1 MiB thumbnail limit, and the upload harness does not open a separate WebSocket; file events reuse the integrated realtime publish hub.
+
 ### RHEA-235 acceptance
 
 RHEA-235 passed its first independent review on head `f2a00d67283fda54d653cfbcb6ba1a3e100bb70a`. PR #81 was merged as `6883de5b860212b8241c60cb4bad9a998c02fa23`. Only the two TS/Web test files and `docs/testing-upload-timing.md` changed. AC-U5 retains a real HTTP stalled-body timeout, checks empty persisted/received chunks, restores the fixture timeout through the existing limits API, and proves slot release with all concurrency caps set to one. The board test awaits the controlled abort rejection, checks no item is created, and advances the retention timer before waiting for the real exit animation. Product code, default limits, Rust and production configuration are unchanged.
@@ -82,7 +90,7 @@ Continue with full authentication/machine access, first-run and historical datab
 
 ## Third wave
 
-RHEA-230, RHEA-231, RHEA-232 and the accepted upload test stability work are integrated. RHEA-233 and RHEA-234 are active implementations. RHEA-235 is integrated after independent test review.
+RHEA-230, RHEA-231, RHEA-232, RHEA-233 and the accepted upload test stability work are integrated. RHEA-234 is the active stage-3 implementation. RHEA-235 is integrated after independent test review.
 
 | Work | Owner | Stage | Independent acceptance |
 | --- | --- | ---: | --- |
