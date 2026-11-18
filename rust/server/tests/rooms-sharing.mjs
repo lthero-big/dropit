@@ -245,6 +245,14 @@ async function rateCases(kind,seed) {
       expect(await req(server,path),429,'RATE_LIMITED');
     } finally {await stop(server);}
   }
+  server=await start(kind,data,{RATE_AUTH:'2'});
+  try {
+    expect(await req(server,'/api/rooms',{method:'POST',json:{code:'taken0'}}),201);
+    const key='r'.repeat(43);
+    expect(await req(server,'/api/rooms',{method:'POST',json:{deviceKey:key,code:'owned0'}}),201);
+    for(let n=0;n<2;n++) expect(await req(server,'/api/rooms',{method:'POST',json:{deviceKey:key,code:'taken0'}}),409,'CODE_TAKEN');
+    expect(await req(server,'/api/rooms',{method:'POST',json:{deviceKey:key,code:'taken0'}}),429,'RATE_LIMITED');
+  } finally {await stop(server);}
   server=await start(kind,data,{RATE_UPLOAD:'4',RATE_ROOM:'2'});
   try {
     const room=expect(await req(server,'/api/rooms',{method:'POST',json:{code:'rate01'}}),201);

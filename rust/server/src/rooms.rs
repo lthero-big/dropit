@@ -248,7 +248,12 @@ pub async fn create(
             } else {
                 space.pin_hash.clone()
             };
-            set_code_inner(&app, &space, custom_code, next_pin, false).await?;
+            if let Err(error) = set_code_inner(&app, &space, custom_code, next_pin, false).await {
+                if error.code == "CODE_TAKEN" {
+                    guess_failed(&app, &context, None);
+                }
+                return Err(error);
+            }
             let fresh = load_by_id(&app, &space.id).await?;
             return Ok((
                 StatusCode::OK,
