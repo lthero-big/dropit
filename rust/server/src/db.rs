@@ -529,6 +529,404 @@ pub fn forget_garbage(db: &Connection, key: &str) -> ApiResult<()> {
     Ok(())
 }
 
+pub fn garbage_keys(db: &Connection) -> ApiResult<Vec<String>> {
+    let mut stmt = db.prepare("SELECT key FROM garbage")?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn referenced_file_keys(db: &Connection) -> ApiResult<Vec<String>> {
+    let mut stmt = db.prepare(
+        "SELECT fileKey AS key FROM items WHERE fileKey IS NOT NULL
+         UNION SELECT thumbnailKey AS key FROM items WHERE thumbnailKey IS NOT NULL
+         UNION SELECT key FROM upload_chunks",
+    )?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub struct UploadSession {
+    pub id: String,
+    pub space_id: String,
+    pub user_id: Option<String>,
+    pub filename: String,
+    pub mime: String,
+    pub size: i64,
+    pub chunk_size: i64,
+    pub expires_at: i64,
+}
+
+pub struct UploadChunk {
+    pub index: i64,
+    pub key: String,
+    pub size: i64,
+    #[allow(dead_code)]
+    pub sha256: String,
+}
+
+pub struct NewUpload {
+    pub id: String,
+    pub space_id: String,
+    pub user_id: String,
+    pub principal: String,
+    pub filename: String,
+    pub mime: String,
+    pub size: i64,
+    pub chunk_size: i64,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub quota: i64,
+    pub max_items: i64,
+    pub sessions_per_user: i64,
+    pub sessions_global: i64,
+}
+
+/// Reserve a session after the HTTP layer has already authenticated the caller.
+///
+/// Membership, quota, item slots, and live session caps are rechecked inside
+/// the immediate transaction. The user id comes from that authenticated session.
+pub fn create_upload_for_user(db: &mut Connection, upload: &mut NewUpload) -> ApiResult<()> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let space = check_writer(
+        &tx,
+        &upload.space_id,
+        Some(&upload.user_id),
+        upload.created_at,
+    )?;
+    // Activity does not extend the session. A space that expires sooner wins.
+    upload.expires_at = upload.expires_at.min(space.expires_at.unwrap_or(i64::MAX));
+    check_capacity(
+        &tx,
+        &upload.space_id,
+        Some(&upload.user_id),
+        upload.size,
+        upload.quota,
+        upload.max_items,
+        upload.created_at,
+    )?;
+    let (total, own): (i64, i64) = tx.query_row(
+        "SELECT count(*), coalesce(sum(principal=?1),0) FROM uploads WHERE expiresAt>?2",
+        params![upload.principal, upload.created_at],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if total >= upload.sessions_global || own >= upload.sessions_per_user {
+        return Err(ApiError::new(429, "UPLOAD_SESSION_LIMIT"));
+    }
+    tx.execute(
+        "INSERT INTO uploads (id,spaceId,userId,principal,filename,mime,size,chunkSize,createdAt,expiresAt)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![
+            upload.id,
+            upload.space_id,
+            upload.user_id,
+            upload.principal,
+            upload.filename,
+            upload.mime,
+            upload.size,
+            upload.chunk_size,
+            upload.created_at,
+            upload.expires_at,
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn upload_session(db: &Connection, id: &str, time: i64) -> ApiResult<Option<UploadSession>> {
+    Ok(db
+        .query_row(
+            "SELECT id,spaceId,userId,filename,mime,size,chunkSize,expiresAt FROM uploads WHERE id=? AND expiresAt>?",
+            params![id, time],
+            |row| {
+                Ok(UploadSession {
+                    id: row.get(0)?,
+                    space_id: row.get(1)?,
+                    user_id: row.get(2)?,
+                    filename: row.get(3)?,
+                    mime: row.get(4)?,
+                    size: row.get(5)?,
+                    chunk_size: row.get(6)?,
+                    expires_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+pub fn upload_chunks(db: &Connection, id: &str) -> ApiResult<Vec<UploadChunk>> {
+    let mut stmt = db.prepare(
+        "SELECT \"index\", key, size, sha256 FROM upload_chunks WHERE uploadId=? ORDER BY \"index\"",
+    )?;
+    let rows = stmt.query_map([id], |row| {
+        Ok(UploadChunk {
+            index: row.get(0)?,
+            key: row.get(1)?,
+            size: row.get(2)?,
+            sha256: row.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// `true` means the new key was committed. `false` means an identical retry.
+pub fn save_chunk(
+    db: &mut Connection,
+    upload_id: &str,
+    index: i64,
+    key: &str,
+    size: i64,
+    sha256: &str,
+    time: i64,
+) -> ApiResult<bool> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let upload = upload_session(&tx, upload_id, time)?.ok_or(ApiError::NOT_FOUND)?;
+    let _ = check_writer(&tx, &upload.space_id, upload.user_id.as_deref(), time)?;
+    let existing: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT size, sha256 FROM upload_chunks WHERE uploadId=? AND \"index\"=?",
+            params![upload_id, index],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((existing_size, existing_sha)) = existing {
+        if existing_size != size || existing_sha != sha256 {
+            return Err(ApiError::new(409, "CHUNK_CONFLICT"));
+        }
+        // The first copy stays. The retry key is discarded immediately.
+        tx.execute("INSERT OR IGNORE INTO garbage (key) VALUES (?)", [key])?;
+        tx.commit()?;
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT INTO upload_chunks (uploadId,\"index\",key,size,sha256) VALUES (?1,?2,?3,?4,?5)",
+        params![upload_id, index, key, size, sha256],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+pub fn delete_upload(db: &mut Connection, id: &str) -> ApiResult<Vec<String>> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut stmt = tx.prepare("SELECT key FROM upload_chunks WHERE uploadId=?")?;
+    let keys = stmt
+        .query_map([id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    drop(stmt);
+    for key in &keys {
+        tx.execute("INSERT OR IGNORE INTO garbage (key) VALUES (?)", [key])?;
+    }
+    tx.execute("DELETE FROM uploads WHERE id=?", [id])?;
+    tx.commit()?;
+    Ok(keys)
+}
+
+/// Drop expired sessions, sessions in expired spaces, and disabled users' sessions.
+pub fn expire_uploads(db: &mut Connection, time: i64) -> ApiResult<Vec<String>> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut stmt = tx.prepare(
+        "SELECT id FROM uploads WHERE expiresAt<=?1
+         OR spaceId IN (SELECT id FROM spaces WHERE expiresAt<=?1)
+         OR userId IN (SELECT id FROM users WHERE disabled=1)
+         OR principal IN (SELECT 'user:' || id FROM users WHERE disabled=1)",
+    )?;
+    let ids = stmt
+        .query_map([time], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    drop(stmt);
+    for id in &ids {
+        let mut keys = tx.prepare("SELECT key FROM upload_chunks WHERE uploadId=?")?;
+        let chunk_keys = keys
+            .query_map([id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        drop(keys);
+        for key in chunk_keys {
+            tx.execute("INSERT OR IGNORE INTO garbage (key) VALUES (?)", [key])?;
+        }
+        tx.execute("DELETE FROM uploads WHERE id=?", [id])?;
+    }
+    tx.commit()?;
+    Ok(ids)
+}
+
+/// Release the reservation and insert the item in one immediate transaction.
+pub fn complete_upload(
+    db: &mut Connection,
+    config: &Config,
+    session_hash: &str,
+    space_id: &str,
+    upload_id: &str,
+    input: FileInput,
+) -> ApiResult<Item> {
+    let time = now();
+    if let Some(group) = &input.group {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let account = writable_account(&tx, session_hash)?;
+        space(&tx, space_id, &account.user.id, true)?;
+        ensure_group(&tx, space_id, group, time)?;
+        tx.commit()?;
+    }
+
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let account = writable_account(&tx, session_hash)?;
+    let space = space(&tx, space_id, &account.user.id, true)?;
+    if space.expires_at.is_some_and(|expiry| expiry <= time) {
+        return Err(ApiError::NOT_FOUND);
+    }
+    let upload = upload_session(&tx, upload_id, time)?.ok_or(ApiError::NOT_FOUND)?;
+    if upload.space_id != space_id || upload.user_id.as_deref() != Some(account.user.id.as_str()) {
+        return Err(ApiError::NOT_FOUND);
+    }
+    let mut stmt = tx.prepare("SELECT key FROM upload_chunks WHERE uploadId=?")?;
+    let keys = stmt
+        .query_map([upload_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    drop(stmt);
+    for key in keys {
+        tx.execute("INSERT OR IGNORE INTO garbage (key) VALUES (?)", [key])?;
+    }
+    tx.execute("DELETE FROM uploads WHERE id=?", [upload_id])?;
+
+    let (used, reserved) = usage(&tx, &account.user.id, time)?;
+    let quota = account.quota.unwrap_or(config.quota);
+    if used
+        .saturating_add(reserved)
+        .saturating_add(input.stored_bytes)
+        > quota
+    {
+        return Err(ApiError::new(413, "QUOTA_EXCEEDED"));
+    }
+    let count: i64 = tx.query_row(
+        "SELECT (SELECT count(*) FROM items WHERE spaceId=?1)
+        + (SELECT count(*) FROM uploads WHERE spaceId=?1 AND expiresAt>?2)",
+        params![space_id, time],
+        |row| row.get(0),
+    )?;
+    if count >= config.max_items {
+        return Err(ApiError::new(413, "ITEM_LIMIT"));
+    }
+    let id = Uuid::new_v4().to_string();
+    let expires_at = space
+        .expires_at
+        .unwrap_or(i64::MAX)
+        .min(time + config.retention);
+    let device = input.device.as_ref();
+    tx.execute(
+        "INSERT INTO items (id,spaceId,userId,kind,filename,mime,size,storedBytes,fileKey,thumbnailKey,createdAt,expiresAt,updatedAt,groupName,deviceId,deviceName,deviceKind)
+         VALUES (?1,?2,?3,'file',?4,?5,?6,?7,?8,?9,?10,?11,?10,?12,?13,?14,?15)",
+        params![
+            id,
+            space_id,
+            account.user.id,
+            input.filename,
+            input.mime,
+            input.size,
+            input.stored_bytes,
+            input.file_key,
+            input.thumbnail_key,
+            time,
+            expires_at,
+            input.group,
+            device.map(|device| &device.id),
+            device.map(|device| &device.name),
+            device.map(|device| &device.kind),
+        ],
+    )?;
+    let inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    tx.commit()?;
+    Ok(inserted)
+}
+
+fn check_writer(
+    db: &Connection,
+    space_id: &str,
+    user_id: Option<&str>,
+    time: i64,
+) -> ApiResult<Space> {
+    let space = db
+        .query_row(
+            "SELECT id,name,expiresAt,ownerId FROM spaces WHERE id=?",
+            [space_id],
+            |row| {
+                Ok(Space {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    expires_at: row.get(2)?,
+                    owner_id: row.get(3)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(space) = space else {
+        return Err(ApiError::NOT_FOUND);
+    };
+    if space.expires_at.is_some_and(|expiry| expiry <= time) {
+        return Err(ApiError::NOT_FOUND);
+    }
+    let Some(user_id) = user_id else {
+        return Ok(space);
+    };
+    let disabled: Option<i64> = db
+        .query_row("SELECT disabled FROM users WHERE id=?", [user_id], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    if disabled.is_none_or(|value| value != 0) {
+        return Err(ApiError::new(403, "FORBIDDEN"));
+    }
+    let role: Option<String> = db
+        .query_row(
+            "SELECT role FROM members WHERE spaceId=? AND userId=?",
+            params![space_id, user_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match role.as_deref() {
+        Some("viewer") => Err(ApiError::new(403, "READ_ONLY")),
+        Some(_) => Ok(space),
+        None => Err(ApiError::new(403, "FORBIDDEN")),
+    }
+}
+
+fn check_capacity(
+    db: &Connection,
+    space_id: &str,
+    user_id: Option<&str>,
+    bytes: i64,
+    quota: i64,
+    max_items: i64,
+    time: i64,
+) -> ApiResult<()> {
+    let used = if let Some(user_id) = user_id {
+        let (stored, reserved) = usage(db, user_id, time)?;
+        stored.saturating_add(reserved)
+    } else {
+        let stored: i64 = db.query_row(
+            "SELECT coalesce(sum(storedBytes),0) FROM items WHERE spaceId=?",
+            [space_id],
+            |row| row.get(0),
+        )?;
+        let reserved: i64 = db.query_row(
+            "SELECT coalesce(sum(size),0) FROM uploads WHERE spaceId=? AND expiresAt>?",
+            params![space_id, time],
+            |row| row.get(0),
+        )?;
+        stored.saturating_add(reserved)
+    };
+    if used.saturating_add(bytes) > quota {
+        return Err(ApiError::new(413, "QUOTA_EXCEEDED"));
+    }
+    let count: i64 = db.query_row(
+        "SELECT (SELECT count(*) FROM items WHERE spaceId=?1)
+        + (SELECT count(*) FROM uploads WHERE spaceId=?1 AND expiresAt>?2)",
+        params![space_id, time],
+        |row| row.get(0),
+    )?;
+    if count >= max_items {
+        return Err(ApiError::new(413, "ITEM_LIMIT"));
+    }
+    Ok(())
+}
+
 pub struct PreviewSource {
     pub item_id: String,
     pub file_key: String,

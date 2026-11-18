@@ -149,9 +149,12 @@ SameSite=Lax, Path=/ and Max-Age semantics.
 
 The supported limit environment variables are MAX_FILE_BYTES, MAX_TEXT_BYTES,
 MAX_ITEMS, USER_QUOTA_BYTES, RETENTION_HOURS, SESSION_HOURS, RATE_WINDOW_MS,
-RATE_GENERAL, RATE_AUTH and RATE_UPLOAD. Corresponding runtime_limits entries
-override them at startup. Account quota overrides and active upload reservations
-contribute to capacity checks. Expired items are excluded from snapshots.
+RATE_GENERAL, RATE_AUTH, RATE_UPLOAD, RATE_CHUNK, UPLOAD_CHUNK_BYTES,
+UPLOAD_CHUNK_TIMEOUT_MS, UPLOAD_CHUNKS_PER_SESSION, UPLOAD_CHUNKS_PER_USER,
+UPLOAD_CHUNKS_GLOBAL, UPLOAD_SESSIONS_PER_USER and UPLOAD_SESSIONS_GLOBAL.
+UPLOAD_CHUNK_BYTES stays in the 64 KiB–24 MiB range. Corresponding runtime_limits
+entries override them at startup. Account quota overrides and active upload
+reservations contribute to capacity checks. Expired items are excluded from snapshots.
 
 ## SQLite and blocking work
 
@@ -226,23 +229,81 @@ empty 416 body, and Axum sets Content-Length on JSON errors. Hono leaves both
 unset. The compared bytes are empty or identical, and the harness normalizes
 those two length headers.
 
-Chunked upload, share links, rooms, and PAT/bearer authentication remain
-outside this slice. Direct upload, preview, and retract are in the RHEA-233
-section. An Authorization header still selects the unsupported bearer path.
+Share links, rooms, and PAT/bearer authentication remain outside this slice.
+Direct upload, preview, and retract are in the RHEA-233 section. Private-space
+chunk sessions are below. An Authorization header still selects the unsupported
+bearer path.
+
+## Chunk sessions (RHEA-237)
+
+Private-space chunk sessions use the same cookie session and writable-member
+checks as direct upload. The routes are POST /api/spaces/:space/uploads,
+GET and DELETE /api/spaces/:space/uploads/:id, PUT
+/api/spaces/:space/uploads/:id/chunks/:index, and POST
+/api/spaces/:space/uploads/:id/complete. Room upload routes are not in this slice.
+
+Create returns 201 with uploadId, chunkSize, expiresAt, and received. chunkSize
+is frozen from uploadChunkBytes. expiresAt is the earlier of 24 hours and the
+space expiry. The declared size is reserved against the account quota, the item
+count, and the live session caps. A full quota is 413 QUOTA_EXCEEDED. A full
+item count is 413 ITEM_LIMIT. Too many live sessions is 429 UPLOAD_SESSION_LIMIT.
+GET /api/me reservedBytes includes unexpired sessions.
+
+Chunk writes use the chunk rate bucket. The index must be a safe integer with
+no leading zero and must be inside the declared size. A short body is 400
+CHUNK_SIZE_MISMATCH. A body past the expected length is 413 FILE_TOO_LARGE. An
+empty body is 400 EMPTY_FILE. X-Chunk-SHA256 must be 64 hex digits. A mismatch
+is 400 CHECKSUM_MISMATCH. An identical retry is 204 and keeps the first copy.
+A different stored body is 409 CHUNK_CONFLICT. A write that exceeds the per
+session, per account, or global in-process cap is 429 CHUNK_BUSY. A stalled
+write returns 400 UPLOAD_TIMEOUT. Lowering a cap does not abort a write that
+already started.
+
+Complete assembles the stored chunks in order. A gap or size mismatch is 400
+UPLOAD_INCOMPLETE and the session is deleted. A second complete while chunks or
+another complete are in flight is 409 UPLOAD_IN_PROGRESS. Two overlapping
+completes produce one item and one 409. A later complete is 404. Session
+complete rejects an image/svg+xml MIME and a body whose prefix matches
+/<svg[\s/>]/i with 415 INVALID_IMAGE. Legacy POST /items/file does not apply
+that prefix rule. Raster checks, the 16,777,216 pixel cap, EXIF rotation, and
+the 320-pixel WebP thumbnail are the same path as direct upload. A successful
+commit publishes groups and item.created. Garbage cleanup after that commit
+does not turn 201 into an error.
+
+DELETE removes the session, aborts an in-flight chunk or complete, and flushes
+queued garbage. The aborted write surfaces as 404. Restart keeps received
+indices because they live in upload_chunks.
+
+JPEG, PNG, GIF, WebP, and 8-bit still AVIF are decoded. HEIC, HEIF that is not
+sniffed as AVIF, 10-bit and 12-bit frames, animated AVIF, and the imir box stay
+unsupported and download-only when they are not rejected as INVALID_IMAGE.
+Thumbnail WebP is lossless, so its bytes differ from the Sharp quality-75
+reference. Dimensions and orientation are the comparison.
+
+DROPIT_SWEEP_ON_SPACES=1 runs expiry and garbage sweep from GET /api/spaces.
+DROPIT_SWEEP_OLDER_THAN sets the unreferenced-file cutoff in milliseconds.
+That hook is for the comparison harness. There is no public maintenance route.
+
+The comparison is tests/uploads-compat.mjs, launched by tests/uploads-http.rs.
+On 2026-11-18 it passed 353 HTTP responses, including the earlier direct-upload
+cases and chunk create, resume, identical retry, conflict, checksum, bounds,
+image thumbnail, download Range, SVG and corrupt rejection, 4096-pixel accept,
+auth, overlapping complete, cancel, quota reservation, session limit, chunk
+busy, expiry cleanup, and restart resume.
 
 ## Coverage boundary
 
 OAuth, PAT/device-code authentication, registration/setup writes, password changes,
-session-management APIs, room APIs, chunked uploads, sharing, admin APIs,
+session-management APIs, room APIs, room chunk uploads, sharing, admin APIs,
 static web hosting,
 update endpoints and historical schema upgrades remain outside this
 slice. Unsupported routes return the existing JSON NOT_FOUND form. An
 Authorization header selects the unsupported bearer path and returns
 UNAUTHENTICATED with WWW-Authenticate instead of falling back to a cookie.
 
-Periodic expiration/garbage collection and live admin-setting updates are also
-pending. Expired records are filtered from reads but are retained in storage and
-capacity totals until the TS maintenance implementation cleans them. The slice
+Live admin-setting updates remain pending. Expired item records are filtered
+from reads. Upload-session expiry and unreferenced file sweep run through the
+test hook in the RHEA-237 section, not through a public route. The slice
 requires a schema-19 fixture and provides no first-run database bootstrap.
 
 The tests establish the documented password/private-text HTTP flow and
@@ -375,8 +436,9 @@ stored TS thumbnail did not add a file or change quota. Concurrent uploads
 stopped at the quota. A client disconnect left no item. Restart preserved the
 uploaded file.
 
-Chunked upload sessions, room and share preview, HEIC decode, AVIF mirror,
-10/12-bit and animated AVIF, and maintenance expiry remain out of scope. The
+Room and share preview, HEIC decode, AVIF mirror, 10/12-bit and animated AVIF,
+and a public maintenance route remain out of scope. Private-space chunk
+sessions are covered above. The
 1 MiB thumbnail write cap is checked and was not reached by a 320-edge image.
 A clean body shorter than Content-Length returns UPLOAD_INCOMPLETE; an
 HTTP/1.1 close of a short Content-Length is a stream error and returns 404.

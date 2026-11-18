@@ -3,6 +3,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { createServer, connect } from 'node:net';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -62,6 +63,8 @@ async function start(kind, data, extra = {}) {
       env: {
         PATH: process.env.PATH, NODE_ENV: 'test', DATA_DIR: data, HOST: '127.0.0.1', PORT: String(port),
         APP_ORIGIN: origin, UPDATE_CHECK: '0', RATE_GENERAL: '10000', RATE_AUTH: '1000', RATE_UPLOAD: '500',
+        RATE_INVITE: '100', RATE_ROOM: '100', RATE_CHUNK: '2000',
+        UPLOAD_CHUNK_BYTES: String(64 * 1024),
         MAX_FILE_BYTES: String(maxFile),
         // TS validateLimits requires roomMaxFileBytes < maxFileBytes. Default room cap is 5 MiB.
         ROOM_MAX_FILE_BYTES: String(512 * 1024),
@@ -473,6 +476,9 @@ try {
   const images = await makeImages(sharp);
   const seed = resolve(temporary, 'seed');
   const metadata = await fixture(seed, { referenceRoot });
+  const seedDb = new Database(resolve(seed, 'dropit.sqlite'));
+  seedDb.prepare("DELETE FROM runtime_limits WHERE key='uploadChunkBytes'").run();
+  seedDb.close();
   const space = metadata.aliceSpace;
   const results = {};
   for (const kind of ['ts', 'rust']) {
@@ -951,6 +957,8 @@ try {
   await stop(capServer);
   console.log('PASS item-cap race');
 
+  await chunkSessions(results, space, metadata.bobSpace, images, Database, sharp);
+
   await writeFile(resolve(temporary, 'evidence.json'), JSON.stringify(evidence, null, 2));
   console.log('PASS upload checks ' + checks + ' HTTP responses');
 } finally {
@@ -966,4 +974,402 @@ try {
 
 function kindCookie(server, results) {
   return server.kind === 'ts' ? results.ts.bob : results.rust.bob;
+}
+
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function chunkParts(bytes, size) {
+  const parts = [];
+  for (let offset = 0; offset < bytes.length; offset += size) parts.push(bytes.subarray(offset, offset + size));
+  return parts;
+}
+
+async function openUpload(server, cookie, space, bytes, filename, mime) {
+  const response = await request(server, '/api/spaces/' + space + '/uploads', {
+    method: 'POST', cookie,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ filename, size: bytes.length, mime }),
+  });
+  return response;
+}
+
+async function putChunk(server, cookie, space, id, index, bytes, headers = {}) {
+  return request(server, '/api/spaces/' + space + '/uploads/' + id + '/chunks/' + index, {
+    method: 'PUT', cookie, body: bytes, headers,
+  });
+}
+
+async function finishUpload(server, cookie, space, id, headers = {}) {
+  return request(server, '/api/spaces/' + space + '/uploads/' + id + '/complete', {
+    method: 'POST', cookie, headers,
+  });
+}
+
+async function chunkSessions(results, space, otherSpace, images, Database, sharp) {
+  const chunkSize = 64 * 1024;
+  const pair = [
+    [results.ts.server, results.ts.alice, 'ts'],
+    [results.rust.server, results.rust.alice, 'rust'],
+  ];
+
+  for (const [server, cookie, kind] of pair) {
+    const created = await openUpload(server, cookie, space, images.bin, '../..\\bad\u0000名.bin', 'APPLICATION/OCTET-STREAM; charset=utf-8');
+    assert.equal(created.status, 201, kind + ' ' + created.bytes.toString());
+    const body = JSON.parse(created.bytes.toString());
+    assert.equal(body.chunkSize, chunkSize);
+    assert.deepEqual(body.received, []);
+    assert.equal(typeof body.expiresAt, 'number');
+    const put = await putChunk(server, cookie, space, body.uploadId, 0, images.bin, {
+      'x-chunk-sha256': sha256(images.bin),
+    });
+    assert.equal(put.status, 204, kind + ' ' + put.bytes.toString());
+    const again = await putChunk(server, cookie, space, body.uploadId, 0, images.bin);
+    assert.equal(again.status, 204, kind + ' identical retry');
+    const status = await request(server, '/api/spaces/' + space + '/uploads/' + body.uploadId, { cookie });
+    assert.deepEqual(JSON.parse(status.bytes.toString()).received, [0]);
+    const item = itemOf(await finishUpload(server, cookie, space, body.uploadId));
+    assert.equal(item.filename, '_.._bad_名.bin');
+    assert.equal(item.filename.includes('\\') || item.filename.includes('/') || item.filename.includes('\0'), false);
+    assert.equal(item.mime, 'application/octet-stream');
+    assert.equal(item.hasThumbnail, false);
+    assert.equal(item.size, images.bin.length);
+    const download = await request(server, '/api/spaces/' + space + '/items/' + item.id + '/download', { cookie });
+    assert.equal(download.status, 200);
+    assert.equal(download.bytes.equals(images.bin), true);
+    const repeat = await finishUpload(server, cookie, space, body.uploadId);
+    assert.equal(repeat.status, 404, kind + ' repeat complete');
+    assert.equal(codeOf(repeat), 'NOT_FOUND');
+    const me = JSON.parse((await request(server, '/api/me', { cookie })).bytes.toString());
+    note(kind + '-C1', { status: created.status, chunkSize: body.chunkSize, filename: item.filename, download: download.bytes.length, reservedBytes: me.reservedBytes });
+  }
+  console.log('PASS C1 create resume identical complete');
+
+  for (const [server, cookie, kind] of pair) {
+    const payload = Buffer.concat([Buffer.alloc(chunkSize, 1), Buffer.alloc(100, 2)]);
+    const created = JSON.parse((await openUpload(server, cookie, space, payload, 'parts.bin', 'application/octet-stream')).bytes.toString());
+    const parts = chunkParts(payload, chunkSize);
+    const second = await putChunk(server, cookie, space, created.uploadId, 1, parts[1]);
+    assert.equal(second.status, 204, kind + ' out of order');
+    const early = await finishUpload(server, cookie, space, created.uploadId);
+    assert.equal(early.status, 400);
+    assert.equal(codeOf(early), 'UPLOAD_INCOMPLETE');
+    const missing = await request(server, '/api/spaces/' + space + '/uploads/' + created.uploadId, { cookie });
+    assert.equal(missing.status, 404, kind + ' failed complete kept the session');
+    const badIndex = await openUpload(server, cookie, space, images.bin, 'index.bin', 'application/octet-stream');
+    const session = JSON.parse(badIndex.bytes.toString());
+    const overIndex = await putChunk(server, cookie, space, session.uploadId, 1, images.bin);
+    assert.equal(overIndex.status, 400);
+    assert.equal(codeOf(overIndex), 'INVALID_CHUNK_INDEX');
+    const leading = await putChunk(server, cookie, space, session.uploadId, '01', images.bin);
+    assert.equal(leading.status, 400);
+    assert.equal(codeOf(leading), 'INVALID_CHUNK_INDEX');
+    const short = await putChunk(server, cookie, space, session.uploadId, 0, images.bin.subarray(0, 2));
+    assert.equal(short.status, 400);
+    assert.equal(codeOf(short), 'CHUNK_SIZE_MISMATCH');
+    const long = await putChunk(server, cookie, space, session.uploadId, 0, Buffer.concat([images.bin, Buffer.from('x')]));
+    assert.equal(long.status, 413);
+    assert.equal(codeOf(long), 'FILE_TOO_LARGE');
+    const empty = await request(server, '/api/spaces/' + space + '/uploads/' + session.uploadId + '/chunks/0', {
+      method: 'PUT', cookie, headers: { 'content-length': '0' },
+    });
+    assert.equal(empty.status, 400);
+    assert.equal(codeOf(empty), 'EMPTY_FILE');
+    const badSum = await putChunk(server, cookie, space, session.uploadId, 0, images.bin, { 'x-chunk-sha256': 'ab' });
+    assert.equal(badSum.status, 400);
+    assert.equal(codeOf(badSum), 'INVALID_CHECKSUM');
+    const mismatch = await putChunk(server, cookie, space, session.uploadId, 0, images.bin, { 'x-chunk-sha256': 'a'.repeat(64) });
+    assert.equal(mismatch.status, 400);
+    assert.equal(codeOf(mismatch), 'CHECKSUM_MISMATCH');
+    const stored = await putChunk(server, cookie, space, session.uploadId, 0, images.bin);
+    assert.equal(stored.status, 204);
+    const conflict = await putChunk(server, cookie, space, session.uploadId, 0, Buffer.alloc(images.bin.length, 9));
+    assert.equal(conflict.status, 409);
+    assert.equal(codeOf(conflict), 'CHUNK_CONFLICT');
+    const kept = await request(server, '/api/spaces/' + space + '/uploads/' + session.uploadId, { cookie });
+    assert.deepEqual(JSON.parse(kept.bytes.toString()).received, [0]);
+    await request(server, '/api/spaces/' + space + '/uploads/' + session.uploadId, { method: 'DELETE', cookie });
+    note(kind + '-C2', { incomplete: early.status, conflict: conflict.status, short: short.status, long: long.status });
+  }
+  console.log('PASS C2 order conflict checksum bounds');
+
+  for (const [server, cookie, kind] of pair) {
+    const created = JSON.parse((await openUpload(server, cookie, space, images.png48, 'photo.png', 'image/png')).bytes.toString());
+    assert.equal((await putChunk(server, cookie, space, created.uploadId, 0, images.png48)).status, 204);
+    const done = await finishUpload(server, cookie, space, created.uploadId, {
+      'x-dropit-group': encodeURIComponent('分片组'),
+      'x-dropit-device': 'chunk-device',
+      'x-dropit-device-name': encodeURIComponent('分片设备'),
+      'x-dropit-device-kind': 'pc',
+    });
+    const item = itemOf(done);
+    assert.equal(item.hasThumbnail, true);
+    assert.equal(item.group, '分片组');
+    assert.deepEqual(item.device, { id: 'chunk-device', name: '分片设备', kind: 'pc' });
+    const download = await request(server, '/api/spaces/' + space + '/items/' + item.id + '/download', { cookie });
+    assert.equal(download.bytes.equals(images.png48), true);
+    const thumb = await request(server, '/api/spaces/' + space + '/items/' + item.id + '/thumbnail', { cookie });
+    assert.equal(thumb.status, 200);
+    assert.equal(thumb.headers.get('content-type'), 'image/webp');
+    const info = await derived(sharp, thumb.bytes, 320);
+    assert.ok(info.width <= 320 && info.height <= 320);
+    const ranged = await request(server, '/api/spaces/' + space + '/items/' + item.id + '/download', {
+      cookie, headers: { range: 'bytes=0-3' },
+    });
+    assert.equal(ranged.status, 206, kind + ' ' + ranged.bytes.toString());
+    assert.equal(ranged.bytes.equals(images.png48.subarray(0, 4)), true);
+    const media = await request(server, '/api/spaces/' + space + '/items/' + item.id + '/media', { cookie });
+    assert.equal(media.status, 404, kind + ' png is not media');
+    note(kind + '-C3', { thumb: thumb.bytes.length, width: info.width, height: info.height, range: ranged.status });
+  }
+  console.log('PASS C3 image thumbnail range');
+
+  for (const [server, cookie, kind] of pair) {
+    const svg = JSON.parse((await openUpload(server, cookie, space, images.svg, 'pic.svg', 'image/svg+xml')).bytes.toString());
+    await putChunk(server, cookie, space, svg.uploadId, 0, images.svg);
+    const rejected = await finishUpload(server, cookie, space, svg.uploadId);
+    assert.equal(rejected.status, 415, kind);
+    assert.equal(codeOf(rejected), 'INVALID_IMAGE');
+    const disguised = Buffer.concat([Buffer.from('<svg xmlns="http://www.w3.org/2000/svg">'), Buffer.alloc(8, 1)]);
+    const fake = JSON.parse((await openUpload(server, cookie, space, disguised, 'fake.bin', 'application/octet-stream')).bytes.toString());
+    await putChunk(server, cookie, space, fake.uploadId, 0, disguised);
+    const sniffed = await finishUpload(server, cookie, space, fake.uploadId);
+    assert.equal(sniffed.status, 415);
+    assert.equal(codeOf(sniffed), 'INVALID_IMAGE');
+    const legacy = await postFile(server, cookie, space, images.svg, { 'content-type': 'image/svg+xml', 'x-file-name': 'legacy.svg' });
+    assert.equal(legacy.status, 201, kind + ' legacy SVG must stay download-only');
+    const corrupt = JSON.parse((await openUpload(server, cookie, space, Buffer.from('not-png'), 'bad.png', 'image/png')).bytes.toString());
+    await putChunk(server, cookie, space, corrupt.uploadId, 0, Buffer.from('not-png'));
+    const broken = await finishUpload(server, cookie, space, corrupt.uploadId);
+    assert.equal(broken.status, 415);
+    assert.equal(codeOf(broken), 'INVALID_IMAGE');
+    const huge = JSON.parse((await openUpload(server, cookie, space, images.png4096, 'edge.png', 'image/png')).bytes.toString());
+    for (const [index, part] of chunkParts(images.png4096, chunkSize).entries()) {
+      const put = await putChunk(server, cookie, space, huge.uploadId, index, part);
+      assert.equal(put.status, 204, kind + ' 4096 chunk ' + index);
+    }
+    const edge = await finishUpload(server, cookie, space, huge.uploadId);
+    assert.equal(edge.status, 201, kind + ' ' + edge.bytes.toString());
+    assert.equal(itemOf(edge).hasThumbnail, true);
+    note(kind + '-C4', { svg: rejected.status, disguised: sniffed.status, corrupt: broken.status, edge: edge.status });
+  }
+  console.log('PASS C4 svg corrupt pixel edge');
+
+  for (const [server, cookie, kind] of pair) {
+    const editor = await openUpload(server, results[kind].bob, space, images.bin, 'editor.bin', 'application/octet-stream');
+    assert.equal(editor.status, 201, kind + ' editor create ' + editor.bytes.toString());
+    const editorId = JSON.parse(editor.bytes.toString()).uploadId;
+    const ownerPeek = await request(server, '/api/spaces/' + space + '/uploads/' + editorId, { cookie });
+    assert.equal(ownerPeek.status, 404, kind + ' owner cannot see another member session');
+    await request(server, '/api/spaces/' + space + '/uploads/' + editorId, { method: 'DELETE', cookie: results[kind].bob });
+    const hidden = await openUpload(server, cookie, otherSpace, images.bin, 'hidden.bin', 'application/octet-stream');
+    assert.equal(hidden.status, 404, kind + ' non-member');
+    const viewer = await openUpload(server, results[kind].viewer, space, images.bin, 'view.bin', 'application/octet-stream');
+    assert.equal(viewer.status, 403);
+    assert.equal(codeOf(viewer), 'READ_ONLY');
+    const temporary = await openUpload(server, results[kind].temporary, space, images.bin, 'temp.bin', 'application/octet-stream');
+    assert.equal(temporary.status, 403);
+    assert.equal(codeOf(temporary), 'PASSWORD_CHANGE_REQUIRED');
+    const mine = JSON.parse((await openUpload(server, cookie, space, images.bin, 'mine.bin', 'application/octet-stream')).bytes.toString());
+    const otherGet = await request(server, '/api/spaces/' + space + '/uploads/' + mine.uploadId, { cookie: results[kind].bob });
+    assert.equal(otherGet.status, 404);
+    await request(server, '/api/spaces/' + space + '/uploads/' + mine.uploadId, { method: 'DELETE', cookie });
+  }
+  console.log('PASS C5 auth');
+
+  for (const [server, cookie, kind] of pair) {
+    const payload = Buffer.alloc(chunkSize + 8, 3);
+    const created = JSON.parse((await openUpload(server, cookie, space, payload, 'race.bin', 'application/octet-stream')).bytes.toString());
+    const parts = chunkParts(payload, chunkSize);
+    const writes = await Promise.all(parts.map((part, index) => putChunk(server, cookie, space, created.uploadId, index, part)));
+    assert.deepEqual(writes.map(response => response.status).sort(), [204, 204], kind);
+    const raced = await Promise.all([0, 1].map(() => finishUpload(server, cookie, space, created.uploadId)));
+    const statuses = raced.map(response => response.status).sort();
+    assert.deepEqual(statuses, [201, 409], kind + ' ' + raced.map(response => response.status + (codeOf(response) || '')).join(','));
+    assert.equal(codeOf(raced.find(response => response.status === 409)), 'UPLOAD_IN_PROGRESS');
+    const winner = itemOf(raced.find(response => response.status === 201));
+    const download = await request(server, '/api/spaces/' + space + '/items/' + winner.id + '/download', { cookie });
+    assert.equal(download.bytes.equals(payload), true);
+    const snapshot = JSON.parse((await request(server, '/api/spaces/' + space + '/items', { cookie })).bytes.toString());
+    assert.equal(snapshot.items.filter(item => item.filename === 'race.bin').length, 1);
+    note(kind + '-C6', { statuses });
+  }
+  console.log('PASS C6 overlapping complete');
+
+  for (const [server, cookie, kind] of pair) {
+    const created = JSON.parse((await openUpload(server, cookie, space, images.bin, 'cancel.bin', 'application/octet-stream')).bytes.toString());
+    const held = new Promise((resolveHold, reject) => {
+      const url = new URL(server.url);
+      const socket = connect(url.port, url.hostname, () => {
+        socket.write(
+          'PUT /api/spaces/' + space + '/uploads/' + created.uploadId + '/chunks/0 HTTP/1.1\r\n' +
+          'Host: ' + url.host + '\r\nOrigin: ' + server.origin + '\r\nCookie: ' + cookie + '\r\n' +
+          'Content-Length: ' + (images.bin.length + 100000) + '\r\n\r\n' + images.bin.toString('latin1'),
+        );
+        resolveHold(socket);
+      });
+      socket.on('error', () => {});
+      socket.setTimeout(4000, () => reject(new Error(kind + ' cancel socket hung')));
+    });
+    const socket = await held;
+    await delay(80);
+    const cancelled = await request(server, '/api/spaces/' + space + '/uploads/' + created.uploadId, { method: 'DELETE', cookie });
+    assert.equal(cancelled.status, 204, kind + ' ' + cancelled.bytes.toString() + '\n' + server.output);
+    socket.destroy();
+    await delay(200);
+    const gone = await request(server, '/api/spaces/' + space + '/uploads/' + created.uploadId, { cookie });
+    assert.equal(gone.status, 404);
+    const late = await putChunk(server, cookie, space, created.uploadId, 0, images.bin);
+    assert.equal(late.status, 404);
+    const files = await fileNames(server.data);
+    const db = new Database(resolve(server.data, 'dropit.sqlite'), { readonly: true });
+    const chunks = db.prepare('SELECT count(*) AS n FROM upload_chunks WHERE uploadId=?').get(created.uploadId).n;
+    const garbage = db.prepare('SELECT count(*) AS n FROM garbage').get().n;
+    db.close();
+    assert.equal(chunks, 0);
+    assert.equal(garbage, 0, kind + ' cancel left garbage');
+    note(kind + '-C7', { cancel: cancelled.status, files: files.length, chunks, garbage });
+  }
+  console.log('PASS C7 cancel in flight');
+
+  for (const kind of ['ts', 'rust']) {
+    const data = resolve(temporary, 'quota-' + kind);
+    await cp(resolve(temporary, 'seed'), data, { recursive: true });
+    const quotaDb = new Database(resolve(data, 'dropit.sqlite'));
+    quotaDb.prepare('UPDATE users SET quotaBytes=? WHERE email=?').run(1024 * 1024, 'alice@example.test');
+    quotaDb.close();
+    const server = await start(kind, data);
+    const cookie = await login(server, 'alice@example.test');
+    const before = JSON.parse((await request(server, '/api/me', { cookie })).bytes.toString());
+    const quotaBytes = Buffer.alloc(400 * 1024, 5);
+    const reserved = JSON.parse((await openUpload(server, cookie, space, quotaBytes, 'reserved.bin', 'application/octet-stream')).bytes.toString());
+    const during = JSON.parse((await request(server, '/api/me', { cookie })).bytes.toString());
+    assert.equal(during.reservedBytes, before.reservedBytes + quotaBytes.length, kind + ' reserved ' + during.reservedBytes);
+    const over = await openUpload(server, cookie, space, Buffer.alloc(700 * 1024, 6), 'over.bin', 'application/octet-stream');
+    assert.equal(over.status, 413, kind + ' ' + over.bytes.toString());
+    assert.equal(codeOf(over), 'QUOTA_EXCEEDED');
+    for (const [index, part] of chunkParts(quotaBytes, chunkSize).entries()) {
+      assert.equal((await putChunk(server, cookie, space, reserved.uploadId, index, part)).status, 204);
+    }
+    const done = await finishUpload(server, cookie, space, reserved.uploadId);
+    assert.equal(done.status, 201, kind + ' ' + done.bytes.toString());
+    const after = JSON.parse((await request(server, '/api/me', { cookie })).bytes.toString());
+    assert.equal(after.reservedBytes, before.reservedBytes);
+    assert.ok(after.usedBytes >= before.usedBytes + quotaBytes.length);
+    const raced = await Promise.all([0, 1].map(() => openUpload(server, cookie, space, Buffer.alloc(500 * 1024, 8), 'race-quota.bin', 'application/octet-stream')));
+    assert.deepEqual(raced.map(response => response.status).sort(), [201, 413], kind + ' quota race');
+    assert.equal(codeOf(raced.find(response => response.status === 413)), 'QUOTA_EXCEEDED');
+    await stop(server);
+    note(kind + '-C8', { reserved: during.reservedBytes, used: after.usedBytes, over: over.status, race: raced.map(response => response.status).sort() });
+  }
+  console.log('PASS C8 quota reservation');
+
+  for (const kind of ['ts', 'rust']) {
+    const data = resolve(temporary, 'sessions-' + kind);
+    await cp(resolve(temporary, 'seed'), data, { recursive: true });
+    const server = await start(kind, data, { UPLOAD_SESSIONS_PER_USER: '1', UPLOAD_SESSIONS_GLOBAL: '2' });
+    const cookie = await login(server, 'alice@example.test');
+    const first = await openUpload(server, cookie, space, images.bin, 'one.bin', 'application/octet-stream');
+    assert.equal(first.status, 201, kind);
+    const second = await openUpload(server, cookie, space, images.bin, 'two.bin', 'application/octet-stream');
+    assert.equal(second.status, 429, kind + ' ' + second.bytes.toString());
+    assert.equal(codeOf(second), 'UPLOAD_SESSION_LIMIT');
+    assert.equal(second.headers.get('retry-after'), '1');
+    await stop(server);
+    note(kind + '-C9', { first: first.status, second: second.status });
+  }
+  console.log('PASS C9 session limit');
+
+  for (const kind of ['ts', 'rust']) {
+    const data = resolve(temporary, 'busy-' + kind);
+    await cp(resolve(temporary, 'seed'), data, { recursive: true });
+    const server = await start(kind, data, { UPLOAD_CHUNKS_PER_SESSION: '1' });
+    const cookie = await login(server, 'alice@example.test');
+    const payload = Buffer.alloc(chunkSize + 4, 7);
+    const created = JSON.parse((await openUpload(server, cookie, space, payload, 'busy.bin', 'application/octet-stream')).bytes.toString());
+    const held = await new Promise((resolveHold, reject) => {
+      const url = new URL(server.url);
+      const socket = connect(url.port, url.hostname, () => {
+        socket.write(
+          'PUT /api/spaces/' + space + '/uploads/' + created.uploadId + '/chunks/0 HTTP/1.1\r\n' +
+          'Host: ' + url.host + '\r\nOrigin: ' + server.origin + '\r\nCookie: ' + cookie + '\r\n' +
+          'Content-Length: ' + (chunkSize + 1000) + '\r\n\r\n',
+        );
+        resolveHold(socket);
+      });
+      socket.on('error', () => {});
+      socket.setTimeout(4000, () => reject(new Error(kind + ' busy socket hung')));
+    });
+    await delay(80);
+    const busy = await putChunk(server, cookie, space, created.uploadId, 1, payload.subarray(chunkSize));
+    assert.equal(busy.status, 429, kind + ' ' + busy.bytes.toString() + '\n' + server.output);
+    assert.equal(codeOf(busy), 'CHUNK_BUSY');
+    assert.equal(busy.headers.get('retry-after'), '1');
+    held.destroy();
+    await delay(200);
+    await stop(server);
+    note(kind + '-C10', { busy: busy.status });
+  }
+  console.log('PASS C10 chunk busy');
+
+  for (const kind of ['ts', 'rust']) {
+    const data = resolve(temporary, 'expire-' + kind);
+    await cp(resolve(temporary, 'seed'), data, { recursive: true });
+    const extra = kind === 'rust' ? { DROPIT_SWEEP_ON_SPACES: '1', DROPIT_SWEEP_OLDER_THAN: '1' } : {};
+    const server = await start(kind, data, extra);
+    const cookie = await login(server, 'alice@example.test');
+    const created = JSON.parse((await openUpload(server, cookie, space, images.bin, 'stale.bin', 'application/octet-stream')).bytes.toString());
+    await putChunk(server, cookie, space, created.uploadId, 0, images.bin);
+    const before = await fileNames(data);
+    const db = new Database(resolve(data, 'dropit.sqlite'));
+    db.prepare('UPDATE uploads SET expiresAt=? WHERE id=?').run(1, created.uploadId);
+    db.close();
+    if (kind === 'ts') {
+      await stop(server);
+      const restarted = await start(kind, data);
+      const cookie2 = await login(restarted, 'alice@example.test');
+      const gone = await request(restarted, '/api/spaces/' + space + '/uploads/' + created.uploadId, { cookie: cookie2 });
+      assert.equal(gone.status, 404);
+      await delay(100);
+      await stop(restarted);
+    } else {
+      const listed = await request(server, '/api/spaces', { cookie });
+      assert.equal(listed.status, 200);
+      const gone = await request(server, '/api/spaces/' + space + '/uploads/' + created.uploadId, { cookie });
+      assert.equal(gone.status, 404);
+      await stop(server);
+    }
+    const afterDb = new Database(resolve(data, 'dropit.sqlite'), { readonly: true });
+    const uploads = afterDb.prepare('SELECT count(*) AS n FROM uploads WHERE id=?').get(created.uploadId).n;
+    const garbage = afterDb.prepare('SELECT count(*) AS n FROM garbage').get().n;
+    afterDb.close();
+    const after = await fileNames(data);
+    assert.equal(uploads, 0, kind + ' expired session remained');
+    assert.equal(garbage, 0, kind + ' garbage remained ' + garbage);
+    assert.equal(after.length < before.length, true, kind + ' chunk file remained');
+    note(kind + '-C11', { before: before.length, after: after.length, uploads, garbage });
+  }
+  console.log('PASS C11 expiry garbage');
+
+  const restarted = await start('rust', results.rust.server.data);
+  const restartedCookie = await login(restarted, 'alice@example.test');
+  const resumePayload = Buffer.alloc(chunkSize + 16, 4);
+  const resume = JSON.parse((await openUpload(restarted, restartedCookie, space, resumePayload, 'resume.bin', 'application/octet-stream')).bytes.toString());
+  const resumeParts = chunkParts(resumePayload, chunkSize);
+  assert.equal((await putChunk(restarted, restartedCookie, space, resume.uploadId, 0, resumeParts[0])).status, 204);
+  await stop(restarted);
+  const resumed = await start('rust', results.rust.server.data);
+  const resumedCookie = await login(resumed, 'alice@example.test');
+  const status = JSON.parse((await request(resumed, '/api/spaces/' + space + '/uploads/' + resume.uploadId, { cookie: resumedCookie })).bytes.toString());
+  assert.deepEqual(status.received, [0]);
+  assert.equal((await putChunk(resumed, resumedCookie, space, resume.uploadId, 1, resumeParts[1])).status, 204);
+  const resumedItem = itemOf(await finishUpload(resumed, resumedCookie, space, resume.uploadId));
+  const resumedDownload = await request(resumed, '/api/spaces/' + space + '/items/' + resumedItem.id + '/download', { cookie: resumedCookie });
+  assert.equal(resumedDownload.bytes.equals(resumePayload), true);
+  await stop(resumed);
+  results.rust.server = await start('rust', results.rust.server.data);
+  results.rust.alice = await login(results.rust.server, 'alice@example.test');
+  note('rust-C12', { received: status.received, bytes: resumedDownload.bytes.length });
+  console.log('PASS C12 restart resume');
 }
