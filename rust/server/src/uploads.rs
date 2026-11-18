@@ -9,8 +9,10 @@
 //! same `groups` and `item.created` / `item.deleted` payloads as text.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, Mutex, atomic::Ordering},
+    time::Duration,
 };
 
 use axum::{
@@ -20,10 +22,11 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use futures_util::FutureExt;
 use http_body_util::BodyExt;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
+use tokio::{io::AsyncWriteExt, sync::Notify, time::timeout};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
@@ -500,6 +503,786 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
         out.push(HEX[(byte & 0xf) as usize] as char);
     }
     out
+}
+
+/// In-process chunk and complete work. Caps do not abort a write already running.
+#[derive(Default)]
+pub struct ChunkWork {
+    inner: Mutex<ChunkState>,
+}
+
+#[derive(Default)]
+struct ChunkState {
+    sessions: HashMap<String, u32>,
+    principals: HashMap<String, u32>,
+    active: u32,
+    completing: HashMap<String, Arc<Notify>>,
+    cancelled: HashMap<String, Vec<Arc<Notify>>>,
+}
+
+struct ChunkPermit {
+    app: App,
+    session: String,
+    principal: String,
+    /// Private to this write. Drop notifies only the cancel waiter for this permit.
+    notify: Arc<Notify>,
+}
+
+impl Drop for ChunkPermit {
+    fn drop(&mut self) {
+        let mut state = self.app.chunk_work.inner.lock().expect("chunk work");
+        release_count(&mut state.sessions, &self.session);
+        release_count(&mut state.principals, &self.principal);
+        state.active = state.active.saturating_sub(1);
+        if let Some(waiters) = state.cancelled.get_mut(&self.session) {
+            waiters.retain(|waiter| !Arc::ptr_eq(waiter, &self.notify));
+            if waiters.is_empty() {
+                state.cancelled.remove(&self.session);
+            }
+        }
+        self.notify.notify_waiters();
+    }
+}
+
+fn release_count(map: &mut HashMap<String, u32>, key: &str) {
+    if let Some(count) = map.get_mut(key) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            map.remove(key);
+        }
+    }
+}
+
+fn chunk_busy() -> ApiError {
+    let mut error = ApiError::new(429, "CHUNK_BUSY");
+    error.header = Some((header::RETRY_AFTER, HeaderValue::from_static("1")));
+    error
+}
+
+fn acquire_chunk(app: &App, session: &str, principal: &str) -> ApiResult<ChunkPermit> {
+    let mut state = app.chunk_work.inner.lock().map_err(ApiError::internal)?;
+    if state.completing.contains_key(session) {
+        return Err(ApiError::new(409, "UPLOAD_IN_PROGRESS"));
+    }
+    let own_session = state.sessions.get(session).copied().unwrap_or(0);
+    let own_principal = state.principals.get(principal).copied().unwrap_or(0);
+    if own_session >= app.config.upload_chunks_per_session
+        || own_principal >= app.config.upload_chunks_per_user
+        || state.active >= app.config.upload_chunks_global
+    {
+        return Err(chunk_busy());
+    }
+    *state.sessions.entry(session.to_owned()).or_insert(0) += 1;
+    *state.principals.entry(principal.to_owned()).or_insert(0) += 1;
+    state.active += 1;
+    let notify = Arc::new(Notify::new());
+    state
+        .cancelled
+        .entry(session.to_owned())
+        .or_default()
+        .push(Arc::clone(&notify));
+    Ok(ChunkPermit {
+        app: Arc::clone(app),
+        session: session.to_owned(),
+        principal: principal.to_owned(),
+        notify,
+    })
+}
+
+pub async fn create_upload(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<UrlPath<String>, PathRejection>,
+    request: Request,
+) -> ApiResult<impl IntoResponse> {
+    let auth = context.require_auth()?;
+    let UrlPath(space_id) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let user_id = auth.account.user.id.clone();
+    let scope = space_id.clone();
+    app.db
+        .run(move |db| db::space(db, &scope, &user_id, true))
+        .await?;
+    app.limit("upload:ip", &context.ip, app.config.rate_upload)?;
+    app.limit("upload:user", &auth.account.user.id, app.config.rate_upload)?;
+    let body = crate::read_json(request, 8192).await?;
+    let filename = crate::input_string(body.get("filename"), 4096)?.to_owned();
+    let size = json_size(body.get("size"), app.config.max_file)?;
+    let mime = session_mime(body.get("mime"))?;
+    let created_at = now();
+    let mut upload = db::NewUpload {
+        id: uuid::Uuid::new_v4().to_string(),
+        space_id: space_id.clone(),
+        user_id: auth.account.user.id.clone(),
+        principal: format!("user:{}", auth.account.user.id),
+        filename: clean_filename(&filename),
+        mime,
+        size,
+        chunk_size: app.config.upload_chunk_bytes,
+        created_at,
+        expires_at: created_at.saturating_add(86_400_000),
+        quota: auth.account.quota.unwrap_or(app.config.quota),
+        max_items: app.config.max_items,
+        sessions_per_user: app.config.upload_sessions_per_user,
+        sessions_global: app.config.upload_sessions_global,
+    };
+    let response_id = upload.id.clone();
+    app.db
+        .run(move |db| db::create_upload_for_user(db, &mut upload))
+        .await?;
+    let created = app
+        .db
+        .run(move |db| db::upload_session(db, &response_id, now()))
+        .await?
+        .ok_or(ApiError::NOT_FOUND)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "uploadId": created.id,
+            "chunkSize": created.chunk_size,
+            "expiresAt": created.expires_at,
+            "received": [],
+        })),
+    ))
+}
+
+pub async fn get_upload(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<UrlPath<(String, String)>, PathRejection>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let auth = context.require_auth()?;
+    let UrlPath((space_id, upload_id)) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let user_id = auth.account.user.id.clone();
+    app.limit("general:user", &user_id, app.config.rate_general)?;
+    let (upload, chunks) = app
+        .db
+        .run(move |db| {
+            db::space(db, &space_id, &user_id, false)?;
+            let upload = authorized_upload(db, &space_id, &user_id, &upload_id)?;
+            let chunks = db::upload_chunks(db, &upload_id)?;
+            Ok((upload, chunks))
+        })
+        .await?;
+    Ok(Json(json!({
+        "size": upload.size,
+        "chunkSize": upload.chunk_size,
+        "expiresAt": upload.expires_at,
+        "received": chunks.into_iter().map(|chunk| chunk.index).collect::<Vec<_>>(),
+    })))
+}
+
+pub async fn put_chunk(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<UrlPath<(String, String, String)>, PathRejection>,
+    request: Request,
+) -> ApiResult<StatusCode> {
+    let auth = context.require_auth()?;
+    let UrlPath((space_id, upload_id, raw_index)) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let user_id = auth.account.user.id.clone();
+    let scope = space_id.clone();
+    let id = upload_id.clone();
+    app.db
+        .run(move |db| {
+            db::space(db, &scope, &user_id, true)?;
+            authorized_upload(db, &scope, &user_id, &id)
+        })
+        .await?;
+    app.limit("chunk:ip", &context.ip, app.config.rate_chunk)?;
+    app.limit("chunk:user", &auth.account.user.id, app.config.rate_chunk)?;
+    let checksum = header_value(request.headers(), "x-chunk-sha256").map(str::to_owned);
+    if let Some(checksum) = &checksum
+        && (checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(ApiError::new(400, "INVALID_CHECKSUM"));
+    }
+    let principal = format!("user:{}", auth.account.user.id);
+    let permit = acquire_chunk(&app, &upload_id, &principal)?;
+    let directory = downloads::files_dir(&app.config.data);
+    let timeout_ms = app.config.upload_chunk_timeout_ms as u64;
+    let index = chunk_index(&raw_index)?;
+    let user_id = auth.account.user.id.clone();
+    let scope = space_id.clone();
+    let id = upload_id.clone();
+    let expected = app
+        .db
+        .run(move |db| {
+            let upload = authorized_upload(db, &scope, &user_id, &id)?;
+            chunk_expected(&upload, index)
+        })
+        .await?;
+    let stored = match timeout(
+        Duration::from_millis(timeout_ms),
+        write_limited(&directory, request.into_body(), expected, &permit.notify),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => return Err(ApiError::new(400, "UPLOAD_TIMEOUT")),
+    };
+    if stored.size != expected {
+        return Err(ApiError::new(400, "CHUNK_SIZE_MISMATCH"));
+    }
+    if let Some(checksum) = checksum
+        && !stored.sha256.eq_ignore_ascii_case(&checksum)
+    {
+        return Err(ApiError::new(400, "CHECKSUM_MISMATCH"));
+    }
+    let user_id = auth.account.user.id.clone();
+    let scope = space_id.clone();
+    let id = upload_id.clone();
+    let key = stored.key.clone();
+    let sha = stored.sha256.clone();
+    let committed = app
+        .db
+        .run(move |db| {
+            authorized_upload(db, &scope, &user_id, &id)?;
+            db::save_chunk(db, &id, index, &key, expected as i64, &sha, now())
+        })
+        .await?;
+    if committed {
+        forget_staged(stored.staged);
+    } else {
+        // Identical retry: the first key stays. Drop the new file now.
+        drop(stored);
+        let _ = flush_garbage(&app, &directory).await;
+    }
+    drop(permit);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn complete_upload(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<UrlPath<(String, String)>, PathRejection>,
+    request: Request,
+) -> ApiResult<impl IntoResponse> {
+    let auth = context.require_auth()?;
+    let UrlPath((space_id, upload_id)) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let user_id = auth.account.user.id.clone();
+    let scope = space_id.clone();
+    let id = upload_id.clone();
+    let upload = app
+        .db
+        .run(move |db| {
+            db::space(db, &scope, &user_id, true)?;
+            authorized_upload(db, &scope, &user_id, &id)
+        })
+        .await?;
+    app.limit("upload:ip", &context.ip, app.config.rate_upload)?;
+    app.limit("upload:user", &auth.account.user.id, app.config.rate_upload)?;
+    let headers = request.headers().clone();
+    let group = decoded_group(header_value(&headers, "x-dropit-group"))?;
+    let device = parse_device(&headers);
+    let complete_notify = begin_complete(&app, &upload_id)?;
+    let result = finish_complete(
+        &app,
+        auth,
+        &space_id,
+        &upload,
+        group,
+        device,
+        &complete_notify,
+    )
+    .await;
+    let directory = downloads::files_dir(&app.config.data);
+    // A successful commit already deleted the session. Failure must delete it too.
+    // Cancel may have deleted it first; deleting again is a no-op.
+    if result.is_err() {
+        let id = upload_id.clone();
+        let _ = app.db.run(move |db| db::delete_upload(db, &id)).await;
+    }
+    end_complete(&app, &upload_id);
+    let _ = flush_garbage(&app, &directory).await;
+    let (item, groups, channel) = result?;
+    let _gate = app.realtime.gate.lock().await;
+    if let Some(groups) = groups {
+        app.realtime
+            .publish(&channel, json!({ "type": "groups", "groups": groups }));
+    }
+    app.realtime
+        .publish(&channel, json!({ "type": "item.created", "item": item }));
+    drop(_gate);
+    Ok((StatusCode::CREATED, Json(json!({ "item": item }))))
+}
+
+async fn finish_complete(
+    app: &App,
+    auth: &crate::Auth,
+    space_id: &str,
+    upload: &db::UploadSession,
+    group: Option<String>,
+    device: Option<db::Device>,
+    cancel: &Notify,
+) -> ApiResult<(db::Item, Option<Vec<String>>, String)> {
+    let user_id = auth.account.user.id.clone();
+    let scope = space_id.to_owned();
+    let id = upload.id.clone();
+    let chunks = app
+        .db
+        .run(move |db| {
+            authorized_upload(db, &scope, &user_id, &id)?;
+            db::upload_chunks(db, &id)
+        })
+        .await?;
+    let count = div_ceil(upload.size, upload.chunk_size);
+    let contiguous = chunks.len() as i64 == count
+        && chunks
+            .iter()
+            .enumerate()
+            .all(|(index, chunk)| chunk.index == index as i64);
+    let sizes_match = chunks.iter().map(|chunk| chunk.size).sum::<i64>() == upload.size
+        && chunks.iter().enumerate().all(|(index, chunk)| {
+            chunk.size
+                == upload
+                    .chunk_size
+                    .min(upload.size - index as i64 * upload.chunk_size)
+        });
+    if !contiguous || !sizes_match {
+        return Err(ApiError::new(400, "UPLOAD_INCOMPLETE"));
+    }
+    if was_cancelled(cancel) {
+        return Err(ApiError::NOT_FOUND);
+    }
+    let directory = downloads::files_dir(&app.config.data);
+    let keys: Vec<String> = chunks.iter().map(|chunk| chunk.key.clone()).collect();
+    let assembled = assemble_chunks(&directory, &keys, upload.size as u64, cancel).await?;
+    let prefix = read_prefix(&assembled.staged.path, 4096).await?;
+    if upload.mime == "image/svg+xml" || svg_prefix(&prefix) {
+        return Err(ApiError::new(415, "INVALID_IMAGE"));
+    }
+    let sniffed = sniff_raster(&prefix);
+    let mut thumbnail: Option<(String, Staged, i64)> = None;
+    if sniffed.is_some() || wants_thumbnail(&upload.mime) {
+        let path = assembled.staged.path.clone();
+        let derived = tokio::task::spawn_blocking(move || images::derive_file(&path, 320))
+            .await
+            .map_err(ApiError::internal)?
+            .map_err(ApiError::from)?;
+        if derived.len() > images::THUMBNAIL_BYTES {
+            return Err(ApiError::new(413, "FILE_TOO_LARGE"));
+        }
+        let thumb = write_bytes(&directory, &derived).await?;
+        thumbnail = Some((thumb.key, thumb.staged, derived.len() as i64));
+    }
+    let group = group
+        .filter(|value| !value.is_empty())
+        .map(|value| clean_group(&value))
+        .transpose()?;
+    let thumb_size = thumbnail.as_ref().map(|(_, _, size)| *size).unwrap_or(0);
+    let input = db::FileInput {
+        filename: upload.filename.clone(),
+        mime: upload.mime.clone(),
+        size: assembled.size as i64,
+        stored_bytes: assembled.size as i64 + thumb_size,
+        file_key: assembled.key.clone(),
+        thumbnail_key: thumbnail.as_ref().map(|(key, _, _)| key.clone()),
+        group,
+        device,
+    };
+    let hash = auth.session_hash.clone();
+    let channel = space_id.to_owned();
+    let space_id = space_id.to_owned();
+    let upload_id = upload.id.clone();
+    let config = app.config.clone();
+    let _gate = app.realtime.gate.lock().await;
+    let committed = app
+        .db
+        .run(move |db| {
+            if db::upload_session(db, &upload_id, now())?.is_none() {
+                return Err(ApiError::NOT_FOUND);
+            }
+            let before = db::groups(db, &space_id)?;
+            let item = db::complete_upload(db, &config, &hash, &space_id, &upload_id, input);
+            let after = db::groups(db, &space_id)?;
+            Ok((item, (before != after).then_some(after)))
+        })
+        .await;
+    drop(_gate);
+    let (item, groups) = committed?;
+    let item = item?;
+    forget_staged(assembled.staged);
+    if let Some((_, staged, _)) = thumbnail {
+        forget_staged(staged);
+    }
+    Ok((item, groups, channel))
+}
+
+pub async fn cancel_upload(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<UrlPath<(String, String)>, PathRejection>,
+) -> ApiResult<StatusCode> {
+    let auth = context.require_auth()?;
+    let UrlPath((space_id, upload_id)) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let user_id = auth.account.user.id.clone();
+    let scope = space_id.clone();
+    let id = upload_id.clone();
+    app.db
+        .run(move |db| {
+            db::space(db, &scope, &user_id, true)?;
+            authorized_upload(db, &scope, &user_id, &id)?;
+            Ok(())
+        })
+        .await?;
+    app.limit("general:ip", &context.ip, app.config.rate_general)?;
+    app.limit(
+        "general:user",
+        &auth.account.user.id,
+        app.config.rate_general,
+    )?;
+    let id = upload_id.clone();
+    app.db.run(move |db| db::delete_upload(db, &id)).await?;
+    abort_session(&app, &upload_id).await;
+    let directory = downloads::files_dir(&app.config.data);
+    flush_garbage(&app, &directory).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn begin_complete(app: &App, upload_id: &str) -> ApiResult<Arc<Notify>> {
+    let mut state = app.chunk_work.inner.lock().map_err(ApiError::internal)?;
+    if state.completing.contains_key(upload_id) || state.sessions.contains_key(upload_id) {
+        return Err(ApiError::new(409, "UPLOAD_IN_PROGRESS"));
+    }
+    let notify = Arc::new(Notify::new());
+    state
+        .completing
+        .insert(upload_id.to_owned(), Arc::clone(&notify));
+    Ok(notify)
+}
+
+fn end_complete(app: &App, upload_id: &str) {
+    if let Ok(mut state) = app.chunk_work.inner.lock()
+        && let Some(notify) = state.completing.remove(upload_id)
+    {
+        notify.notify_waiters();
+    }
+}
+
+async fn abort_session(app: &App, upload_id: &str) {
+    let (chunk_notify, complete_notify) = {
+        let Ok(state) = app.chunk_work.inner.lock() else {
+            return;
+        };
+        (
+            state.cancelled.get(upload_id).cloned().unwrap_or_default(),
+            state.completing.get(upload_id).cloned(),
+        )
+    };
+    for notify in &chunk_notify {
+        notify.notify_waiters();
+    }
+    if let Some(notify) = &complete_notify {
+        notify.notify_waiters();
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let pending = app
+            .chunk_work
+            .inner
+            .lock()
+            .map(|state| {
+                state.sessions.contains_key(upload_id) || state.completing.contains_key(upload_id)
+            })
+            .unwrap_or(false);
+        if !pending || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn authorized_upload(
+    db: &rusqlite::Connection,
+    space_id: &str,
+    user_id: &str,
+    upload_id: &str,
+) -> ApiResult<db::UploadSession> {
+    let upload = db::upload_session(db, upload_id, now())?.ok_or(ApiError::NOT_FOUND)?;
+    if upload.space_id != space_id || upload.user_id.as_deref() != Some(user_id) {
+        return Err(ApiError::NOT_FOUND);
+    }
+    Ok(upload)
+}
+
+fn json_size(value: Option<&serde_json::Value>, max_file: i64) -> ApiResult<i64> {
+    let number = value
+        .and_then(serde_json::Value::as_f64)
+        .ok_or(ApiError::INVALID_INPUT)?;
+    if number.fract() != 0.0 || !(1.0..(1_u64 << 53) as f64).contains(&number) {
+        return Err(ApiError::INVALID_INPUT);
+    }
+    let size = number as i64;
+    if size > max_file {
+        return Err(ApiError::new(413, "FILE_TOO_LARGE"));
+    }
+    Ok(size)
+}
+
+fn session_mime(value: Option<&serde_json::Value>) -> ApiResult<String> {
+    let raw = crate::input_string(value, 200)?;
+    let mime = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if mime.is_empty() {
+        return Err(ApiError::INVALID_INPUT);
+    }
+    Ok(mime)
+}
+
+fn was_cancelled(cancel: &Notify) -> bool {
+    cancel.notified().now_or_never().is_some()
+}
+
+fn div_ceil(value: i64, divisor: i64) -> i64 {
+    value.saturating_add(divisor - 1) / divisor
+}
+
+fn chunk_index(raw: &str) -> ApiResult<i64> {
+    if !valid_chunk_index(raw) {
+        return Err(ApiError::new(400, "INVALID_CHUNK_INDEX"));
+    }
+    raw.parse::<i64>()
+        .map_err(|_| ApiError::new(400, "INVALID_CHUNK_INDEX"))
+}
+
+fn chunk_expected(upload: &db::UploadSession, index: i64) -> ApiResult<u64> {
+    if index < 0 || index >= div_ceil(upload.size, upload.chunk_size) {
+        return Err(ApiError::new(400, "INVALID_CHUNK_INDEX"));
+    }
+    Ok(upload
+        .chunk_size
+        .min(upload.size - index * upload.chunk_size) as u64)
+}
+
+fn valid_chunk_index(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    if bytes.is_empty() || bytes.iter().any(|byte| !byte.is_ascii_digit()) {
+        return false;
+    }
+    if bytes.len() > 1 && bytes[0] == b'0' {
+        return false;
+    }
+    // Number.isSafeInteger rejects values at or above 2^53.
+    let digits = raw.trim_start_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    if digits.len() > 16 {
+        return false;
+    }
+    let value: u64 = digits.parse().unwrap_or(u64::MAX);
+    value < (1_u64 << 53)
+}
+
+fn sniff_raster(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 8 && bytes[..8] == [137, 80, 78, 71, 13, 10, 26, 10] {
+        return Some("image/png");
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 6 && (bytes[..6] == *b"GIF87a" || bytes[..6] == *b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && (bytes[8..12] == *b"avif" || bytes[8..12] == *b"avis")
+    {
+        return Some("image/avif");
+    }
+    None
+}
+
+fn svg_prefix(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while let Some(found) = text[index..].find("<svg") {
+        let after = index + found + 4;
+        if bytes
+            .get(after)
+            .is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
+        {
+            return true;
+        }
+        index = after;
+    }
+    false
+}
+
+async fn read_prefix(path: &Path, length: usize) -> ApiResult<Vec<u8>> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(ApiError::internal)?;
+    let mut buffer = vec![0; length];
+    let read = tokio::io::AsyncReadExt::read(&mut file, &mut buffer)
+        .await
+        .map_err(ApiError::internal)?;
+    buffer.truncate(read);
+    Ok(buffer)
+}
+
+async fn write_limited(
+    directory: &Path,
+    body: Body,
+    limit: u64,
+    cancel: &Notify,
+) -> ApiResult<Stored> {
+    let key = uuid::Uuid::new_v4().to_string();
+    let path = downloads::object_path(directory, &key)?;
+    let staged = Staged {
+        path: path.clone(),
+        keep: false,
+    };
+    let mut file = create_exclusive(directory, &path).await?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut body = body;
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = cancel.notified() => return Err(ApiError::NOT_FOUND),
+            frame = body.frame() => frame,
+        };
+        let Some(frame) = next else { break };
+        let frame = frame.map_err(|_| ApiError::NOT_FOUND)?;
+        let Ok(chunk) = frame.into_data() else {
+            continue;
+        };
+        size = size
+            .checked_add(chunk.len() as u64)
+            .ok_or(ApiError::new(413, "FILE_TOO_LARGE"))?;
+        if size > limit {
+            return Err(ApiError::new(413, "FILE_TOO_LARGE"));
+        }
+        hasher.update(&chunk);
+        file.write_all(&chunk).await.map_err(ApiError::internal)?;
+    }
+    if size == 0 {
+        return Err(ApiError::new(400, "EMPTY_FILE"));
+    }
+    file.sync_all().await.map_err(ApiError::internal)?;
+    drop(file);
+    Ok(Stored {
+        key,
+        size,
+        sha256: hex_encode(hasher.finalize()),
+        staged,
+    })
+}
+
+async fn assemble_chunks(
+    directory: &Path,
+    keys: &[String],
+    expected: u64,
+    cancel: &Notify,
+) -> ApiResult<Stored> {
+    let key = uuid::Uuid::new_v4().to_string();
+    let path = downloads::object_path(directory, &key)?;
+    let staged = Staged {
+        path: path.clone(),
+        keep: false,
+    };
+    let mut output = create_exclusive(directory, &path).await?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buffer = vec![0; 64 * 1024];
+    for source in keys {
+        let source = downloads::object_path(directory, source)?;
+        let mut input = tokio::fs::File::open(source)
+            .await
+            .map_err(|_| ApiError::new(400, "UPLOAD_INCOMPLETE"))?;
+        loop {
+            if was_cancelled(cancel) {
+                return Err(ApiError::NOT_FOUND);
+            }
+            let read = tokio::io::AsyncReadExt::read(&mut input, &mut buffer)
+                .await
+                .map_err(ApiError::internal)?;
+            if read == 0 {
+                break;
+            }
+            size = size
+                .checked_add(read as u64)
+                .ok_or(ApiError::new(413, "FILE_TOO_LARGE"))?;
+            if size > expected {
+                return Err(ApiError::new(400, "UPLOAD_INCOMPLETE"));
+            }
+            hasher.update(&buffer[..read]);
+            output
+                .write_all(&buffer[..read])
+                .await
+                .map_err(ApiError::internal)?;
+        }
+    }
+    if size != expected {
+        return Err(ApiError::new(400, "UPLOAD_INCOMPLETE"));
+    }
+    output.sync_all().await.map_err(ApiError::internal)?;
+    drop(output);
+    Ok(Stored {
+        key,
+        size,
+        sha256: hex_encode(hasher.finalize()),
+        staged,
+    })
+}
+
+async fn flush_garbage(app: &App, directory: &Path) {
+    let Ok(keys) = app.db.run(|db| db::garbage_keys(db)).await else {
+        return;
+    };
+    for key in keys {
+        if remove_stored(directory, &key).await.is_ok() {
+            let _ = app.db.run(move |db| db::forget_garbage(db, &key)).await;
+        }
+    }
+}
+
+/// Test and maintenance entry. Expired sessions become garbage, then unreferenced
+/// files older than `older_than` are removed. Live chunk keys stay.
+///
+/// `DROPIT_SWEEP_ON_SPACES=1` runs this from GET /api/spaces so the HTTP harness
+/// can prove expiry and garbage cleanup. It is not a public route.
+pub async fn sweep_expired(app: &App, older_than: i64) -> ApiResult<()> {
+    let directory = downloads::files_dir(&app.config.data);
+    let time = now();
+    let _ = app.db.run(move |db| db::expire_uploads(db, time)).await?;
+    flush_garbage(app, &directory).await;
+    let referenced = app.db.run(|db| db::referenced_file_keys(db)).await?;
+    let referenced: std::collections::HashSet<String> = referenced.into_iter().collect();
+    let entries = match tokio::fs::read_dir(&directory).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(ApiError::internal(error)),
+    };
+    let mut entries = entries;
+    while let Some(entry) = entries.next_entry().await.map_err(ApiError::internal)? {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if referenced.contains(name) || downloads::object_path(&directory, name).is_err() {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .await
+            .map_err(ApiError::internal)?
+            .modified()
+            .map_err(ApiError::internal)?;
+        let millis = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        if millis < older_than {
+            remove_stored(&directory, name).await?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

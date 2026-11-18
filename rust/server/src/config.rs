@@ -25,6 +25,14 @@ pub struct Config {
     pub rate_auth: u32,
     pub rate_upload: u32,
     pub rate_token: u32,
+    pub rate_chunk: u32,
+    pub upload_chunk_bytes: i64,
+    pub upload_chunk_timeout_ms: i64,
+    pub upload_chunks_per_session: u32,
+    pub upload_chunks_per_user: u32,
+    pub upload_chunks_global: u32,
+    pub upload_sessions_per_user: i64,
+    pub upload_sessions_global: i64,
 }
 
 impl Config {
@@ -82,6 +90,14 @@ impl Config {
             rate_auth: 0,
             rate_upload: 0,
             rate_token: 0,
+            rate_chunk: 0,
+            upload_chunk_bytes: 0,
+            upload_chunk_timeout_ms: 0,
+            upload_chunks_per_session: 0,
+            upload_chunks_per_user: 0,
+            upload_chunks_global: 0,
+            upload_sessions_per_user: 0,
+            upload_sessions_global: 0,
         })
     }
 
@@ -133,6 +149,49 @@ impl Config {
         self.rate_auth = limit("rateAuth", "RATE_AUTH", 20, 1, 1000000)? as u32;
         self.rate_upload = limit("rateUpload", "RATE_UPLOAD", 30, 1, 1000000)? as u32;
         self.rate_token = limit("rateToken", "RATE_TOKEN", 120, 1, 1000000)? as u32;
+        self.rate_chunk = limit("rateChunk", "RATE_CHUNK", 2000, 1, 1000000)? as u32;
+        self.upload_chunk_bytes = limit(
+            "uploadChunkBytes",
+            "UPLOAD_CHUNK_BYTES",
+            8 << 20,
+            1,
+            24 << 20,
+        )?;
+        if self.upload_chunk_bytes < 64 * 1024 {
+            return Err("Invalid persisted limit uploadChunkBytes".into());
+        }
+        self.upload_chunk_timeout_ms = limit(
+            "uploadChunkTimeoutMs",
+            "UPLOAD_CHUNK_TIMEOUT_MS",
+            120000,
+            1,
+            3600000,
+        )?;
+        self.upload_chunks_per_session = limit(
+            "uploadChunksPerSession",
+            "UPLOAD_CHUNKS_PER_SESSION",
+            3,
+            1,
+            16,
+        )? as u32;
+        self.upload_chunks_per_user =
+            limit("uploadChunksPerUser", "UPLOAD_CHUNKS_PER_USER", 6, 1, 64)? as u32;
+        self.upload_chunks_global =
+            limit("uploadChunksGlobal", "UPLOAD_CHUNKS_GLOBAL", 16, 1, 256)? as u32;
+        self.upload_sessions_per_user = limit(
+            "uploadSessionsPerUser",
+            "UPLOAD_SESSIONS_PER_USER",
+            8,
+            1,
+            1000,
+        )?;
+        self.upload_sessions_global = limit(
+            "uploadSessionsGlobal",
+            "UPLOAD_SESSIONS_GLOBAL",
+            128,
+            1,
+            10000,
+        )?;
         if self.rate_auth >= self.rate_general || self.rate_upload >= self.rate_general {
             return Err("Invalid rate limits".into());
         }

@@ -22,7 +22,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use percent_encoding::percent_decode_str;
 use rusqlite::{TransactionBehavior, params};
@@ -39,11 +39,11 @@ use realtime::Realtime;
 type ApiResult<T> = Result<T, ApiError>;
 
 #[derive(Debug)]
-struct ApiError {
+pub(crate) struct ApiError {
     status: u16,
     code: &'static str,
     details: Option<Box<Map<String, Value>>>,
-    header: Option<(header::HeaderName, HeaderValue)>,
+    pub(crate) header: Option<(header::HeaderName, HeaderValue)>,
 }
 
 impl ApiError {
@@ -84,6 +84,12 @@ impl IntoResponse for ApiError {
         if let Some((name, value)) = self.header {
             response.headers_mut().insert(name, value);
         }
+        // TS adds Retry-After: 1 to every 429 that did not set one.
+        if self.status == 429 && !response.headers().contains_key(header::RETRY_AFTER) {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+        }
         response
     }
 }
@@ -98,9 +104,10 @@ struct StateData {
     upload_slots: AtomicU32,
     preview_slots: AtomicU32,
     app_tickets: Mutex<HashMap<String, AppTicket>>,
+    chunk_work: uploads::ChunkWork,
 }
 
-type App = Arc<StateData>;
+pub(crate) type App = Arc<StateData>;
 
 struct Bucket {
     count: u32,
@@ -140,14 +147,14 @@ impl StateData {
 }
 
 #[derive(Clone)]
-struct Auth {
+pub(crate) struct Auth {
     account: Arc<Account>,
     session_hash: String,
     bearer: Option<machine::Bearer>,
 }
 
 #[derive(Clone)]
-struct RequestContext {
+pub(crate) struct RequestContext {
     ip: String,
     ip_summary: String,
     secure_cookie: bool,
@@ -178,6 +185,7 @@ async fn main() -> StartupResult<()> {
         upload_slots: AtomicU32::new(0),
         preview_slots: AtomicU32::new(0),
         app_tickets: Mutex::new(HashMap::new()),
+        chunk_work: uploads::ChunkWork::default(),
     });
     let routes = Router::new()
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
@@ -204,6 +212,19 @@ async fn main() -> StartupResult<()> {
         .route("/api/spaces/{space}/items", get(items))
         .route("/api/spaces/{space}/items/text", post(text))
         .route("/api/spaces/{space}/items/file", post(uploads::upload_file))
+        .route("/api/spaces/{space}/uploads", post(uploads::create_upload))
+        .route(
+            "/api/spaces/{space}/uploads/{id}",
+            get(uploads::get_upload).delete(uploads::cancel_upload),
+        )
+        .route(
+            "/api/spaces/{space}/uploads/{id}/chunks/{index}",
+            put(uploads::put_chunk),
+        )
+        .route(
+            "/api/spaces/{space}/uploads/{id}/complete",
+            post(uploads::complete_upload),
+        )
         .route("/api/spaces/{space}/items/{id}", delete(uploads::retract))
         .route(
             "/api/spaces/{space}/items/{id}/preview",
@@ -1111,6 +1132,14 @@ async fn spaces(
     Extension(context): Extension<RequestContext>,
 ) -> ApiResult<Json<Value>> {
     let id = context.require_auth()?.account.user.id.clone();
+    // Test hook only. Production maintenance remains in RHEA-238.
+    if std::env::var("DROPIT_SWEEP_ON_SPACES").ok().as_deref() == Some("1") {
+        let older_than = std::env::var("DROPIT_SWEEP_OLDER_THAN")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| now().saturating_sub(3_600_000));
+        let _ = uploads::sweep_expired(&app, older_than).await;
+    }
     let spaces = app.db.run(move |db| db::spaces(db, &id)).await?;
     Ok(Json(json!({ "spaces": spaces })))
 }
@@ -1336,7 +1365,7 @@ fn file_size(size: i64) -> ApiResult<u64> {
     u64::try_from(size).map_err(|_| ApiError::internal("negative stored size"))
 }
 
-async fn read_json(request: Request, limit: usize) -> ApiResult<Map<String, Value>> {
+pub(crate) async fn read_json(request: Request, limit: usize) -> ApiResult<Map<String, Value>> {
     if !header_value(request.headers(), "content-type")
         .is_some_and(|value| value.starts_with("application/json"))
     {
@@ -1358,14 +1387,14 @@ async fn read_json(request: Request, limit: usize) -> ApiResult<Map<String, Valu
         .map_err(|_| ApiError::new(400, "INVALID_JSON"))
 }
 
-fn input_string(value: Option<&Value>, limit: usize) -> ApiResult<&str> {
+pub(crate) fn input_string(value: Option<&Value>, limit: usize) -> ApiResult<&str> {
     value
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty() && text.encode_utf16().count() <= limit)
         .ok_or(ApiError::INVALID_INPUT)
 }
 
-fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+pub(crate) fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
 }
 
@@ -1386,7 +1415,7 @@ fn decode_uri_component(value: &str) -> Option<String> {
         .map(|value| value.into_owned())
 }
 
-fn parse_device(headers: &HeaderMap) -> Option<Device> {
+pub(crate) fn parse_device(headers: &HeaderMap) -> Option<Device> {
     let name = header_value(headers, "x-dropit-device-name").and_then(decode_uri_component);
     device_from_values(
         header_value(headers, "x-dropit-device"),
@@ -1420,7 +1449,7 @@ fn device_from_values(id: Option<&str>, name: Option<&str>, kind: Option<&str>) 
     })
 }
 
-fn clean_group(value: &str) -> ApiResult<String> {
+pub(crate) fn clean_group(value: &str) -> ApiResult<String> {
     let group = clean_whitespace(value);
     if !(1..=24).contains(&group.chars().count())
         || group.chars().any(char::is_control)
@@ -1444,7 +1473,7 @@ fn js_space(ch: char) -> bool {
     (ch.is_whitespace() && ch != '\u{85}') || ch == '\u{feff}'
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before Unix epoch")
