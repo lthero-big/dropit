@@ -24,6 +24,7 @@ pub struct Config {
     pub rate_general: u32,
     pub rate_auth: u32,
     pub rate_upload: u32,
+    pub rate_token: u32,
 }
 
 impl Config {
@@ -80,6 +81,7 @@ impl Config {
             rate_general: 0,
             rate_auth: 0,
             rate_upload: 0,
+            rate_token: 0,
         })
     }
 
@@ -130,6 +132,7 @@ impl Config {
         self.rate_general = limit("rateGeneral", "RATE_GENERAL", 240, 1, 1000000)? as u32;
         self.rate_auth = limit("rateAuth", "RATE_AUTH", 20, 1, 1000000)? as u32;
         self.rate_upload = limit("rateUpload", "RATE_UPLOAD", 30, 1, 1000000)? as u32;
+        self.rate_token = limit("rateToken", "RATE_TOKEN", 120, 1, 1000000)? as u32;
         if self.rate_auth >= self.rate_general || self.rate_upload >= self.rate_general {
             return Err("Invalid rate limits".into());
         }

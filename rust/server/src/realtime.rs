@@ -41,6 +41,7 @@ struct Connection {
     space: String,
     ip: String,
     user: String,
+    bearer: Option<String>,
     device: Option<Device>,
     active: bool,
     pending: usize,
@@ -73,6 +74,7 @@ impl Realtime {
         space: String,
         ip: String,
         user: String,
+        bearer: Option<String>,
         device: Option<Device>,
     ) -> ApiResult<Subscription> {
         let mut hub = app.realtime.hub.lock().map_err(ApiError::internal)?;
@@ -92,6 +94,7 @@ impl Realtime {
                 space,
                 ip,
                 user,
+                bearer,
                 device,
                 sender,
                 close,
@@ -109,6 +112,15 @@ impl Realtime {
     }
     pub fn publish(&self, space: &str, event: Value) {
         self.hub.lock().unwrap().publish(space, event);
+    }
+
+    pub fn revoke_token(&self, token_id: &str) {
+        let mut hub = self.hub.lock().unwrap();
+        for connection in hub.connections.values_mut() {
+            if connection.bearer.as_deref() == Some(token_id) {
+                let _ = connection.close.send(true);
+            }
+        }
     }
 }
 
@@ -183,7 +195,8 @@ pub async fn websocket(
                 && expected
                     .strip_prefix("http://")
                     .is_some_and(|h| received == format!("https://{h}"))));
-    if !allowed {
+    let auth = context.require_auth()?.clone();
+    if auth.bearer.is_none() && !allowed {
         let mut error = ApiError::new(403, "ORIGIN_REJECTED");
         error.details = Some(Box::new(serde_json::Map::from_iter([
             ("expected".into(), expected.into()),
@@ -192,9 +205,9 @@ pub async fn websocket(
         ])));
         return Err(error);
     }
-    let auth = context.require_auth()?.clone();
     let Path(space) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let user = auth.account.user.id.clone();
+    let bearer = auth.bearer.as_ref().map(|bearer| bearer.id.clone());
     let scope = space.clone();
     let id = user.clone();
     app.db
@@ -206,13 +219,24 @@ pub async fn websocket(
         space.clone(),
         context.ip,
         user.clone(),
+        bearer.clone(),
         device.clone(),
     )?;
     let upgrade = upgrade.map_err(|_| ApiError::new(500, "INTERNAL_ERROR"))?;
     Ok(upgrade
         .max_message_size(1024)
         .max_frame_size(1024)
-        .on_upgrade(move |socket| run(socket, subscription, space, user, auth.session_hash, device))
+        .on_upgrade(move |socket| {
+            run(
+                socket,
+                subscription,
+                space,
+                user,
+                auth.session_hash,
+                bearer,
+                device,
+            )
+        })
         .into_response())
 }
 
@@ -228,12 +252,21 @@ fn parse_device(query: Option<&str>) -> Option<Device> {
     )
 }
 
-async fn authorized(app: &App, space: &str, user: &str, hash: &str) -> bool {
+async fn authorized(app: &App, space: &str, user: &str, hash: &str, bearer: Option<&str>) -> bool {
     let space = space.to_owned();
     let user = user.to_owned();
     let hash = hash.to_owned();
+    let bearer = bearer.map(str::to_owned);
     app.db
-        .run(move |db| db::session_member(db, &hash, &space, &user))
+        .run(move |db| {
+            db::principal_member(
+                db,
+                (!hash.is_empty()).then_some(hash.as_str()),
+                bearer.as_deref(),
+                &space,
+                &user,
+            )
+        })
         .await
         .unwrap_or(false)
 }
@@ -244,6 +277,7 @@ async fn run(
     space: String,
     user: String,
     hash: String,
+    bearer: Option<String>,
     device: Option<Device>,
 ) {
     let app = sub.app.clone();
@@ -251,7 +285,7 @@ async fn run(
     // Discard pre-snapshot events: the snapshot already contains those committed writes.
     let snapshot = {
         let _gate = app.realtime.gate.lock().await;
-        if !authorized(&app, &space, &user, &hash).await {
+        if !authorized(&app, &space, &user, &hash, bearer.as_deref()).await {
             close(&mut socket, 1008, "Authorization expired").await;
             return;
         }
@@ -262,7 +296,9 @@ async fn run(
         let id = user.clone();
         let session = hash.clone();
         app.db.run(move |db| {
-            if let Some(device) = device {
+            if let Some(device) = device
+                && !session.is_empty()
+            {
                 db.execute("UPDATE sessions SET deviceId=?,deviceName=?,deviceKind=? WHERE sessionHash=?", rusqlite::params![device.id, device.name, device.kind, session])?;
             }
             let tx = db.transaction()?;
@@ -301,7 +337,7 @@ async fn run(
             biased;
             _ = sub.close.changed() => { close(&mut socket, 1013, "Slow consumer").await; break; }
             _ = validation.tick() => {
-                if !authorized(&app, &space, &user, &hash).await { close(&mut socket, 1008, "Authorization expired").await; break; }
+                if !authorized(&app, &space, &user, &hash, bearer.as_deref()).await { close(&mut socket, 1008, "Authorization expired").await; break; }
             }
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_))) => {
@@ -332,7 +368,7 @@ async fn run(
                 let Some(payload) = payload else { break };
                 consume(&sub, payload.len());
                 // Revalidate immediately before delivering data, not only on the timer.
-                if !authorized(&app, &space, &user, &hash).await { close(&mut socket, 1008, "Authorization expired").await; break }
+                if !authorized(&app, &space, &user, &hash, bearer.as_deref()).await { close(&mut socket, 1008, "Authorization expired").await; break }
                 if send(&mut socket, Message::Text(payload.to_string().into())).await.is_err() {
                     close(&mut socket, 1013, "Slow consumer").await; break;
                 }
@@ -386,6 +422,7 @@ mod tests {
                 close,
                 space: "s".into(),
                 user: "u".into(),
+                bearer: None,
                 ip: "i".into(),
                 device: None,
                 active: false,

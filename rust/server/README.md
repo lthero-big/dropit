@@ -1,12 +1,14 @@
-# Rust password, text and browser service
+# Rust password, machine-access, text and browser service
 
 RHEA-227 adds the first runnable Rust slice of the migration. The HTTP reference is
 the TS server at commit 37ce06ebfab2cd98b81e49ce54fb24ec5daeec68. Source contracts are
 in ../CONTRACT.md, ../DECISIONS.md and ../MAP.md.
 
-The implemented routes are GET /healthz, POST /api/auth/password/login,
-POST /api/auth/logout, GET /api/me, GET /api/spaces, GET /api/spaces/:space,
-GET /api/spaces/:space/items and POST /api/spaces/:space/items/text.
+The implemented routes include GET /healthz, password login/logout, browser
+account and private-space text routes, PAT management under /api/tokens,
+device authorization under /api/auth/device, and the one-time WebView handoff
+under /api/app-session. Existing file reads and the private-space WebSocket
+are also retained.
 RHEA-230 adds GET /api/site, /api/version, /api/auth/providers, /api/setup
 and GET /api/spaces/:space/ws.
 
@@ -17,7 +19,11 @@ Viewer writes return READ_ONLY. Temporary-password sessions retain the
 PASSWORD_CHANGE_REQUIRED restriction. Password verification applies NFKC and
 scrypt, with constant-time derived-key comparison and dummy work for missing
 accounts. Session secrets are random 32-byte base64url strings, stored as
-base64url SHA-256 hashes.
+base64url SHA-256 hashes. Machine credentials use the same 32-byte base64url
+format. Only token digests are stored in access_tokens and
+device_authorizations.
+
+Bearer authentication takes precedence over a cookie, enforces read/write scopes before routing, and does not use browser Origin checks. Browser-only token administration and device approval still require a cookie session. Revocation, expiry and account disablement are rechecked for writes and live WebSocket connections.
 
 ## Build and validate
 
@@ -51,7 +57,8 @@ cargo test --locked -- --nocapture
 ~~~
 
 cargo test runs tests/http.rs, which launches tests/compat.mjs with the built Rust
-binary. It also runs tests/files-http.rs, which launches tests/files-compat.mjs.
+binary. It also runs tests/files-http.rs, tests/uploads-http.rs and
+tests/machine-auth.rs, which launch fixed fixtures for file, upload and machine-access compatibility.
 The same harnesses can be invoked from the repository root with
 node rust/server/tests/compat.mjs and node rust/server/tests/files-compat.mjs.
 RUST_SERVER_BIN can select a release build.
@@ -149,7 +156,7 @@ SameSite=Lax, Path=/ and Max-Age semantics.
 
 The supported limit environment variables are MAX_FILE_BYTES, MAX_TEXT_BYTES,
 MAX_ITEMS, USER_QUOTA_BYTES, RETENTION_HOURS, SESSION_HOURS, RATE_WINDOW_MS,
-RATE_GENERAL, RATE_AUTH and RATE_UPLOAD. Corresponding runtime_limits entries
+RATE_GENERAL, RATE_AUTH, RATE_UPLOAD and RATE_TOKEN. Corresponding runtime_limits entries
 override them at startup. Account quota overrides and active upload reservations
 contribute to capacity checks. Expired items are excluded from snapshots.
 
@@ -226,19 +233,39 @@ empty 416 body, and Axum sets Content-Length on JSON errors. Hono leaves both
 unset. The compared bytes are empty or identical, and the harness normalizes
 those two length headers.
 
-Chunked upload, share links, rooms, and PAT/bearer authentication remain
-outside this slice. Direct upload, preview, and retract are in the RHEA-233
-section. An Authorization header still selects the unsupported bearer path.
+Chunked upload, share links and rooms remain outside this slice. Direct upload,
+preview and retract are in the RHEA-233 section.
+
+## Machine access slice (RHEA-234)
+
+`src/machine.rs` ports the schema-19 access token and device authorization
+records. `POST /api/tokens` returns a raw PAT once; listing, renaming, revoking,
+purging and the admin token list never return it. `read` is required for safe
+requests and `write` for mutations. `POST /api/auth/device/authorize` is public
+for CLI clients, while the user-code page and approve/deny actions require a
+browser session. Polling preserves pending, slow_down, denied and expired
+responses, and an immediate SQLite transaction allows only one concurrent poll
+to consume an approved flow.
+
+`POST /api/app-session/ticket` accepts only a live bearer token with `web`; the
+hashed ticket is kept in memory for 60 seconds and is consumed before the token
+is checked again. A valid ticket creates a normal browser cookie only when the
+request has no browser session or currently has a bearer session. This keeps an
+existing browser account from being replaced by an app token.
+
+The independent machine harness runs the existing CLI's `login`, `whoami`,
+`send` and `ls` commands against Rust, and directly mutates only the synthetic
+fixture for account-disablement verification; this slice does not add an
+incomplete admin-user API.
 
 ## Coverage boundary
 
-OAuth, PAT/device-code authentication, registration/setup writes, password changes,
-session-management APIs, room APIs, chunked uploads, sharing, admin APIs,
-static web hosting,
+OAuth, registration/setup writes, password changes, session-management APIs,
+room APIs, chunked uploads, sharing, the remaining admin APIs, static web hosting,
 update endpoints and historical schema upgrades remain outside this
-slice. Unsupported routes return the existing JSON NOT_FOUND form. An
-Authorization header selects the unsupported bearer path and returns
-UNAUTHENTICATED with WWW-Authenticate instead of falling back to a cookie.
+slice. Unsupported routes return the existing JSON NOT_FOUND form. An invalid
+Authorization header returns UNAUTHENTICATED with WWW-Authenticate instead of
+falling back to a cookie.
 
 Periodic expiration/garbage collection and live admin-setting updates are also
 pending. Expired records are filtered from reads but are retained in storage and

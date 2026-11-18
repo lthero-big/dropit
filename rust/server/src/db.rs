@@ -92,7 +92,7 @@ pub struct Account {
     pub quota: Option<i64>,
 }
 
-fn account(row: &Row<'_>) -> rusqlite::Result<Account> {
+pub(crate) fn account(row: &Row<'_>) -> rusqlite::Result<Account> {
     Ok(Account {
         user: User {
             id: row.get("id")?,
@@ -132,13 +132,40 @@ pub fn session(db: &Connection, hash: &str, ip: Option<&str>) -> ApiResult<Optio
     Ok(account)
 }
 
-pub fn session_member(
+/// Re-check the credential inside a write transaction. Middleware has already
+/// authenticated the request, but revocation or account disablement can race
+/// with the commit, so writes must not trust the earlier snapshot.
+pub fn principal_account(
     db: &Connection,
-    hash: &str,
+    session_hash: Option<&str>,
+    bearer_id: Option<&str>,
+    time: i64,
+) -> ApiResult<Option<Account>> {
+    if let Some(session_hash) = session_hash {
+        return session(db, session_hash, None);
+    }
+    let Some(bearer_id) = bearer_id else {
+        return Ok(None);
+    };
+    Ok(db
+        .query_row(
+            "SELECT u.* FROM access_tokens t JOIN users u ON u.id=t.userId
+             WHERE t.id=? AND t.revoked=0 AND u.disabled=0 AND u.pending=0
+             AND (t.expiresAt IS NULL OR t.expiresAt>?)",
+            params![bearer_id, time],
+            account,
+        )
+        .optional()?)
+}
+
+pub fn principal_member(
+    db: &Connection,
+    session_hash: Option<&str>,
+    bearer_id: Option<&str>,
     space_id: &str,
     user_id: &str,
 ) -> ApiResult<bool> {
-    let Some(account) = session(db, hash, None)? else {
+    let Some(account) = principal_account(db, session_hash, bearer_id, now())? else {
         return Ok(false);
     };
     if account.user.id != user_id {
@@ -354,7 +381,8 @@ pub struct TextInput {
 pub fn insert_text(
     db: &mut Connection,
     config: &Config,
-    session_hash: &str,
+    session_hash: Option<&str>,
+    bearer_id: Option<&str>,
     space_id: &str,
     input: TextInput,
 ) -> ApiResult<Item> {
@@ -362,14 +390,14 @@ pub fn insert_text(
     // TS creates a named group before checking item capacity. Preserve the group if capacity rejects the item.
     if let Some(group) = &input.group {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let account = writable_account(&tx, session_hash)?;
+        let account = writable_account(&tx, session_hash, bearer_id)?;
         space(&tx, space_id, &account.user.id, true)?;
         ensure_group(&tx, space_id, group, time)?;
         tx.commit()?;
     }
 
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let account = writable_account(&tx, session_hash)?;
+    let account = writable_account(&tx, session_hash, bearer_id)?;
     let space = space(&tx, space_id, &account.user.id, true)?;
     if space.expires_at.is_some_and(|expiry| expiry <= time) {
         return Err(ApiError::NOT_FOUND);
@@ -426,14 +454,14 @@ pub fn insert_file(
     // Named groups are created before the capacity check, matching insert_text.
     if let Some(group) = &input.group {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let account = writable_account(&tx, session_hash)?;
+        let account = writable_account(&tx, Some(session_hash), None)?;
         space(&tx, space_id, &account.user.id, true)?;
         ensure_group(&tx, space_id, group, time)?;
         tx.commit()?;
     }
 
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let account = writable_account(&tx, session_hash)?;
+    let account = writable_account(&tx, Some(session_hash), None)?;
     let space = space(&tx, space_id, &account.user.id, true)?;
     if space.expires_at.is_some_and(|expiry| expiry <= time) {
         return Err(ApiError::NOT_FOUND);
@@ -496,7 +524,7 @@ pub fn delete_item(
 ) -> ApiResult<Vec<String>> {
     let time = now();
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let account = writable_account(&tx, session_hash)?;
+    let account = writable_account(&tx, Some(session_hash), None)?;
     let space = space(&tx, space_id, &account.user.id, true)?;
     let (author, file_key, thumbnail_key): (Option<String>, Option<String>, Option<String>) = tx
         .query_row(
@@ -572,8 +600,13 @@ pub fn item_live(db: &Connection, item_id: &str) -> ApiResult<bool> {
     )?)
 }
 
-fn writable_account(db: &Connection, session_hash: &str) -> ApiResult<Account> {
-    let account = session(db, session_hash, None)?.ok_or(ApiError::UNAUTHENTICATED)?;
+fn writable_account(
+    db: &Connection,
+    session_hash: Option<&str>,
+    bearer_id: Option<&str>,
+) -> ApiResult<Account> {
+    let account =
+        principal_account(db, session_hash, bearer_id, now())?.ok_or(ApiError::UNAUTHENTICATED)?;
     if account.must_change_password {
         return Err(ApiError::new(403, "PASSWORD_CHANGE_REQUIRED"));
     }
