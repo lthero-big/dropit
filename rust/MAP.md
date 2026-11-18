@@ -84,23 +84,33 @@ The coordinator independently passed workspace lint/typecheck/build, all 213 ser
 
 RHEA-235 remains `in_review` for human acceptance with its original assignee and stage; its completed coordinator review rule is disabled. RHEA-230 has its own active independent review and controls readiness for RHEA-234; RHEA-233 continues its existing upload/image implementation. Reuse their current runs and the parent coordination check rather than starting duplicate work. Default-suite stability under extreme shared-host contention is not established by this scoped fix.
 
+### RHEA-237 acceptance
+
+RHEA-237 passed independent review on PR #86 head `a1edfdfc78a39783398358d71de3c9d8c4b72f29` and was integrated into `migration/rhea-226-rust` as `7412f123be88c50876d253ec230a2db9ce9de1d4`. The coordinator resolved the post-RHEA-234 merge conflicts while preserving PAT/device-code/app-session routes and the shared bearer-aware database API. The integration fixes retain the upload route registration, chunk limits, and the common `Retry-After: 1` behavior for 429 responses.
+
+The private-space upload slice adds session creation, per-chunk SHA-256 and size validation, safe-index/order checks, identical retry/conflict handling, resumable status, cancellation of in-flight writes, atomic `BEGIN IMMEDIATE` quota/item/session reservations, complete races, cleanup hooks, restart resume, and image completion checks. It reuses the direct-upload/download/thumbnail/media paths and keeps room uploads, shares, scheduled production maintenance and schema upgrades outside this task. HEIC/unsupported HEIF, high-bit-depth and animated AVIF, and `imir` remain explicit codec boundaries.
+
+The exact integration tree passed `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo build --locked`, and serialized `cargo test --locked -- --nocapture --test-threads=1`: 7 unit tests, 228 file HTTP responses, 199 login/text responses, the machine-auth/CLI compatibility suite, 526 realtime HTTP/WebSocket checks, and 353 upload/preview/retract/chunk responses. The upload evidence includes C1–C12 for resume, conflict, image dimensions/Range, SVG/corrupt rejection, authorization, overlapping complete, cancellation, quota races, session/chunk caps, expiry garbage cleanup, and restart resume. PR #86 Rust fmt/clippy/build/HTTP compatibility, application lint/typecheck/test/build, and Docker image checks all passed. A parallel full run on the shared host hit the existing file-stream timing assertion; the targeted file suite and the final serialized full run passed.
+
+The RHEA-237 child remains `in_review` for human acceptance with its original owner and stage; its completed coordinator review rule may be disabled after this delivery. RHEA-238 owns scheduled maintenance and historical upgrades, while RHEA-236 and RHEA-239 remain the next stage-4 coordination surfaces.
+
 ## Remaining work
 
 Continue with full authentication/machine access, first-run and historical database upgrades, spaces/rooms/permissions, organization/sharing, uploads/image generation, runtime administration and complete data/client/container acceptance. Refine each next task against the latest accepted implementation.
 
 ## Third wave
 
-RHEA-230, RHEA-231, RHEA-232, RHEA-233 and the accepted upload test stability work are integrated. RHEA-234 is the active stage-3 implementation. RHEA-235 is integrated after independent test review.
+RHEA-230, RHEA-231, RHEA-232, RHEA-233, RHEA-234 and the accepted upload test stability work are integrated. RHEA-237 is integrated after independent review. RHEA-235 remains in review for human acceptance.
 
 | Work | Owner | Stage | Independent acceptance |
 | --- | --- | ---: | --- |
 | RHEA-234: PAT, device code and app session tickets | DE 后端工程师 | 3 | Existing CLI/mobile device login and scoped machine access work against TS-created data and Rust, including revocation and one-time tickets |
 | RHEA-233: direct upload, image preview and retract | DE代码高手-grok | 3 | Existing private-space upload, preview and retract behavior with real TS/Rust comparisons |
 | RHEA-236: spaces, rooms and sharing | DE 后端工程师 | 4 | Members, roles, rooms, PINs, share links and revocation preserve client-visible behavior |
-| RHEA-237: resumable uploads and image processing | DE代码高手-grok | 4 | Chunk concurrency, resume/cancel, quota atomicity, cleanup and image boundary behavior |
+| RHEA-237: resumable uploads and image processing | DE代码高手-grok | 4 | Integrated as `7412f12`; chunk concurrency, resume/cancel, quota atomicity, cleanup and image boundary behavior accepted |
 | RHEA-238: historical migration and maintenance | DE 后端工程师 | 4 | Schema 1–19 upgrades, cleanup, runtime settings, graceful shutdown and isolated image/container checks |
 | RHEA-239: final client and container acceptance | DE 前端工程师 | 4 | Web/CLI/mobile protocol checks, CI evidence, Docker health/volume/signal checks and release report |
 
-Stage 4 items are backlog until their stated stage-3 data/auth/upload boundaries are integrated. They have separate owners and independent acceptance surfaces. Promote them as dependencies become real, and keep the parent in progress through final acceptance.
+Remaining stage 4 items stay backlog until their stated data/auth/upload boundaries are integrated. They have separate owners and independent acceptance surfaces. Promote them as dependencies become real, and keep the parent in progress through final acceptance.
 
 The preliminary full-migration estimate is 12–20 person-days, or 15–25 with contingency. Re-estimate after the first runnable Rust slice. It is not a schedule commitment or a claim that the first wave completes the server migration.
