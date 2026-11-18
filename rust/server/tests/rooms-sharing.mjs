@@ -99,10 +99,13 @@ async function flow(kind, seed, m) {
     await check('invite listing', `${base}/invites`, { cookie: alice }, 200);
     await check('viewer write', `${base}/items/text`, { method: 'POST', json: { text: 'no' }, cookie: bob }, 403, 'READ_ONLY');
     await check('editor promotion', `${base}/members/${m.bob.id}`, { method: 'PATCH', json: { role: 'editor' }, cookie: alice }, 200);
-    await create('editor write', `${base}/items/text`, { text: 'editor text' }, bob);
+    const editorItem=(await create('editor write', `${base}/items/text`, { text: 'editor text' }, bob)).item;
+    const editorShare=await create('editor share', `${base}/items/${editorItem.id}/shares`, {expiresIn:'never'},bob);
     await check('editor manage owner', `${base}/items/${m.existing.id}/shares`, { method: 'POST', json: { expiresIn: 'never' }, cookie: bob }, 403, 'FORBIDDEN');
     const socket = await connect(s, `${base}/ws`, bob); await socket.next(); const revoked = closed(socket.ws);
     await check('remove member', `${base}/members/${m.bob.id}`, { method: 'DELETE', cookie: alice }, 204); await revoked;
+    await check('creator loses source copy', `/api/shares/${editorShare.id}/link`,{cookie:bob},404,'NOT_FOUND');
+    await check('creator history purges invisible source','/api/shares',{cookie:bob},200);
     await check('removed member read', `${base}/items`, { cookie: bob }, 404, 'NOT_FOUND');
     await check('owner cannot leave', `${base}/membership`, { method: 'DELETE', cookie: alice }, 409, 'OWNER_CANNOT_LEAVE');
     await check('viewer leaves', `${base}/membership`, { method: 'DELETE', cookie: viewer }, 204);
@@ -175,6 +178,8 @@ async function flow(kind, seed, m) {
     await check('exhausted', `/api/s/${share.token}`, {}, 404, 'NOT_FOUND');
     await check('exhausted copy', `/api/shares/${share.id}/link`, { cookie: alice }, 404, 'NOT_FOUND');
     await check('history browser required', '/api/shares', { token: m.pat }, 403, 'BROWSER_SESSION_REQUIRED');
+    await check('revoke browser required', `/api/shares/${share.id}/revoke`, {method:'POST', token:m.pat},403,'BROWSER_SESSION_REQUIRED');
+    await check('delete browser required', `/api/shares/${share.id}`, {method:'DELETE', token:m.pat},403,'BROWSER_SESSION_REQUIRED');
     await check('invalid cursor', '/api/shares?cursor=invalid', { cookie: alice }, 400, 'INVALID_INPUT');
     const expiring = await create('expiring share', `${base}/items/${item.id}/shares`, { expiresIn: '1h' }, alice);
     sql(data, 'UPDATE shares SET expiresAt=1 WHERE id=?', expiring.id);
@@ -232,6 +237,14 @@ async function rateCases(kind,seed) {
     for(let n=0;n<2;n++) expect(await req(server,'/api/s/noLink'),404,'NOT_FOUND');
     expect(await req(server,'/api/s/noLink'),429,'RATE_LIMITED');
   } finally {await stop(server);}
+  for(const suffix of ['file','thumbnail','preview','media','direct']) {
+    server=await start(kind,data,{RATE_AUTH:'2'});
+    try {
+      const path=suffix==='direct'?'/d/noLink':`/api/s/noLink/${suffix}`;
+      for(let i=0;i<2;i++) expect(await req(server,path),404,'NOT_FOUND');
+      expect(await req(server,path),429,'RATE_LIMITED');
+    } finally {await stop(server);}
+  }
   server=await start(kind,data,{RATE_UPLOAD:'4',RATE_ROOM:'2'});
   try {
     const room=expect(await req(server,'/api/rooms',{method:'POST',json:{code:'rate01'}}),201);

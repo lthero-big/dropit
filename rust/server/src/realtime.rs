@@ -400,7 +400,7 @@ async fn run(
     loop {
         tokio::select! {
             biased;
-            _ = sub.close.changed() => { let code=if authorized(&app,&space,&user,&hash,bearer.as_deref()).await {1013} else {1008}; close(&mut socket, code, "Channel closed").await; break; }
+            _ = sub.close.changed() => { let code=if authorized(&app,&space,&user,&hash,bearer.as_deref()).await {1013} else {1008}; let reason=if code==1013 { "Slow consumer" } else { "Authorization expired" }; close(&mut socket, code, reason).await; break; }
             _ = validation.tick() => {
                 if !authorized(&app, &space, &user, &hash, bearer.as_deref()).await { close(&mut socket, 1008, "Authorization expired").await; break; }
             }
@@ -503,7 +503,7 @@ async fn run_room(
     loop {
         tokio::select! {
             biased;
-            _ = sub.close.changed() => { let code=if room_authorized(&app,&room_token,bearer.as_deref()).await {1013} else {1008}; close(&mut socket, code, "Channel closed").await; break; }
+            _ = sub.close.changed() => { let code=if room_authorized(&app,&room_token,bearer.as_deref()).await {1013} else {1008}; let reason=if code==1013 { "Slow consumer" } else { "Authorization expired" }; close(&mut socket, code, reason).await; break; }
             _ = validation.tick() => { if !room_authorized(&app, &room_token, bearer.as_deref()).await { close(&mut socket, 1008, "Authorization expired").await; break; } }
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Close(_))) => { let _ = tokio::time::timeout(SEND_TIMEOUT, socket.flush()).await; break; }
