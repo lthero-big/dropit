@@ -8,9 +8,9 @@ The user authorized an isolated Rust server migration with DE 前端工程师, D
 
 | Work | Owner | Owned paths | Independent acceptance |
 | --- | --- | --- | --- |
-| Minimal Rust password-login and text persistence service | DE 后端工程师 | `rust/server/**` | Real HTTP requests against an isolated schema-19 fixture; login, text roundtrip, restart, errors |
-| Web development proxy selection and compatibility smoke tests | DE 前端工程师 | `apps/web/**`, related web dependency entries in `pnpm-lock.yaml` | Same web flow against a real local TS server first; proxy can target either implementation |
-| File/media migration design and compatibility cases | DE代码高手-grok | `rust/research/**` | Primary-source dependency assessment, existing behavior inventory, fixtures/case specification; no application implementation in this task |
+| RHEA-227: minimal Rust password-login and text persistence service | DE 后端工程师 | `rust/server/**` | Real HTTP requests against an isolated schema-19 fixture; login, text roundtrip, restart, errors |
+| RHEA-228: web development proxy selection and compatibility smoke tests | DE 前端工程师 | `apps/web/**`, related web dependency entries in `pnpm-lock.yaml` | Same web flow against a real local TS server first; proxy can target either implementation |
+| RHEA-229: file/media migration design and compatibility cases | DE代码高手-grok | `rust/research/**` | Primary-source dependency assessment, existing behavior inventory, fixtures/case specification; no application implementation in this task |
 
 These pieces can be reviewed independently: a standalone Rust service, a working TS-backed browser baseline, and a dependency/compatibility study. This avoids two implementations of the same Rust service or competing edits to a shared Cargo workspace.
 
