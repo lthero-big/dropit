@@ -2,6 +2,7 @@ mod browser;
 mod config;
 mod db;
 mod downloads;
+mod machine;
 mod password;
 mod realtime;
 
@@ -15,11 +16,11 @@ use std::{
 use axum::{
     Json, Router,
     body::to_bytes,
-    extract::{ConnectInfo, Extension, Path, Request, State, rejection::PathRejection},
+    extract::{ConnectInfo, Extension, Path, Query, Request, State, rejection::PathRejection},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, patch, post},
 };
 use percent_encoding::percent_decode_str;
 use rusqlite::{TransactionBehavior, params};
@@ -92,6 +93,7 @@ struct StateData {
     realtime: Realtime,
     limiter: Mutex<HashMap<(&'static str, String), Bucket>>,
     password_slots: Arc<Semaphore>,
+    app_tickets: Mutex<HashMap<String, AppTicket>>,
 }
 
 type App = Arc<StateData>;
@@ -99,6 +101,12 @@ type App = Arc<StateData>;
 struct Bucket {
     count: u32,
     reset: i64,
+}
+
+struct AppTicket {
+    user_id: String,
+    token_id: String,
+    expires_at: i64,
 }
 
 impl StateData {
@@ -131,6 +139,7 @@ impl StateData {
 struct Auth {
     account: Arc<Account>,
     session_hash: String,
+    bearer: Option<machine::Bearer>,
 }
 
 #[derive(Clone)]
@@ -162,11 +171,24 @@ async fn main() -> StartupResult<()> {
         config: Arc::new(config),
         limiter: Mutex::new(HashMap::new()),
         password_slots: Arc::new(Semaphore::new(4)),
+        app_tickets: Mutex::new(HashMap::new()),
     });
     let routes = Router::new()
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/api/auth/password/login", post(login))
         .route("/api/auth/logout", post(logout))
+        .route("/api/auth/device/authorize", post(device_authorize))
+        .route("/api/auth/device/token", post(device_token))
+        .route("/api/auth/device", get(device_info))
+        .route("/api/auth/device/approve", post(device_approve))
+        .route("/api/auth/device/deny", post(device_deny))
+        .route("/api/app-session/ticket", post(app_session_ticket))
+        .route("/api/app-session", get(app_session))
+        .route("/api/tokens", get(tokens).post(create_token))
+        .route("/api/tokens/{id}", patch(rename_token).delete(delete_token))
+        .route("/api/admin/tokens", get(admin_tokens))
+        .route("/api/admin/tokens/{id}", delete(admin_delete_token))
+        .route("/api/admin/users/{id}", patch(admin_update_user))
         .route("/api/auth/providers", get(browser::auth_providers))
         .route("/api/site", get(browser::site))
         .route("/api/version", get(browser::version))
@@ -274,12 +296,34 @@ async fn api_context(
     let ip_summary = summarize_ip(ip);
     let ip = ip.to_string();
     app.limit("general:ip", &ip, app.config.rate_general)?;
-    if headers.contains_key(header::AUTHORIZATION) {
-        let mut error = ApiError::UNAUTHENTICATED;
-        error.header = Some((header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer")));
-        return Err(error);
-    }
-    let auth = if let Some(token) = read_cookie(headers, cookie_name(secure_cookie)) {
+    let raw_session = read_cookie(headers, cookie_name(secure_cookie));
+    let auth = if let Some(authorization) = header_value(headers, "authorization") {
+        let raw = authorization
+            .split_once(' ')
+            .filter(|(scheme, value)| scheme.eq_ignore_ascii_case("Bearer") && is_bearer(value))
+            .map(|(_, value)| value);
+        let Some(raw) = raw else {
+            let mut error = ApiError::UNAUTHENTICATED;
+            error.header = Some((header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer")));
+            return Err(error);
+        };
+        let hash = password::hash(raw);
+        let token_auth = app
+            .db
+            .run(move |db| machine::token_session(db, &hash, now(), true))
+            .await?;
+        let Some((account, bearer)) = token_auth else {
+            let mut error = ApiError::UNAUTHENTICATED;
+            error.header = Some((header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer")));
+            return Err(error);
+        };
+        app.limit("token", &bearer.id, app.config.rate_token)?;
+        Some(Auth {
+            account: Arc::new(account),
+            session_hash: String::new(),
+            bearer: Some(bearer),
+        })
+    } else if let Some(token) = raw_session.clone() {
         let session_hash = password::hash(&token);
         let hash = session_hash.clone();
         let ip = ip_summary.clone();
@@ -289,6 +333,7 @@ async fn api_context(
             .map(|account| Auth {
                 account: Arc::new(account),
                 session_hash,
+                bearer: None,
             })
     } else {
         None
@@ -302,7 +347,24 @@ async fn api_context(
     }
 
     let safe = matches!(request.method.as_str(), "GET" | "HEAD" | "OPTIONS");
-    if !safe {
+    if let Some(auth) = &auth
+        && let Some(bearer) = &auth.bearer
+        && !bearer
+            .scopes
+            .iter()
+            .any(|scope| scope == if safe { "read" } else { "write" })
+    {
+        return Err(ApiError::new(403, "INSUFFICIENT_SCOPE"));
+    }
+    let public_device = request.method == Method::POST
+        && matches!(
+            request.uri.path(),
+            "/api/auth/device/authorize" | "/api/auth/device/token"
+        )
+        && raw_session.is_none()
+        && header_value(headers, "origin")
+            .is_none_or(|received| origin_matches(app, own, received));
+    if !safe && auth.as_ref().is_none_or(|auth| auth.bearer.is_none()) && !public_device {
         let received = header_value(headers, "origin").unwrap_or_default();
         let (expected, source) = app
             .config
@@ -328,7 +390,7 @@ async fn api_context(
     }
     if auth
         .as_ref()
-        .is_some_and(|auth| auth.account.must_change_password)
+        .is_some_and(|auth| auth.bearer.is_none() && auth.account.must_change_password)
         && !matches!(
             request.uri.path(),
             "/api/me"
@@ -351,6 +413,27 @@ async fn api_context(
         received_origin: header_value(headers, "origin").map(str::to_owned),
         auth,
     })
+}
+
+fn is_bearer(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn origin_matches(app: &StateData, own: Option<&str>, received: &str) -> bool {
+    let (expected, source) = app
+        .config
+        .origin
+        .as_ref()
+        .map(|(origin, source)| (origin.as_str(), *source))
+        .unwrap_or((own.unwrap_or_default(), "request"));
+    received == expected
+        || (source == "request"
+            && expected
+                .strip_prefix("http://")
+                .is_some_and(|host| received == format!("https://{host}")))
 }
 
 fn request_origin(config: &Config, request: &Request, peer: IpAddr) -> Option<String> {
@@ -535,17 +618,489 @@ async fn logout(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
 ) -> ApiResult<impl IntoResponse> {
-    let hash = context.require_auth()?.session_hash.clone();
-    app.db
-        .run(move |db| {
-            db.execute("DELETE FROM sessions WHERE sessionHash=?", [hash])?;
-            Ok(())
-        })
-        .await?;
+    let auth = context.require_auth()?.clone();
+    if let Some(bearer) = auth.bearer {
+        let id = bearer.id.clone();
+        let revoke_id = id.clone();
+        app.db
+            .run(move |db| machine::revoke_token(db, &revoke_id, Some(&auth.account.user.id)))
+            .await?;
+        app.realtime.revoke_token(&id);
+    } else {
+        let hash = auth.session_hash;
+        app.db
+            .run(move |db| {
+                db.execute("DELETE FROM sessions WHERE sessionHash=?", [hash])?;
+                Ok(())
+            })
+            .await?;
+    }
     Ok((
         StatusCode::NO_CONTENT,
-        set_cookie(context.secure_cookie, "", 0),
+        if context
+            .auth
+            .as_ref()
+            .is_some_and(|auth| auth.bearer.is_some())
+        {
+            HeaderMap::new()
+        } else {
+            set_cookie(context.secure_cookie, "", 0)
+        },
     ))
+}
+
+fn browser_session(context: &RequestContext) -> ApiResult<&Auth> {
+    let auth = context.require_auth()?;
+    if auth.bearer.is_some() {
+        return Err(ApiError::new(403, "BROWSER_SESSION_REQUIRED"));
+    }
+    Ok(auth)
+}
+
+fn admin_session(context: &RequestContext) -> ApiResult<&Auth> {
+    let auth = browser_session(context)?;
+    if !machine::is_admin(&auth.account) {
+        return Err(ApiError::new(403, "FORBIDDEN"));
+    }
+    Ok(auth)
+}
+
+async fn create_token(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    request: Request,
+) -> ApiResult<impl IntoResponse> {
+    let auth = browser_session(&context)?;
+    app.limit("token-create", &context.ip, app.config.rate_auth)?;
+    let input = machine::token_options(&read_json(request, 2048).await?, false)?;
+    let raw = machine::raw_token()?;
+    let record = machine::AccessToken {
+        id: Uuid::new_v4().to_string(),
+        user_id: auth.account.user.id.clone(),
+        name: input.name,
+        scopes: input.scopes,
+        created_at: now(),
+        last_used_at: None,
+        expires_at: input.lifetime_ms.map(|ms| now() + ms),
+        revoked: 0,
+    };
+    app.db
+        .run({
+            let record = record.clone();
+            let raw = raw.clone();
+            move |db| machine::create_token(db, &record, &raw)
+        })
+        .await?;
+    let mut body = machine::access_token_value(&record);
+    body.as_object_mut()
+        .expect("token response object")
+        .insert("token".into(), raw.into());
+    Ok((StatusCode::CREATED, Json(body)))
+}
+
+async fn tokens(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+) -> ApiResult<Json<Value>> {
+    let user_id = context.require_auth()?.account.user.id.clone();
+    let tokens = app
+        .db
+        .run(move |db| machine::list_tokens(db, Some(&user_id)))
+        .await?;
+    Ok(Json(json!({ "tokens": tokens })))
+}
+
+async fn rename_token(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request,
+) -> ApiResult<impl IntoResponse> {
+    let auth = browser_session(&context)?;
+    let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let body = read_json(request, 2048).await?;
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.encode_utf16().count() <= 80)
+        .map(|value| {
+            value
+                .chars()
+                .filter(|ch| *ch > '\u{1f}' && *ch != '\u{7f}')
+                .collect::<String>()
+        })
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ApiError::INVALID_INPUT)?;
+    let user_id = auth.account.user.id.clone();
+    app.db
+        .run(move |db| machine::rename_token(db, &id, &user_id, name.trim()))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_token(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<Path<String>, PathRejection>,
+    Query(query): Query<HashMap<String, String>>,
+) -> ApiResult<impl IntoResponse> {
+    let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let auth = context.require_auth()?.clone();
+    let user_id = auth.account.user.id.clone();
+    if query.get("purge").is_some_and(|value| value == "1") {
+        let browser = browser_session(&context)?;
+        let owner = browser.account.user.id.clone();
+        app.db
+            .run(move |db| machine::delete_token(db, &id, &owner, now()))
+            .await?;
+    } else {
+        let revoke_id = id.clone();
+        app.db
+            .run(move |db| machine::revoke_token(db, &revoke_id, Some(&user_id)))
+            .await?;
+        app.realtime.revoke_token(&id);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn admin_tokens(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    Query(query): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    admin_session(&context)?;
+    let user_id = query.get("userId").cloned();
+    let tokens = app
+        .db
+        .run(move |db| machine::list_tokens(db, user_id.as_deref()))
+        .await?;
+    Ok(Json(json!({ "tokens": tokens })))
+}
+
+async fn admin_delete_token(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<Path<String>, PathRejection>,
+) -> ApiResult<impl IntoResponse> {
+    admin_session(&context)?;
+    let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let revoke_id = id.clone();
+    app.db
+        .run(move |db| machine::revoke_token(db, &revoke_id, None))
+        .await?;
+    app.realtime.revoke_token(&id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn admin_update_user(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request,
+) -> ApiResult<impl IntoResponse> {
+    admin_session(&context)?;
+    let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let body = read_json(request, 2048).await?;
+    let disabled = body
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .ok_or(ApiError::INVALID_INPUT)?;
+    app.db
+        .run({
+            let id = id.clone();
+            move |db| machine::disable_user(db, &id, disabled)
+        })
+        .await?;
+    if disabled {
+        app.realtime.revoke_user(&id);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn origin_for(app: &StateData, context: &RequestContext) -> String {
+    app.config
+        .origin
+        .as_ref()
+        .map(|(origin, _)| origin.clone())
+        .or_else(|| context.request_origin.clone())
+        .unwrap_or_else(|| "http://127.0.0.1".into())
+}
+
+async fn device_authorize(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    request: Request,
+) -> ApiResult<Json<Value>> {
+    app.limit("device-authorize", &context.ip, app.config.rate_auth)?;
+    let input = machine::token_options(&read_json(request, 2048).await?, true)?;
+    let device_code = machine::raw_token()?;
+    let user_code = machine::user_code()?;
+    let id = Uuid::new_v4().to_string();
+    let time = now();
+    let device = machine::DeviceAuthorization {
+        id: id.clone(),
+        device_code_hash: password::hash(&device_code),
+        user_code_hash: machine::user_code_hash(&user_code),
+        name: input.name,
+        ip_summary: machine::ip_summary(&context.ip),
+        scopes: input.scopes,
+        token_lifetime_ms: input.lifetime_ms,
+        expires_at: time + 600_000,
+        interval: 5,
+        next_poll_at: time + 5_000,
+        attempts: 0,
+        status: "pending".into(),
+        user_id: None,
+    };
+    app.db
+        .run(move |db| machine::create_device(db, &device))
+        .await?;
+    let verification_uri = format!("{}/device", origin_for(&app, &context));
+    let complete = format!("{verification_uri}?user_code={user_code}&verification_id={id}");
+    Ok(Json(json!({
+        "device_code": device_code,
+        "user_code": user_code,
+        "verification_uri": verification_uri,
+        "verification_id": id,
+        "verification_uri_complete": complete,
+        "expires_in": 600,
+        "interval": 5,
+    })))
+}
+
+async fn device_token(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    request: Request,
+) -> ApiResult<impl IntoResponse> {
+    app.limit("device-poll", &context.ip, app.config.rate_general)?;
+    let body = read_json(request, 2048).await?;
+    let device_code = body
+        .get("device_code")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or(ApiError::INVALID_INPUT)?;
+    let raw = machine::raw_token()?;
+    let token_id = Uuid::new_v4().to_string();
+    let time = now();
+    let result = app
+        .db
+        .run({
+            let hash = password::hash(device_code);
+            let raw = raw.clone();
+            let token_id = token_id.clone();
+            move |db| machine::poll_device(db, &hash, time, &token_id, &raw)
+        })
+        .await?;
+    match result {
+        machine::PollResult::Error(body) => Ok((StatusCode::BAD_REQUEST, Json(body))),
+        machine::PollResult::Token(record) => {
+            let expires_in = record
+                .expires_at
+                .map(|expires_at| (expires_at - now()) / 1000);
+            Ok((
+                StatusCode::OK,
+                Json(json!({
+                    "access_token": raw,
+                    "token_type": "Bearer",
+                    "scope": record.scopes.join(" "),
+                    "expires_in": expires_in,
+                    "token": machine::access_token_value(&record),
+                })),
+            ))
+        }
+    }
+}
+
+async fn requested_device(
+    app: &App,
+    context: &RequestContext,
+    user_code: Option<&str>,
+    verification_id: Option<&str>,
+) -> ApiResult<machine::DeviceAuthorization> {
+    browser_session(context)?;
+    app.limit("device-confirm", &context.ip, 5)?;
+    let code = user_code
+        .filter(|value| !value.is_empty())
+        .ok_or(ApiError::INVALID_INPUT)?;
+    if code.encode_utf16().count() > 32 {
+        return Err(ApiError::INVALID_INPUT);
+    }
+    let hash = machine::user_code_hash(code);
+    let verification_id = match verification_id {
+        None => None,
+        Some(value) if !value.is_empty() && value.len() <= 64 => Some(value.to_owned()),
+        Some(_) => return Err(ApiError::INVALID_INPUT),
+    };
+    app.db
+        .run(move |db| machine::device_for_user_code(db, &hash, verification_id.as_deref(), now()))
+        .await?
+        .ok_or(ApiError::NOT_FOUND)
+}
+
+async fn device_info(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    Query(query): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let device = requested_device(
+        &app,
+        &context,
+        query.get("user_code").map(String::as_str),
+        query.get("verification_id").map(String::as_str),
+    )
+    .await?;
+    Ok(Json(
+        json!({ "name": device.name, "ipSummary": device.ip_summary, "scopes": device.scopes, "expiresAt": device.expires_at, "tokenExpiresInDays": device.token_lifetime_ms.map(|ms| ms as f64 / 86_400_000.0) }),
+    ))
+}
+
+async fn decide_device(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    request: Request,
+    approve: bool,
+) -> ApiResult<impl IntoResponse> {
+    let body = read_json(request, 2048).await?;
+    let user_code = body.get("user_code").and_then(Value::as_str);
+    let verification_id = body.get("verification_id").and_then(Value::as_str);
+    let device = requested_device(&app, &context, user_code, verification_id).await?;
+    let user_id = browser_session(&context)?.account.user.id.clone();
+    app.db
+        .run(move |db| machine::decide_device(db, &device.id, &user_id, approve, now()))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn device_approve(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    request: Request,
+) -> ApiResult<impl IntoResponse> {
+    decide_device(State(app), Extension(context), request, true).await
+}
+
+async fn device_deny(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    request: Request,
+) -> ApiResult<impl IntoResponse> {
+    decide_device(State(app), Extension(context), request, false).await
+}
+
+async fn app_session_ticket(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+) -> ApiResult<Json<Value>> {
+    let auth = context.require_auth()?;
+    let bearer = auth
+        .bearer
+        .as_ref()
+        .ok_or(ApiError::new(403, "BEARER_REQUIRED"))?;
+    if !bearer.scopes.iter().any(|scope| scope == "web") {
+        return Err(ApiError::new(403, "INSUFFICIENT_SCOPE"));
+    }
+    app.limit("app-session", &context.ip, app.config.rate_auth)?;
+    let time = now();
+    let mut tickets = app.app_tickets.lock().map_err(ApiError::internal)?;
+    tickets.retain(|_, entry| entry.expires_at > time);
+    if tickets.len() >= 10_000 {
+        return Err(ApiError::new(429, "RATE_LIMITED"));
+    }
+    let raw = machine::raw_token()?;
+    tickets.insert(
+        password::hash(&raw),
+        AppTicket {
+            user_id: auth.account.user.id.clone(),
+            token_id: bearer.id.clone(),
+            expires_at: time + 60_000,
+        },
+    );
+    Ok(Json(
+        json!({ "ticket": raw, "path": format!("/api/app-session?ticket={raw}"), "expires_in": 60 }),
+    ))
+}
+
+async fn app_session(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    Query(query): Query<HashMap<String, String>>,
+    request: Request,
+) -> ApiResult<Response> {
+    app.limit("auth", &context.ip, app.config.rate_auth)?;
+    let raw = query.get("ticket").cloned().unwrap_or_default();
+    let key = is_bearer(&raw).then(|| password::hash(&raw));
+    let entry = if let Some(key) = key {
+        app.app_tickets
+            .lock()
+            .map_err(ApiError::internal)?
+            .remove(&key)
+    } else {
+        None
+    };
+    let live = if let Some(entry) = &entry {
+        entry.expires_at > now()
+            && app
+                .db
+                .run({
+                    let user = entry.user_id.clone();
+                    let id = entry.token_id.clone();
+                    move |db| machine::token_live(db, &id, &user, now(), "web")
+                })
+                .await?
+    } else {
+        false
+    };
+    if !live {
+        let mut response = StatusCode::FOUND.into_response();
+        response.headers_mut().insert(
+            header::LOCATION,
+            HeaderValue::from_static("/login?error=APP_SESSION_EXPIRED"),
+        );
+        return Ok(response);
+    }
+    let mut response = StatusCode::FOUND.into_response();
+    response
+        .headers_mut()
+        .insert(header::LOCATION, HeaderValue::from_static("/"));
+    if context
+        .auth
+        .as_ref()
+        .is_none_or(|auth| auth.bearer.is_some())
+    {
+        let entry = entry.expect("live ticket has entry");
+        let raw_session = machine::raw_token()?;
+        let hash = password::hash(&raw_session);
+        let user_agent = header_value(request.headers(), "user-agent").map(str::to_owned);
+        let ip_summary = context.ip_summary.clone();
+        let expires = now() + app.config.session;
+        let user_id = entry.user_id;
+        app.db
+            .run(move |db| {
+                machine::create_browser_session(
+                    db,
+                    &user_id,
+                    &hash,
+                    expires,
+                    now(),
+                    user_agent.as_deref(),
+                    &ip_summary,
+                )
+            })
+            .await?;
+        if let Some(value) = set_cookie(
+            context.secure_cookie,
+            &raw_session,
+            app.config.session / 1000,
+        )
+        .get(header::SET_COOKIE)
+        {
+            response
+                .headers_mut()
+                .insert(header::SET_COOKIE, value.clone());
+        }
+    }
+    Ok(response)
 }
 
 async fn me(
@@ -656,14 +1211,22 @@ async fn text(
         device: parse_device(&headers),
     };
     let config = app.config.clone();
-    let hash = auth.session_hash.clone();
+    let session_hash = (!auth.session_hash.is_empty()).then(|| auth.session_hash.clone());
+    let bearer_id = auth.bearer.as_ref().map(|bearer| bearer.id.clone());
     let _gate = app.realtime.gate.lock().await;
     let channel = space_id.clone();
     let (item, groups) = app
         .db
         .run(move |db| {
             let before = db::groups(db, &space_id)?;
-            let item = db::insert_text(db, &config, &hash, &space_id, input);
+            let item = db::insert_text(
+                db,
+                &config,
+                session_hash.as_deref(),
+                bearer_id.as_deref(),
+                &space_id,
+                input,
+            );
             let after = db::groups(db, &space_id)?;
             Ok((item, (before != after).then_some(after)))
         })
