@@ -26,6 +26,18 @@ SQLite. Node 22, pnpm, git and tar are required to generate the reference fixtur
 and run the compatibility tests. The baseline Git object must be available locally.
 The Rust executable runs independently of Node.
 
+AVIF decode links the system dav1d library. The build needs pkg-config and a
+dav1d.pc that reports at least 1.3.0. On Debian and Ubuntu, install those
+packages before the Cargo commands:
+
+~~~sh
+sudo apt-get update
+sudo apt-get install -y pkg-config libdav1d-dev
+pkg-config --exists 'dav1d >= 1.3.0'
+~~~
+
+The Rust CI job installs the same packages before fmt, clippy, build, and test.
+
 Run from the repository root.
 
 ~~~sh
@@ -345,6 +357,11 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked
 cargo test --locked -- --nocapture --test-threads=1
 ~~~
+
+The CI dependency repair reran `cargo fmt --check`, strict locked clippy,
+locked build, and the same test command. That run passed 7 unit tests, 228
+file-read responses, 199 login/text responses, 528 realtime checks, and 168
+upload responses.
 
 The image fixtures are real decodable files: a 500x400 PNG, an orientation-6
 3000x1500 JPEG, a two-frame GIF whose first pixel is red, an 8x4 AVIF, a
