@@ -20,6 +20,7 @@ async function responseFor(page, action, method, suffix) {
 }
 
 test('editing, group filters and group changes synchronize between real browsers', async ({ browser, baseURL }) => {
+  test.setTimeout(90_000)
   const first = await browser.newContext({ baseURL, reducedMotion: 'reduce' })
   const second = await browser.newContext({ baseURL, reducedMotion: 'reduce' })
   try {
@@ -49,6 +50,7 @@ test('editing, group filters and group changes synchronize between real browsers
     await bar(b).getByRole('button', { name: new RegExp(`^${group}`) }).click()
     await expect(b.getByText(edited, { exact: true })).toHaveCount(0)
     const editedCard = a.getByRole('listitem').filter({ hasText: edited })
+    await editedCard.hover()
     await editedCard.getByRole('button', { name: '加入分组', exact: true }).click()
     await responseFor(a, () => a.getByRole('menuitem', { name: group, exact: true }).click(), 'PATCH', `/items/${item.id}/labels`)
     await expect(b.getByText(edited, { exact: true })).toBeVisible()

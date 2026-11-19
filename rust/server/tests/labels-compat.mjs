@@ -111,6 +111,15 @@ function connect(server, path, cookie) {
   });
   return { socket, next };
 }
+async function nextMessage(iterator) {
+  let timer;
+  try {
+    return await Promise.race([iterator.next(), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('CLI watch event timeout')), 10000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 async function cli(server, token, args) {
   const child = spawn(process.execPath, [resolve(reference, 'apps/cli/dist/index.js'), ...args], {
     cwd: root, env: { PATH: process.env.PATH, DROPIT_URL: server.url, DROPIT_TOKEN: token, DROPIT_CONFIG: resolve(temporary, 'cli-config.json') },
@@ -236,10 +245,10 @@ async function run(kind, seed, m) {
     const watch = await client.connectWatch({ kind: 'space', id: m.aliceSpace }, controller.signal);
     try {
       const messages = watch.messages[Symbol.asyncIterator](), state = createWatchState();
-      applyWatch(state, JSON.parse((await messages.next()).value));
+      applyWatch(state, JSON.parse((await nextMessage(messages)).value));
       expect(await request(server, `${base}/items/${id}`, { method: 'PATCH', token, json: { text: 'watch updated' } }), 200);
       await event('item.updated');
-      while (state.items.get(id)?.text !== 'watch updated') applyWatch(state, JSON.parse((await messages.next()).value));
+      while (state.items.get(id)?.text !== 'watch updated') applyWatch(state, JSON.parse((await nextMessage(messages)).value));
       assert.equal(state.items.get(id).group, '并发组');
     } finally { watch.close(); controller.abort(); }
     const readToken = expect(await request(server, '/api/tokens', { method: 'POST', cookie: alice, json: { name: 'read', scopes: ['read'] } }), 201).token;
