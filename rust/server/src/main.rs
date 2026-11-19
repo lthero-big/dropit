@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod downloads;
 mod images;
+mod items;
 mod machine;
 mod maintenance;
 mod migrations;
@@ -269,7 +270,19 @@ async fn main() -> StartupResult<()> {
         .route("/api/rooms/{room}/items", get(rooms::items))
         .route("/api/rooms/{room}/items/text", post(rooms::text))
         .route("/api/rooms/{room}/items/file", post(uploads::upload_room))
-        .route("/api/rooms/{room}/items/{id}", delete(rooms::delete_item))
+        .route(
+            "/api/rooms/{room}/items/{id}",
+            delete(rooms::delete_item).patch(items::edit),
+        )
+        .route("/api/rooms/{room}/items/{id}/labels", patch(items::labels))
+        .route(
+            "/api/rooms/{room}/groups",
+            get(items::groups).post(items::create_group),
+        )
+        .route(
+            "/api/rooms/{room}/groups/{name}",
+            patch(items::rename_group).delete(items::delete_group),
+        )
         .route(
             "/api/rooms/{room}/items/{id}/download",
             get(rooms::download).head(rooms::download),
@@ -406,7 +419,22 @@ async fn main() -> StartupResult<()> {
             "/api/spaces/{space}/uploads/{id}/complete",
             post(uploads::complete_upload),
         )
-        .route("/api/spaces/{space}/items/{id}", delete(uploads::retract))
+        .route(
+            "/api/spaces/{space}/items/{id}",
+            delete(uploads::retract).patch(items::edit),
+        )
+        .route(
+            "/api/spaces/{space}/items/{id}/labels",
+            patch(items::labels),
+        )
+        .route(
+            "/api/spaces/{space}/groups",
+            get(items::groups).post(items::create_group),
+        )
+        .route(
+            "/api/spaces/{space}/groups/{name}",
+            patch(items::rename_group).delete(items::delete_group),
+        )
         .route(
             "/api/spaces/{space}/items/{id}/preview",
             get(uploads::preview),
