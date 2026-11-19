@@ -13,7 +13,8 @@ COPY apps/cli/package.json apps/cli/package.json
 RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm --filter @dropit/web build \
-  && node -e 'require("fs").writeFileSync("/build-info.json",JSON.stringify({version:process.env.DROPIT_VERSION,commit:process.env.DROPIT_COMMIT,buildDate:process.env.DROPIT_BUILD_DATE,install:process.env.DROPIT_INSTALL}))'
+  && node apps/server/scripts/build-info.mjs \
+  && cp apps/server/build-info.json /build-info.json
 
 FROM rust:1.94-trixie AS rust-build
 RUN apt-get update \
