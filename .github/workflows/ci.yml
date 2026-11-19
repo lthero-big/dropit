@@ -101,9 +101,7 @@ jobs:
           --build-arg DROPIT_COMMIT --build-arg DROPIT_BUILD_DATE --build-arg DROPIT_VERSION .
       - name: image reports its build
         run: |
-          docker image inspect dropit:ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -qx "$DROPIT_COMMIT"
-          docker image inspect dropit:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' | grep -qxF "$DROPIT_VERSION"
-          docker run --rm dropit:ci node -e "import('./dist/version.js').then(m=>{const b=m.loadBuildInfo(process.env,null);console.log(JSON.stringify(b));if(b.commit!==process.env.DROPIT_COMMIT||b.version!==process.env.DROPIT_VERSION||b.install!=='docker')process.exit(1)})"
+          sh scripts/check-rust-image.sh dropit:ci
 
   publish:
     name: publish image

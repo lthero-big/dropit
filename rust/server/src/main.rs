@@ -1,3 +1,4 @@
+mod admin;
 mod auth;
 mod browser;
 mod config;
@@ -182,6 +183,13 @@ impl RequestContext {
 
 #[tokio::main]
 async fn main() -> StartupResult<()> {
+    if std::env::args_os().next().is_some_and(|arg| {
+        std::path::Path::new(&arg)
+            .file_name()
+            .is_some_and(|name| name == "dropit-admin")
+    }) {
+        std::process::exit(admin::run(std::env::args().skip(1).collect())?);
+    }
     let mut config = Config::load()?;
     let db = Database::open(&mut config)?;
     let mut user_count = db
