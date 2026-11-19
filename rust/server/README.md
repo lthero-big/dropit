@@ -518,8 +518,39 @@ checks, 316 room/share checks, and 353 upload/chunk checks. Browser smoke was
 rerun after the selector-stability fix in `719e583`; it passed 3 tests with the
 TS-only short-link test skipped.
 
-Remaining general administration, historical schema upgrades, scheduled
-maintenance, room chunk sessions, share presets, item editing/labels/group
-management and final Rust container packaging are separate migration work. This
-slice does not establish
-that the entire TS product can be switched to Rust yet.
+## RHEA-241 item editing, labels and groups
+
+Spaces and temporary rooms now expose `GET/POST /groups`, `PATCH/DELETE
+/groups/:name`, `PATCH /items/:id`, and `PATCH /items/:id/labels` with the
+fixed TS schema-19 contract. `src/items.rs` holds their shared authorization,
+transactions and realtime publishing. The schema and client protocol are unchanged.
+
+Only a text item's author may edit its content in a private space. Authors and
+the space owner may manage its tags, pins and group; viewers receive `READ_ONLY`.
+Any room capability holder may edit room content and labels. Text growth counts
+upload reservations and stored bytes, while shrinking remains possible after a
+quota is lowered. Labels preserve the existing `updatedAt`; text edits advance
+it without changing creation/expiry/device metadata. Group rename/delete update
+historical rows too, but publish updates only for live items. A snapshot gate
+orders commits, `groups` and `item.updated` events.
+
+The compatibility baseline has no separate editable item title or file rename
+field: Web titles derive from text content or the original filename. Tags stay
+in the API/database; the current Web deliberately hides tag controls and tag
+search, and CLI exposes them through `ls --json`/watch state. Group sorting uses
+`position, createdAt, name`; create appends and rename preserves the position.
+There is no TS group reorder API. This migration preserves these client behaviors.
+
+From `rust/server`, run `cargo test --locked --test labels -- --nocapture`.
+`tests/labels-compat.mjs` archives TS commit
+`37ce06ebfab2cd98b81e49ce54fb24ec5daeec68` and builds its server and CLI using the
+frozen lockfile. It compares real HTTP responses and WebSocket payloads, checks
+owner/editor/viewer and PAT scopes, concurrent labels and quota growth, ordered
+groups and limits, quota reservations/shrink, retraction/expiry, room edits and
+CLI `ls/get/watch`. Each server is then restarted on the other's schema-19 data,
+with exact snapshot equality and foreign-key checks. All fixture processes and
+data are cleaned up. `apps/web/smoke/items.spec.mjs` exercises real two-browser
+editing, safe text rendering, group filtering/move/rename/delete and reload
+against either backend through the existing smoke runner.
+
+For the integrated migration and remaining release boundaries, see `../MAP.md`.
