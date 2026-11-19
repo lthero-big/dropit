@@ -367,6 +367,18 @@ Date.parse inputs are not supported. Without build metadata, development commits
 come from git and the version defaults to 0.0.0. Rust release packaging is still
 pending. Reporting a configured OAuth provider does not implement its login flow.
 
+The update-compatible endpoints are also present on the Rust candidate:
+`GET /api/app/android/latest` and `GET /api/app/android/download/:file` read the
+same size- and SHA-256-checked `DATA_DIR/app/android/latest.json` feed as the TS
+service. Optional `minVersionCode` and `force` fields let an operator require an
+Android upgrade; download names are matched to the active manifest, so a stale
+or traversal path cannot expose another file. Admins use
+`GET /api/admin/update` and `POST /api/admin/update/check`; checks compare the
+running build with Docker Hub or GitHub, persist the result per build, throttle
+manual retries and turn network/rate-limit failures into an error report while
+leaving normal clipboard traffic available. `UPDATE_CHECK=false` disables all
+outbound update requests.
+
 `src/realtime.rs` serves private spaces only. Every connection gets an authoritative
 snapshot, followed by item.created, groups (including group creation before a
 rejected text write), and presence events. Named devices are deduplicated in
@@ -507,6 +519,13 @@ sessions, room reuse/codes/PIN lockout/unlock/close/reopen/expiry, room snapshot
 and real WebSocket events, PAT revocation, room file Range and derived images,
 share expiration/exhaustion, single-view races, copy-token isolation, revoked
 and expired download tickets, source retraction and public/room rate budgets.
+Browser `GET/PUT /api/me/share-presets` stores personal expiry and view choices
+in `app_settings` under `sharePresets:<userId>`. Saving uses JavaScript
+`Number.isSafeInteger` before the field bounds, so decimal and exponent integers
+are accepted, then deduplicates and sorts each list. Omitted hours/months stay
+empty. Fractions and values at or above `2^53` are rejected. Saving uses the
+existing share-manage rate budget. Presets do not change an existing share link,
+its token, revocation, expiry, or view count.
 Room/share previews reuse the existing bounded preview pool and image decoder.
 Existing private-space chunk upload routes and their C1–C12 comparisons remain.
 
@@ -518,11 +537,42 @@ checks, 316 room/share checks, and 353 upload/chunk checks. Browser smoke was
 rerun after the selector-stability fix in `719e583`; it passed 3 tests with the
 TS-only short-link test skipped.
 
-Remaining general administration, share presets, item editing/labels/group
-management, update distribution and final Rust container packaging are separate
-migration work. Room chunk sessions are covered in the RHEA-243 section. This
-slice does not establish
-that the entire TS product can be switched to Rust yet.
+## RHEA-241 item editing, labels and groups
+
+Spaces and temporary rooms now expose `GET/POST /groups`, `PATCH/DELETE
+/groups/:name`, `PATCH /items/:id`, and `PATCH /items/:id/labels` with the
+fixed TS schema-19 contract. `src/items.rs` holds their shared authorization,
+transactions and realtime publishing. The schema and client protocol are unchanged.
+
+Only a text item's author may edit its content in a private space. Authors and
+the space owner may manage its tags, pins and group; viewers receive `READ_ONLY`.
+Any room capability holder may edit room content and labels. Text growth counts
+upload reservations and stored bytes, while shrinking remains possible after a
+quota is lowered. Labels preserve the existing `updatedAt`; text edits advance
+it without changing creation/expiry/device metadata. Group rename/delete update
+historical rows too, but publish updates only for live items. A snapshot gate
+orders commits, `groups` and `item.updated` events.
+
+The compatibility baseline has no separate editable item title or file rename
+field: Web titles derive from text content or the original filename. Tags stay
+in the API/database; the current Web deliberately hides tag controls and tag
+search, and CLI exposes them through `ls --json`/watch state. Group sorting uses
+`position, createdAt, name`; create appends and rename preserves the position.
+There is no TS group reorder API. This migration preserves these client behaviors.
+
+From `rust/server`, run `cargo test --locked --test labels -- --nocapture`.
+`tests/labels-compat.mjs` archives TS commit
+`37ce06ebfab2cd98b81e49ce54fb24ec5daeec68` and builds its server and CLI using the
+frozen lockfile. It compares real HTTP responses and WebSocket payloads, checks
+owner/editor/viewer and PAT scopes, concurrent labels and quota growth, ordered
+groups and limits, quota reservations/shrink, retraction/expiry, room edits and
+CLI `ls/get/watch`. Each server is then restarted on the other's schema-19 data,
+with exact snapshot equality and foreign-key checks. All fixture processes and
+data are cleaned up. `apps/web/smoke/items.spec.mjs` exercises real two-browser
+editing, safe text rendering, group filtering/move/rename/delete and reload
+against either backend through the existing smoke runner.
+
+For the integrated migration and remaining release boundaries, see `../MAP.md`.
 
 ## Temporary room chunk sessions (RHEA-243)
 
@@ -559,11 +609,18 @@ Anonymous room:<id> sessions survive. Expiry removes sessions past their own
 expiry, the room expiry, or a disabled user/principal, then flushes garbage.
 Restart keeps received chunk indexes.
 
-Complete inserts the file in the room with userId NULL. It publishes groups and
-item.created on the room space. SVG prefix and raster thumbnail rules match
-private-space complete. A 409 from a complete already in progress does not
-delete the session. A failed complete after it begins does. Concurrent completes
-yield one 201 and one 409.
+Complete inserts the file in the room with userId NULL. It shares the four-slot
+upload permit with legacy uploads and returns 429 UPLOAD_BUSY when the pool is
+full, then deletes the session and releases the reservation. The permit drops
+on quota failure and cancel as well. A committed group is published even when
+the later item insert fails. The commit finishes before the realtime gate;
+groups and item.created are published while that gate is held, and garbage I/O
+runs after it is released. The room snapshot reads first, then holds the same
+gate until the snapshot is sent and the subscriber is active, so a concurrent
+created event is either inside the snapshot or dropped as pre-snapshot.
+SVG prefix and raster thumbnail rules match private-space complete. A 409 from
+a complete already in progress does not delete the session. A failed complete
+after it begins does. Concurrent completes yield one 201 and one 409.
 
 The comparison is tests/room-chunks-compat.mjs, launched by tests/room_chunks.rs.
 It archives the TypeScript baseline 37ce06ebfab2cd98b81e49ce54fb24ec5daeec68 and

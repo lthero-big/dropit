@@ -1471,7 +1471,7 @@ fn writable_account(
     Ok(account)
 }
 
-fn ensure_group(db: &Connection, space: &str, group: &str, time: i64) -> ApiResult<()> {
+pub(crate) fn ensure_group(db: &Connection, space: &str, group: &str, time: i64) -> ApiResult<()> {
     let exists: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM item_groups WHERE spaceId=? AND name=?)",
         params![space, group],

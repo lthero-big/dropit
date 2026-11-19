@@ -1084,7 +1084,10 @@ async fn finish_room_complete(
     let space_id = space_id.to_owned();
     let upload_id = upload.id.clone();
     let config = app.config.clone();
-    let _gate = app.realtime.gate.lock().await;
+    // Commit before taking the gate. A room snapshot reads the database before
+    // it acquires the same gate, so holding the gate across this write lets a
+    // connecting socket sit ahead of the commit. The gate still covers the
+    // groups / item.created publish that follows.
     let committed = app
         .db
         .run(move |db| {
@@ -1097,9 +1100,24 @@ async fn finish_room_complete(
             Ok((item, (before != after).then_some(after)))
         })
         .await;
-    drop(_gate);
+    let _gate = app.realtime.gate.lock().await;
     let (item, groups) = committed?;
-    let item = item?;
+    // A committed group stays even when the later item insert fails. Publish it
+    // before returning that error, matching resolveGroup before addItem.
+    if let Some(groups) = &groups {
+        app.realtime
+            .publish(&channel, json!({ "type": "groups", "groups": groups }));
+    }
+    let item = match item {
+        Ok(item) => item,
+        Err(error) => {
+            drop(_gate);
+            return Err(error);
+        }
+    };
+    app.realtime
+        .publish(&channel, json!({ "type": "item.created", "item": item }));
+    drop(_gate);
     forget_staged(assembled.staged);
     if let Some((_, staged, _)) = thumbnail {
         forget_staged(staged);
@@ -1334,25 +1352,38 @@ pub async fn complete_room(
     let headers = request.headers().clone();
     let group = decoded_group(header_value(&headers, "x-dropit-group"))?;
     let device = parse_device(&headers);
+    // 409 UPLOAD_IN_PROGRESS returns before the slot and before session deletion.
     let complete_notify = begin_complete(&app, &upload_id)?;
+    // Same four-slot cap as legacy POST. A full pool returns 429 UPLOAD_BUSY
+    // without incrementing. The slot drops on every later exit, including quota
+    // failure and cancel, so a held complete cannot leak a permit.
+    let slot = match acquire(&app, false, UPLOAD_SLOTS, "UPLOAD_BUSY") {
+        Ok(slot) => slot,
+        Err(error) => {
+            let id = upload_id.clone();
+            let _ = app.db.run(move |db| db::delete_upload(db, &id)).await;
+            end_complete(&app, &upload_id);
+            let directory = downloads::files_dir(&app.config.data);
+            let _ = flush_garbage(&app, &directory).await;
+            return Err(error);
+        }
+    };
     let result =
         finish_room_complete(&app, &room.id, &upload, group, device, &complete_notify).await;
     let directory = downloads::files_dir(&app.config.data);
+    // Release the in-progress mark before deleting a failed session. A racing
+    // complete then observes UPLOAD_IN_PROGRESS while the session still exists,
+    // matching the TypeScript 409, and does not delete that session.
+    end_complete(&app, &upload_id);
     if result.is_err() {
         let id = upload_id.clone();
         let _ = app.db.run(move |db| db::delete_upload(db, &id)).await;
     }
-    end_complete(&app, &upload_id);
+    let (item, _groups, _channel) = result?;
+    // Publish already happened under the commit gate. Flush garbage only after
+    // that gate is released so a retract cannot overtake item.created.
+    drop(slot);
     let _ = flush_garbage(&app, &directory).await;
-    let (item, groups, channel) = result?;
-    let _gate = app.realtime.gate.lock().await;
-    if let Some(groups) = groups {
-        app.realtime
-            .publish(&channel, json!({ "type": "groups", "groups": groups }));
-    }
-    app.realtime
-        .publish(&channel, json!({ "type": "item.created", "item": item }));
-    drop(_gate);
     Ok((StatusCode::CREATED, Json(json!({ "item": item }))))
 }
 

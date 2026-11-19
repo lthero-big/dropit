@@ -128,18 +128,24 @@ const DOWNLOAD_PATH = /^\/api\/app\/android\/download\/[A-Za-z0-9][A-Za-z0-9._-]
 export function updateOffer(server, currentCode, status, body) {
   if (status === 404) return { kind: 'none' };
   if (status !== 200 || !body || typeof body !== 'object') return { kind: 'error', note: `检查更新失败：${apiError(status, body)}` };
-  const { versionCode, versionName, notes, size, sha256, url } = body;
+  const payload = body && typeof body === 'object' ? body : {};
+  const { versionCode, versionName, notes, size, sha256, url } = payload;
+  const minVersionCode = payload.minVersionCode;
   const valid = Number.isSafeInteger(versionCode) && versionCode > 0 && typeof versionName === 'string' && versionName.length <= 40
     && typeof sha256 === 'string' && /^[0-9a-f]{64}$/.test(sha256) && Number.isSafeInteger(size) && size > 0
-    && typeof url === 'string' && DOWNLOAD_PATH.test(url) && !url.includes('..');
+    && typeof url === 'string' && DOWNLOAD_PATH.test(url) && !url.includes('..')
+    && (minVersionCode === undefined || (Number.isSafeInteger(minVersionCode) && minVersionCode > 0 && minVersionCode <= versionCode))
+    && (payload.force === undefined || typeof payload.force === 'boolean');
   if (!valid) return { kind: 'error', note: '服务器返回的更新信息无效' };
   if (!(versionCode > (Number(currentCode) || 0))) return { kind: 'latest', versionName };
-  return { kind: 'update', versionCode, versionName, notes: typeof notes === 'string' ? notes.slice(0, 4000) : '', size, sha256, url: `${server}${url}` };
+  const offer = { kind: 'update', versionCode, versionName, notes: typeof notes === 'string' ? notes.slice(0, 4000) : '', size, sha256, url: `${server}${url}` };
+  const force = payload.force === true || (minVersionCode !== undefined && Number(currentCode) < minVersionCode);
+  return force ? { ...offer, force: true } : offer;
 }
 
 /** Prompt on launch unless the user chose 「跳过这个版本」 for exactly this versionCode. */
 export function shouldPrompt(offer, skipped) {
-  return offer?.kind === 'update' && String(offer.versionCode) !== String(skipped ?? '');
+  return offer?.kind === 'update' && (offer.force === true || String(offer.versionCode) !== String(skipped ?? ''));
 }
 
 export function formatSize(bytes) {

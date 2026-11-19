@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod downloads;
 mod images;
+mod items;
 mod machine;
 mod maintenance;
 mod migrations;
@@ -12,6 +13,7 @@ mod realtime;
 mod rooms;
 mod sharing;
 mod spaces;
+mod update;
 mod uploads;
 
 use std::{
@@ -104,6 +106,7 @@ struct StateData {
     config: Arc<Config>,
     db: Database,
     build: BuildInfo,
+    update: update::UpdateService,
     realtime: Realtime,
     limiter: Mutex<HashMap<(&'static str, String), Bucket>>,
     password_slots: Arc<Semaphore>,
@@ -217,10 +220,13 @@ async fn main() -> StartupResult<()> {
         None
     };
     let build = browser::build_info();
+    let update = update::UpdateService::new(build.clone(), &config.data)
+        .map_err(|error| format!("update checker configuration failed: {error}"))?;
     let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port)).await?;
     let app = Arc::new(StateData {
         db,
         build,
+        update,
         realtime: Realtime::new(),
         config: Arc::new(config),
         limiter: Mutex::new(HashMap::new()),
@@ -285,7 +291,19 @@ async fn main() -> StartupResult<()> {
             "/api/rooms/{room}/uploads/{id}/complete",
             post(uploads::complete_room),
         )
-        .route("/api/rooms/{room}/items/{id}", delete(rooms::delete_item))
+        .route(
+            "/api/rooms/{room}/items/{id}",
+            delete(rooms::delete_item).patch(items::edit),
+        )
+        .route("/api/rooms/{room}/items/{id}/labels", patch(items::labels))
+        .route(
+            "/api/rooms/{room}/groups",
+            get(items::groups).post(items::create_group),
+        )
+        .route(
+            "/api/rooms/{room}/groups/{name}",
+            patch(items::rename_group).delete(items::delete_group),
+        )
         .route(
             "/api/rooms/{room}/items/{id}/download",
             get(rooms::download).head(rooms::download),
@@ -321,6 +339,10 @@ async fn main() -> StartupResult<()> {
             "/api/rooms/{room}/shares/{shareId}",
             delete(sharing::revoke_room),
         )
+        .route(
+            "/api/me/share-presets",
+            get(sharing::share_presets).put(sharing::save_share_presets),
+        )
         .route("/api/shares", get(sharing::managed_shares))
         .route("/api/shares/{shareId}/link", get(sharing::managed_link))
         .route(
@@ -347,6 +369,13 @@ async fn main() -> StartupResult<()> {
         .route("/api/auth/providers", get(browser::auth_providers))
         .route("/api/site", get(browser::site))
         .route("/api/version", get(browser::version))
+        .route("/api/app/android/latest", get(update::android_latest))
+        .route(
+            "/api/app/android/download/{file}",
+            get(update::android_download),
+        )
+        .route("/api/admin/update", get(update::admin_report))
+        .route("/api/admin/update/check", post(update::admin_check))
         .route("/api/setup", get(browser::setup))
         .route("/api/setup", post(auth::setup))
         .route("/api/me/password", put(auth::change_password))
@@ -418,7 +447,22 @@ async fn main() -> StartupResult<()> {
             "/api/spaces/{space}/uploads/{id}/complete",
             post(uploads::complete_upload),
         )
-        .route("/api/spaces/{space}/items/{id}", delete(uploads::retract))
+        .route(
+            "/api/spaces/{space}/items/{id}",
+            delete(uploads::retract).patch(items::edit),
+        )
+        .route(
+            "/api/spaces/{space}/items/{id}/labels",
+            patch(items::labels),
+        )
+        .route(
+            "/api/spaces/{space}/groups",
+            get(items::groups).post(items::create_group),
+        )
+        .route(
+            "/api/spaces/{space}/groups/{name}",
+            patch(items::rename_group).delete(items::delete_group),
+        )
         .route(
             "/api/spaces/{space}/items/{id}/preview",
             get(uploads::preview),
@@ -442,6 +486,7 @@ async fn main() -> StartupResult<()> {
         .with_state(app.clone());
     println!("dropit listening on port {}", listener.local_addr()?.port());
     let (shutdown, shutdown_rx) = watch::channel(false);
+    let update_task = tokio::spawn(update::run_loop(app.clone(), shutdown.subscribe()));
     let maintenance_app = app.clone();
     let maintenance_task = tokio::spawn(maintenance::run_loop(maintenance_app, shutdown_rx));
     let server_result = axum::serve(
@@ -452,6 +497,7 @@ async fn main() -> StartupResult<()> {
     .await;
     let _ = shutdown.send(true);
     let _ = maintenance_task.await;
+    let _ = update_task.await;
     if let Err(error) = maintenance::run_once(&app).await {
         eprintln!("dropit: final maintenance failed; durable garbage will retry on restart");
         let _ = error;
@@ -1026,7 +1072,7 @@ async fn logout(
     ))
 }
 
-fn browser_session(context: &RequestContext) -> ApiResult<&Auth> {
+pub(crate) fn browser_session(context: &RequestContext) -> ApiResult<&Auth> {
     let auth = context.require_auth()?;
     if auth.bearer.is_some() {
         return Err(ApiError::new(403, "BROWSER_SESSION_REQUIRED"));
@@ -1034,7 +1080,7 @@ fn browser_session(context: &RequestContext) -> ApiResult<&Auth> {
     Ok(auth)
 }
 
-fn admin_session(context: &RequestContext) -> ApiResult<&Auth> {
+pub(crate) fn admin_session(context: &RequestContext) -> ApiResult<&Auth> {
     let auth = browser_session(context)?;
     if !machine::is_admin(&auth.account) {
         return Err(ApiError::new(403, "FORBIDDEN"));
