@@ -126,11 +126,21 @@ followed by me and successful text creation followed by a snapshot, including
 nested overflow numbers. Overflow numbers in required string fields still produce
 INVALID_INPUT. Existing JSON syntax and body-limit tests remain in the suite.
 
-The review also observed a difference for a JSON string containing an unpaired
-U+D800 code unit between a and b. TS accepts that input and Rust returns
-INVALID_JSON. The full TS write/read/restart behavior for that boundary remains
-unverified and is deferred to the coordinator's complete-migration contract.
-Normal Unicode roundtrip remains covered by the process test.
+RHEA-245 now verifies the unpaired-surrogate boundary with raw HTTP JSON bytes.
+For `{"text":"a\ud800b"}`, TS returns 201 and preserves the escape in the immediate
+response and live item event. SQLite stores `61EDA08062`, which TS reads as
+`a���b` (three U+FFFDs), including after a real process restart; the recorded
+size/storedBytes remain 5. Rust rejects the request as INVALID_JSON and cannot
+read that TS-written row: the items endpoint returns 500 INTERNAL_ERROR and
+the WebSocket closes 1011 / Snapshot unavailable. Valid surrogate pairs,
+literal escaped backslashes and ordinary Unicode still roundtrip.
+
+This remains an unresolved compatibility gap, pending a coordinator decision
+about the internal JSON/string/event representation. A blanket U+FFFD replacement
+does not match either TS's immediate response or its stored bytes. See
+[the executable evidence and proposed options](tests/UNICODE-COMPAT.md).
+`cargo test --locked --test unicode -- --nocapture` checks the documented boundary;
+its explicitly ignored parity test is a failing reproduction, not acceptance.
 
 ## Run locally
 
