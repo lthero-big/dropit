@@ -320,7 +320,10 @@ export function createBackend(options: BackendOptions = {}) {
     if (!release) throw new ApiError(404, 'NO_RELEASE');
     c.header('Cache-Control', 'no-store');
     const { versionCode, versionName, notes, size, sha256, publishedAt, file } = release;
-    return c.json({ versionCode, versionName, notes, size, sha256, publishedAt, url: `/api/app/android/download/${encodeURIComponent(file)}` });
+    return c.json({ versionCode, versionName, notes, size, sha256, publishedAt,
+      ...(release.minVersionCode === undefined ? {} : { minVersionCode: release.minVersionCode }),
+      ...(release.force === undefined ? {} : { force: release.force }),
+      url: `/api/app/android/download/${encodeURIComponent(file)}` });
   });
   app.get('/api/app/android/download/:file', async c => {
     limit(c, 'app-download', config.rateUpload, false);

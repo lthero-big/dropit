@@ -367,6 +367,18 @@ Date.parse inputs are not supported. Without build metadata, development commits
 come from git and the version defaults to 0.0.0. Rust release packaging is still
 pending. Reporting a configured OAuth provider does not implement its login flow.
 
+The update-compatible endpoints are also present on the Rust candidate:
+`GET /api/app/android/latest` and `GET /api/app/android/download/:file` read the
+same size- and SHA-256-checked `DATA_DIR/app/android/latest.json` feed as the TS
+service. Optional `minVersionCode` and `force` fields let an operator require an
+Android upgrade; download names are matched to the active manifest, so a stale
+or traversal path cannot expose another file. Admins use
+`GET /api/admin/update` and `POST /api/admin/update/check`; checks compare the
+running build with Docker Hub or GitHub, persist the result per build, throttle
+manual retries and turn network/rate-limit failures into an error report while
+leaving normal clipboard traffic available. `UPDATE_CHECK=false` disables all
+outbound update requests.
+
 `src/realtime.rs` serves private spaces only. Every connection gets an authoritative
 snapshot, followed by item.created, groups (including group creation before a
 rejected text write), and presence events. Named devices are deduplicated in

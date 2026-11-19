@@ -10,10 +10,10 @@ use crate::{ApiResult, App, RequestContext, db};
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildInfo {
-    version: String,
-    commit: Option<String>,
-    build_date: Option<String>,
-    install: String,
+    pub(crate) version: String,
+    pub(crate) commit: Option<String>,
+    pub(crate) build_date: Option<String>,
+    pub(crate) install: String,
 }
 
 pub async fn auth_providers(State(app): State<App>) -> ApiResult<Json<Value>> {
@@ -127,7 +127,7 @@ pub fn build_info() -> BuildInfo {
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| value("install").unwrap_or_default().into());
     let install = match install.trim() {
-        "docker" => "docker",
+        "docker" | "docker-rust" => "docker",
         "docker-build" => "docker-build",
         _ => "source",
     }
