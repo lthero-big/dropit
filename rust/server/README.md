@@ -130,17 +130,20 @@ RHEA-245 now verifies the unpaired-surrogate boundary with raw HTTP JSON bytes.
 For `{"text":"a\ud800b"}`, TS returns 201 and preserves the escape in the immediate
 response and live item event. SQLite stores `61EDA08062`, which TS reads as
 `a���b` (three U+FFFDs), including after a real process restart; the recorded
-size/storedBytes remain 5. Rust rejects the request as INVALID_JSON and cannot
-read that TS-written row: the items endpoint returns 500 INTERNAL_ERROR and
-the WebSocket closes 1011 / Snapshot unavailable. Valid surrogate pairs,
-literal escaped backslashes and ordinary Unicode still roundtrip.
+size/storedBytes remain 5. Rust now preserves these distinct boundaries for both
+private-space and room text create/PATCH, live events, snapshots and restarted
+reads. It reads existing TS-written TEXT bytes without rewriting historical rows.
+Valid surrogate pairs, private-use characters, literal escaped backslashes and
+ordinary Unicode still roundtrip.
 
-This remains an unresolved compatibility gap, pending a coordinator decision
-about the internal JSON/string/event representation. A blanket U+FFFD replacement
-does not match either TS's immediate response or its stored bytes. See
-[the executable evidence and proposed options](tests/UNICODE-COMPAT.md).
-`cargo test --locked --test unicode -- --nocapture` checks the documented boundary;
-its explicitly ignored parity test is a failing reproduction, not acceptance.
+The request JSON tree retains JS strings and keys as WTF-8. Text binds those
+bytes as SQLite TEXT; stored reads decode invalid UTF-8 with the measured TS
+replacement behavior. Typed item responses/events serialize lone code units as
+JSON escapes. This avoids private-use sentinels or blanket request replacement.
+See [the internal design](tests/UNICODE-DESIGN.md) and
+[the executable evidence](tests/UNICODE-COMPAT.md).
+`cargo test --locked --test unicode -- --nocapture` runs strict TS/Rust parity
+by default; there are no ignored Unicode cases.
 
 ## Run locally
 

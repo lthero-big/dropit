@@ -1,4 +1,4 @@
-// RHEA-245: characterize the fixed TS oracle without normalizing UTF-16 strings.
+// RHEA-245: strict TS/Rust Unicode parity without normalizing UTF-16 strings.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
@@ -11,7 +11,6 @@ import { fixture, PASSWORD } from './fixture.mjs';
 
 const root = resolve(import.meta.dirname, '../../..');
 const baseline = '37ce06ebfab2cd98b81e49ce54fb24ec5daeec68';
-const requireParity = process.argv.includes('--require-parity');
 const rust = process.env.RUST_SERVER_BIN || resolve(root, 'rust/server/target/debug/dropit-server');
 const origin = 'http://dropit.test';
 await mkdir(resolve(root, 'rust/server/data'), { recursive: true });
@@ -36,6 +35,10 @@ const cases = [
   ['escaped-backslash', String.raw`{"text":"a\\ud800b"}`, 'a\\ud800b'],
   ['quote-and-backslash', String.raw`{"text":"\"\\\ud800\tend"}`, '"\\\ud800\tend'],
   ['unicode-escape', String.raw`{"text":"\u0061\u4e2d\ud83d\ude00"}`, 'a中😀'],
+  ['private-use', String.raw`{"text":"\ue000\ud800\uf8ff"}`, '\ue000\ud800\uf8ff'],
+  ['literal-and-surrogate', String.raw`{"text":"\\ud800\ud800�"}`, '\\ud800\ud800�'],
+  ['duplicate-escaped-key', String.raw`{"te\u0078t":"first","text":"last"}`, 'last'],
+  ['distinct-key', String.raw`{"text":"normal","text\ud800":"ignored","text�":"also ignored"}`, 'normal'],
   ['replacement-literal', '{"text":"a�b"}', 'a�b'],
   ['ignored', String.raw`{"text":"normal","ignored":"\ud800"}`, 'normal'],
   ['nested', String.raw`{"text":"normal","ignored":{"a":["\udc00",{"b":"\ud800"}]}}`, 'normal'],
@@ -119,7 +122,7 @@ function read(data, query, ...params) {
 }
 
 function connect(server, base, cookie) {
-  const socket = new WebSocket(server.url.replace('http:', 'ws:') + base + '/ws', { origin, headers: { cookie } });
+  const socket = new WebSocket(server.url.replace('http:', 'ws:') + base + '/ws', { origin, headers: cookie ? { cookie } : {} });
   sockets.add(socket); const queue = [], waiters = [];
   socket.on('message', bytes => {
     const wire = String(bytes), body = JSON.parse(wire);
@@ -147,10 +150,9 @@ const sqliteHex = {
   'high-high-low': 'EDA080F09F9880', 'pair-low': 'F09F9880EDB080', uppercase: '61EDA08062',
   'quote-and-backslash': '225CEDA08009656E64', 'duplicate-last-high': 'EDA080',
   edit: '65646974EDA080E5B0BE',
+  'private-use': 'EE8080EDA080EFA3BF', 'literal-and-surrogate': '5C7564383030EDA080EFBFBD',
 };
 const stored = (name, text) => Buffer.from(sqliteHex[name] ?? Buffer.from(text).toString('hex'), 'hex').toString('utf8');
-const wellFormed = value => typeof value === 'string' ? value.isWellFormed() :
-  value && typeof value === 'object' ? Object.entries(value).every(([key, entry]) => key.isWellFormed() && wellFormed(entry)) : true;
 // Extract only the JSON string token, keeping escaping visible and exact.
 const textToken = wire => wire.match(/"text":("(?:[^"\\]|\\.)*")/)?.[1];
 
@@ -173,20 +175,15 @@ async function run(kind, seed, m) {
   let server = await start(kind, data);
   const base = `/api/spaces/${m.aliceSpace}`, path = base + '/items/text';
   const cookie = 'dropit_session=' + m.oldCookie;
-  const expected = new Map(), rows = [], gaps = [];
+  const expected = new Map(), rows = [];
+  let roomBase, roomExpected;
   try {
     const ws = connect(server, base, cookie);
     assert.equal((await ws.next()).body.type, 'snapshot');
     for (const [name, raw, text] of cases) {
       const parsed = JSON.parse(raw);
       assert.equal(parsed.text, text, name + ': independent expected UTF-16 value');
-      const hasSurrogate = !wellFormed(parsed) || name === 'duplicate-last-normal';
       const response = await request(server, path, { method: 'POST', cookie, raw });
-      if (kind === 'rust' && hasSurrogate && !requireParity) {
-        expect(response, 400, 'INVALID_JSON');
-        rows.push({ name, requestHex: Buffer.from(raw).toString('hex'), status: response.status, error: response.body });
-        gaps.push(name); continue;
-      }
       expect(response, 201);
       const item = response.body.item, event = await ws.next();
       assert.equal(item.text, text, name + ': immediate response');
@@ -207,23 +204,41 @@ async function run(kind, seed, m) {
     // Editing returns/broadcasts the original JS string too, not SQLite's value.
     const editRaw = String.raw`{"text":"edit\ud800尾"}`;
     const edited = await request(server, `${base}/items/${m.existing.id}`, { method: 'PATCH', cookie, raw: editRaw });
-    if (kind === 'ts' || requireParity) {
+    {
       expect(edited, 200); assert.equal(edited.body.item.text, 'edit\ud800尾');
       const event = await ws.next(); assert.equal(event.body.type, 'item.updated');
       assert.deepEqual(event.body.item, edited.body.item);
       const [row] = read(data, 'SELECT text,hex(CAST(text AS BLOB)) AS hex,size,storedBytes FROM items WHERE id=?', m.existing.id);
       assert.equal(row.hex, sqliteHex.edit); assert.equal(row.text, stored('edit', 'edit\ud800尾'));
       expected.set(m.existing.id, { text: row.text, size: row.size });
-    } else { expect(edited, 400, 'INVALID_JSON'); gaps.push('edit'); }
+    }
     rows.push({ name: 'edit', status: edited.status, responseTextToken: textToken(edited.wire),
       sqlite: read(data, 'SELECT text,hex(CAST(text AS BLOB)) AS hex,size,storedBytes FROM items WHERE id=?', m.existing.id)[0] });
 
-    // The same shared parser also rejects ignored surrogate values during login.
+    // Login must ignore unused surrogate values after validating JSON syntax.
     const loginRaw = JSON.stringify({ email: m.alice.email, password: PASSWORD }).slice(0, -1) + String.raw`,"ignored":{"a":"\ud800"}}`;
     const login = await request(server, '/api/auth/password/login', { method: 'POST', raw: loginRaw });
-    expect(login, kind === 'ts' || requireParity ? 200 : 400, kind === 'ts' || requireParity ? undefined : 'INVALID_JSON');
-    if (kind === 'rust' && !requireParity) gaps.push('login-ignored');
+    expect(login, 200);
     rows.push({ name: 'login-ignored', status: login.status });
+
+    const room = await request(server, '/api/rooms', { method: 'POST', raw: '{}' });
+    expect(room, 201); roomBase = '/api/rooms/' + room.body.token;
+    const roomSocket = connect(server, roomBase);
+    assert.equal((await roomSocket.next()).body.type, 'snapshot');
+    const created = await request(server, roomBase + '/items/text', { method: 'POST', raw: String.raw`{"text":"a\ud800b"}` });
+    expect(created, 201); assert.equal(created.body.item.text, 'a\ud800b');
+    const roomCreatedEvent = await roomSocket.next();
+    assert.deepEqual(roomCreatedEvent.body.item, created.body.item);
+    assert.equal(textToken(roomCreatedEvent.wire), String.raw`"a\ud800b"`);
+    const roomEdited = await request(server, roomBase + '/items/' + created.body.item.id, { method: 'PATCH', raw: editRaw });
+    expect(roomEdited, 200); assert.equal(roomEdited.body.item.text, 'edit\ud800尾');
+    assert.deepEqual((await roomSocket.next()).body.item, roomEdited.body.item);
+    const [roomRow] = read(data, 'SELECT text,hex(CAST(text AS BLOB)) AS hex,size,storedBytes FROM items WHERE id=?', created.body.item.id);
+    assert.equal(roomRow.hex, sqliteHex.edit); assert.equal(roomRow.size, 10); assert.equal(roomRow.storedBytes, 10);
+    roomExpected = new Map([[created.body.item.id, { text: stored('edit', 'edit\ud800尾'), size: 10 }]]);
+    rows.push({ name: 'room-create-edit', status: roomEdited.status, sqlite: roomRow });
+    roomSocket.socket.terminate();
+    await inspect(server, roomBase, undefined, roomExpected);
 
     const before = read(data, 'SELECT count(*) AS n FROM items')[0].n;
     for (const raw of malformed) expect(await request(server, path, { method: 'POST', cookie, raw }), 400, 'INVALID_JSON');
@@ -246,26 +261,15 @@ async function run(kind, seed, m) {
     await stop(server);
     server = await start(kind, data);
     await inspect(server, base, cookie, expected);
+    await inspect(server, roomBase, undefined, roomExpected);
     await stop(server);
     // Restart the other real implementation on the original database, without
     // exporting/importing strings through JS or changing the stored schema.
     server = await start(kind === 'ts' ? 'rust' : 'ts', data);
-    let crossRead;
-    if (kind === 'ts' && !requireParity) {
-      const response = await request(server, base + '/items', { cookie });
-      expect(response, 500, 'INTERNAL_ERROR');
-      const ws = connect(server, base, cookie);
-      const [code, reason] = await Promise.race([
-        once(ws.socket, 'close'),
-        delay(10000, undefined, { ref: false }).then(() => { throw new Error('Expected legacy-data WS close'); }),
-      ]);
-      assert.equal(code, 1011); assert.equal(String(reason), 'Snapshot unavailable');
-      crossRead = { kind: 'rust', status: response.status, body: response.body, wsClose: { code, reason: String(reason) } };
-    } else {
-      await inspect(server, base, cookie, expected);
-      crossRead = { kind: kind === 'ts' ? 'rust' : 'ts', status: 200, wsSnapshot: true };
-    }
-    return { kind, rows, gaps, persistedItems: expected.size, sameProcessGetAndWs: true, restartedGetAndWs: true, crossRead };
+    await inspect(server, base, cookie, expected);
+    await inspect(server, roomBase, undefined, roomExpected);
+    const crossRead = { kind: kind === 'ts' ? 'rust' : 'ts', status: 200, wsSnapshot: true };
+    return { kind, rows, persistedItems: expected.size, sameProcessGetAndWs: true, restartedGetAndWs: true, crossRead };
   } finally { await stop(server); }
 }
 
@@ -276,11 +280,7 @@ try {
   const report = { baseline, cases: cases.length, malformed: malformed.length, checks, ts, rust: candidate };
   if (process.env.UNICODE_REPORT) await writeFile(resolve(process.env.UNICODE_REPORT), JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify(report, null, 2));
-  if (requireParity) {
-    assert.equal(ts.crossRead.status, 200, 'Rust must read TS-written Unicode data and deliver its WS snapshot');
-    assert.deepEqual(candidate.gaps, [], 'Unresolved TS/Rust Unicode compatibility gaps (see README)');
-  }
-  console.log(`PASS Unicode characterization: ${checks} checks; ${candidate.gaps.length} explicitly unresolved parity cases`);
+  console.log(`PASS Unicode TS/Rust parity: ${checks} HTTP/state checks`);
 } finally {
   for (const socket of sockets) socket.terminate();
   for (const child of [...children]) await stop({ child });

@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -68,11 +68,11 @@ pub fn raw_token() -> ApiResult<String> {
     password::session_token()
 }
 
-pub fn token_options(body: &Map<String, Value>, allow_web: bool) -> ApiResult<TokenOptions> {
+pub fn token_options(body: &crate::js::Object, allow_web: bool) -> ApiResult<TokenOptions> {
     let name = person_name(body.get("name"))?;
     let scopes = match body.get("scopes") {
         None => vec!["read".to_owned(), "write".to_owned()],
-        Some(Value::Array(values)) => values
+        Some(crate::js::Value::Array(values)) => values
             .iter()
             .map(|value| {
                 value
@@ -101,7 +101,7 @@ pub fn token_options(body: &Map<String, Value>, allow_web: bool) -> ApiResult<To
         return Err(ApiError::INVALID_INPUT);
     }
     let lifetime_ms = match body.get("expiresInDays") {
-        Some(Value::Null) => None,
+        Some(crate::js::Value::Null) => None,
         None => Some(90 * 86_400_000),
         Some(value) => {
             let days = value
@@ -118,9 +118,9 @@ pub fn token_options(body: &Map<String, Value>, allow_web: bool) -> ApiResult<To
     })
 }
 
-fn person_name(value: Option<&Value>) -> ApiResult<String> {
+fn person_name(value: Option<&crate::js::Value>) -> ApiResult<String> {
     let raw = value
-        .and_then(Value::as_str)
+        .and_then(crate::js::Value::as_str)
         .filter(|value| value.encode_utf16().count() <= 80)
         .ok_or(ApiError::INVALID_INPUT)?;
     let name: String = raw

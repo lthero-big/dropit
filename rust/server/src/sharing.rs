@@ -213,10 +213,10 @@ async fn create_inner(
     let body = read_json(request, 2048).await?;
     let expires = body
         .get("expiresIn")
-        .and_then(Value::as_str)
+        .and_then(crate::js::Value::as_str)
         .ok_or(ApiError::INVALID_INPUT)?;
     let max_views = match body.get("maxViews") {
-        None | Some(Value::Null) => None,
+        None | Some(crate::js::Value::Null) => None,
         Some(value) => Some(
             value
                 .as_i64()
@@ -852,7 +852,7 @@ fn preset_response(saved: Option<&str>) -> ApiResult<Value> {
 
 /// `Number.isSafeInteger`: finite, no fractional part after IEEE rounding, and
 /// strictly inside `-(2^53) < n < 2^53`. `2.0` and `2e1` are integers.
-fn js_safe_integer(value: &Value) -> Option<i64> {
+fn js_safe_integer(value: &crate::js::Value) -> Option<i64> {
     let number = value.as_f64()?;
     if !number.is_finite() || number.fract() != 0.0 || number.abs() >= (1_u64 << 53) as f64 {
         return None;
@@ -860,7 +860,7 @@ fn js_safe_integer(value: &Value) -> Option<i64> {
     Some(number as i64)
 }
 
-fn preset_values(raw: Option<&Value>, max: i64) -> ApiResult<Vec<i64>> {
+fn preset_values(raw: Option<&crate::js::Value>, max: i64) -> ApiResult<Vec<i64>> {
     let Some(raw) = raw else {
         return Err(ApiError::INVALID_INPUT);
     };
@@ -886,8 +886,8 @@ fn preset_values(raw: Option<&Value>, max: i64) -> ApiResult<Vec<i64>> {
     Ok(numbers)
 }
 
-fn normalized_presets(input: &Map<String, Value>) -> ApiResult<Value> {
-    let empty = Value::Array(Vec::new());
+fn normalized_presets(input: &crate::js::Object) -> ApiResult<Value> {
+    let empty = crate::js::Value::Array(Vec::new());
     let hours = preset_values(input.get("hours").or(Some(&empty)), 87_600)?;
     let days = preset_values(input.get("days"), 3_650)?;
     let months = preset_values(input.get("months").or(Some(&empty)), 121)?;
@@ -935,7 +935,12 @@ pub async fn save_share_presets(
 
 #[cfg(test)]
 mod preset_tests {
-    use super::{normalized_presets, preset_response};
+    use super::preset_response;
+
+    fn normalized_presets(input: &serde_json::Map<String, Value>) -> crate::ApiResult<Value> {
+        let input = crate::js::parse(&Value::Object(input.clone()).to_string()).unwrap();
+        super::normalized_presets(&input)
+    }
     use serde_json::{Value, json};
 
     fn numbers(value: &Value, key: &str) -> Vec<i64> {

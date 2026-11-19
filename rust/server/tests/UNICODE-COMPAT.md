@@ -1,10 +1,10 @@
 # RHEA-245: Unicode input, persistence and restart evidence
 
-Status: **blocked on an internal representation decision; no compatibility fix**.
+Status: **exact text compatibility implemented after coordinator authorization**.
 The TS oracle is fixed at `37ce06ebfab2cd98b81e49ce54fb24ec5daeec68`.
 The candidate starts at migration commit `cd53eb69fd717a6006618c35fed87462cf1b8b14`.
-Only tests and documentation change in this PR. No production data, credentials,
-deployment, schema, request parser, upload code or shared MAP are involved.
+The request tree, text repository and transient item serialization change.
+No production data, credentials, deployment, schema or shared MAP are involved.
 
 ## Observed contract
 
@@ -27,43 +27,33 @@ encoding). Its SQLite reads replace each invalid byte with U+FFFD. For `a\ud800b
 `size` and `storedBytes` remain **5**, even though the read string now takes 11
 UTF-8 bytes. Restarting the TS process on the same files preserves this mismatch.
 
-Rust rejects 15 of the 19 raw JSON create fixtures with 400 `INVALID_JSON`,
-including unused/nested values, an unused property name and an overwritten
-duplicate value containing a lone surrogate. The normal, valid-pair and literal
-backslash controls pass. PATCH and login with an unused surrogate also fail,
-for **17 input parity gaps**. Reading the TS-written database with Rust adds an
-independent historical-data gap: items GET returns 500 `INTERNAL_ERROR`; WS
-upgrades, then closes 1011 with `Snapshot unavailable`. The failure affects the
-entire snapshot containing that row. TS can read the Rust-written control data.
+The initial candidate rejected 15 of 19 raw JSON create fixtures, plus PATCH
+and login with ignored surrogate fields. Its reads of TS-written text returned
+500 and WS closed 1011. Those failures are fixed: both implementations now pass
+the same strict assertions for create/PATCH, raw live event strings, SQLite hex,
+HTTP/WS snapshots, actual restarts and cross-implementation reads. Private-space
+and anonymous-room paths are covered separately.
 
 ## Why request replacement is insufficient
 
-`read_json` returns `Map<String, serde_json::Value>`, whose strings and keys use
-Rust `String`. `db::Item.text` is `Option<String>` and the realtime publisher
-accepts `serde_json::Value`. These interfaces cannot carry a lone UTF-16 code
-unit for exact serialization as `\ud800`. SQLite's existing text extraction
-also requires valid UTF-8. Replacing input with one U+FFFD would change the
-response/event, the persisted bytes and the later read result. Replacing it
-with three U+FFFDs would also change the immediate response and size accounting.
-Dropping unknown fields before syntax validation would change error handling.
+`js::JsString` retains a JSON string as WTF-8 bytes using serde_json's
+byte-string deserializer. A request-only tree preserves keys and values recursively,
+including ignored and duplicate fields; valid JSON syntax is checked by RawValue
+before field validation. Byte-identical decoded keys implement last-value wins;
+lone units remain distinct from literal U+FFFD, private-use code points and
+backslash-u text. Numbers retain serde_json's arbitrary-precision representation.
+Existing scalar field validators keep their business rules; text uses an explicit
+JS-string accessor.
 
-The task explicitly requires coordinator evidence before a substantial internal
-data-model/interface change, so this PR stops at executable characterization.
-The existing assertions and product behavior have not been relaxed.
-
-Options for the coordinator:
-
-1. Authorize exact compatibility: introduce a representation that preserves
-   UTF-16 code units in parsed JSON keys/values and outbound transient events;
-   separately encode the legacy SQLite bytes and decode existing invalid UTF-8
-   text with the measured TS read behavior. Keep schema 19, quota sizes,
-   authentication/validation order and body limits. This touches shared JSON,
-   validation, response, realtime and repository interfaces and needs a scoped
-   design plus full compatibility regression.
-2. Explicitly accept a changed Unicode contract: choose rejection or a specified
-   normalization on new writes, and independently define legacy-row reads. This
-   is a migration contract exception, not exact TS compatibility. The coordinator
-   must approve and update the shared contract before implementation.
+`ToSql` binds text bytes as TEXT (not BLOB); the byte length equals
+Buffer.byteLength even for a lone unit. `db::item` reads TEXT bytes with
+from_utf8_lossy, preserving the measured three replacements per surrogate and the
+separately stored size. It never rewrites history. Create/PATCH return the transient
+input string, while subsequent reads use the stored decoding. Typed responses and
+item events serialize directly, bypassing serde_json::Value's scalar-string limit.
+The existing broadcast queue, limits, gate, write transactions and ordinary Value
+publishers retain their behavior. This follows the authorized
+[internal design](UNICODE-DESIGN.md).
 
 ## Reproduce
 
@@ -74,17 +64,14 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked
 UNICODE_REPORT=../unicode-report.json cargo test --locked --test unicode -- --nocapture
-cargo test --locked --test unicode unicode_ts_rust_parity -- --ignored --nocapture
+cargo test --locked -- --nocapture
 ```
 
-The first Unicode test asserts the exact documented TS and current Rust
-behavior, including raw response/event string tokens and SQLite hex, same-process
-GET/WS reads, SIGTERM and a fresh real process on the same database, then the other
-implementation reading those files. The second command deliberately fails the
-parity gate; it is explicitly ignored in the normal suite until the contract
-decision is implemented. It is also available as
-`node tests/unicode.mjs --require-parity`. A passing characterization must never
-be reported as passing Unicode compatibility or a completed migration.
+The Unicode test asserts exact TS and Rust behavior by default, including raw
+response/event string tokens and SQLite hex, same-process GET/WS reads, SIGTERM
+and a fresh real process on the same database, then the other implementation
+reading those files. No difference is accepted or normalized away, and no Unicode
+test is ignored. The direct harness is `node tests/unicode.mjs`.
 
 The isolated harness archives and builds the fixed TS reference with its frozen
 lockfile, generates schema-19 synthetic users/sessions, allocates loopback ports,
@@ -94,9 +81,23 @@ turns a surrogate into a replacement character before HTTP parsing. Separate
 UTF-16 expectations validate the parsed payload. The optional report contains
 the sent bytes, wire text tokens, UTF-16 units and stored bytes, without secrets.
 
-Coverage: high/low surrogates, valid pairs, Chinese/emoji, consecutive/reversed
-surrogates, case-insensitive hex escapes, quotes/backslashes/tabs, actual U+FFFD,
+Coverage: private-space and room create/PATCH; high/low surrogates, valid pairs,
+Chinese/emoji, consecutive/reversed surrogates, case-insensitive hex escapes,
+quotes/backslashes/tabs, actual U+FFFD and private-use characters,
 ignored/nested/key/duplicate fields; 10 illegal JSON forms, non-object JSON,
 wrong types, empty text, unauthenticated/cross-space/viewer/Origin rejection,
-content type, text/body limits and no writes after errors. The characterization
-currently passes **269 HTTP/state checks**; the strict parity gate remains red.
+content type, text/body limits and no writes after errors. All Unicode cases run
+as strict compatibility assertions, including the original legacy-read 500/1011
+regression.
+
+## Validation on 2026-11-19
+
+Rust 1.94.0, Node 22.22.0 and pnpm 11.1.0: fmt, strict locked clippy,
+locked build and one complete `cargo test --locked -- --nocapture` run pass.
+All 16 unit tests and 10 process-test targets pass with zero ignored tests.
+The Unicode target runs 23 raw JSON fixtures, 10 illegal JSON controls and
+554 HTTP/state checks, including anonymous rooms and bidirectional database reads.
+The same full run passes auth/mock OAuth, 228 file responses, 199 login/text
+responses, 290 item/label/group checks, PAT/device/WebView/CLI, 527 realtime checks,
+408 room/share checks, update HTTP (including slow 200 MiB download/cancel/file
+release), and 353 upload/chunk responses.

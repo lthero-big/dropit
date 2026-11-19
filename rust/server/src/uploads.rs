@@ -1106,9 +1106,9 @@ fn authorized_upload(
     Ok(upload)
 }
 
-fn json_size(value: Option<&serde_json::Value>, max_file: i64) -> ApiResult<i64> {
+fn json_size(value: Option<&crate::js::Value>, max_file: i64) -> ApiResult<i64> {
     let number = value
-        .and_then(serde_json::Value::as_f64)
+        .and_then(crate::js::Value::as_f64)
         .ok_or(ApiError::INVALID_INPUT)?;
     if number.fract() != 0.0 || !(1.0..(1_u64 << 53) as f64).contains(&number) {
         return Err(ApiError::INVALID_INPUT);
@@ -1120,7 +1120,7 @@ fn json_size(value: Option<&serde_json::Value>, max_file: i64) -> ApiResult<i64>
     Ok(size)
 }
 
-fn session_mime(value: Option<&serde_json::Value>) -> ApiResult<String> {
+fn session_mime(value: Option<&crate::js::Value>) -> ApiResult<String> {
     let raw = crate::input_string(value, 200)?;
     let mime = raw
         .split(';')

@@ -5,6 +5,7 @@ mod db;
 mod downloads;
 mod images;
 mod items;
+mod js;
 mod machine;
 mod maintenance;
 mod migrations;
@@ -921,7 +922,7 @@ async fn login(
     let body = read_json(request, 4096).await?;
     let email = body
         .get("email")
-        .and_then(Value::as_str)
+        .and_then(crate::js::Value::as_str)
         .unwrap_or_default()
         .trim_matches(js_space)
         .to_lowercase();
@@ -931,8 +932,8 @@ async fn login(
     }
     app.limit("auth:email", &password::hash(&email), app.config.rate_auth)?;
     let invite = match body.get("invite") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) if value.is_empty() => None,
+        None | Some(crate::js::Value::Null) => None,
+        Some(crate::js::Value::String(value)) if value.is_empty() => None,
         value => Some(password::hash(input_string(value, 128)?)),
     };
     let email_to_find = email.clone();
@@ -1100,7 +1101,7 @@ async fn rename_token(
     let body = read_json(request, 2048).await?;
     let name = body
         .get("name")
-        .and_then(Value::as_str)
+        .and_then(crate::js::Value::as_str)
         .filter(|value| !value.trim().is_empty() && value.encode_utf16().count() <= 80)
         .map(|value| {
             value
@@ -1231,7 +1232,7 @@ async fn device_token(
     let body = read_json(request, 2048).await?;
     let device_code = body
         .get("device_code")
-        .and_then(Value::as_str)
+        .and_then(crate::js::Value::as_str)
         .filter(|value| !value.is_empty() && value.len() <= 128)
         .ok_or(ApiError::INVALID_INPUT)?;
     let raw = machine::raw_token()?;
@@ -1316,8 +1317,10 @@ async fn decide_device(
     approve: bool,
 ) -> ApiResult<impl IntoResponse> {
     let body = read_json(request, 2048).await?;
-    let user_code = body.get("user_code").and_then(Value::as_str);
-    let verification_id = body.get("verification_id").and_then(Value::as_str);
+    let user_code = body.get("user_code").and_then(crate::js::Value::as_str);
+    let verification_id = body
+        .get("verification_id")
+        .and_then(crate::js::Value::as_str);
     let device = requested_device(&app, &context, user_code, verification_id).await?;
     let user_id = browser_session(&context)?.account.user.id.clone();
     app.db
@@ -1543,22 +1546,22 @@ async fn text(
     app.limit("write:user", &auth.account.user.id, app.config.rate_upload)?;
     let headers = request.headers().clone();
     let body = read_json(request, app.config.max_text * 6 + 1024).await?;
-    let text = input_string(body.get("text"), usize::MAX)?;
+    let text = body.text("text")?;
     let header_group = match header_value(&headers, "x-dropit-group").filter(|v| !v.is_empty()) {
         Some(raw) => Some(decode_uri_component(raw).ok_or(ApiError::new(400, "INVALID_GROUP"))?),
         None => None,
     };
-    if text.trim_matches(js_space).is_empty() {
+    if text.is_blank() {
         return Err(ApiError::new(400, "EMPTY_TEXT"));
     }
     if text.len() > app.config.max_text {
         return Err(ApiError::new(413, "TEXT_TOO_LARGE"));
     }
     let group = match body.get("group") {
-        None | Some(Value::Null) => header_group,
+        None | Some(crate::js::Value::Null) => header_group,
         value => Some(
             value
-                .and_then(Value::as_str)
+                .and_then(crate::js::Value::as_str)
                 .ok_or(ApiError::new(400, "INVALID_GROUP"))?
                 .to_owned(),
         ),
@@ -1599,9 +1602,8 @@ async fn text(
             .publish(&channel, json!({ "type": "groups", "groups": groups }));
     }
     let item = item?;
-    app.realtime
-        .publish(&channel, json!({ "type": "item.created", "item": item }));
-    Ok((StatusCode::CREATED, Json(json!({ "item": item }))))
+    app.realtime.publish_item(&channel, "item.created", &item);
+    Ok((StatusCode::CREATED, Json(js::ItemResponse { item })))
 }
 
 async fn download(
@@ -1712,7 +1714,7 @@ fn file_size(size: i64) -> ApiResult<u64> {
     u64::try_from(size).map_err(|_| ApiError::internal("negative stored size"))
 }
 
-pub(crate) async fn read_json(request: Request, limit: usize) -> ApiResult<Map<String, Value>> {
+pub(crate) async fn read_json(request: Request, limit: usize) -> ApiResult<js::Object> {
     if !header_value(request.headers(), "content-type")
         .is_some_and(|value| value.starts_with("application/json"))
     {
@@ -1730,13 +1732,12 @@ pub(crate) async fn read_json(request: Request, limit: usize) -> ApiResult<Map<S
             }
         })?;
     // JSON.parse accepts huge numbers in unused fields. Keep them parseable before validating used fields.
-    serde_json::from_str(&String::from_utf8_lossy(&bytes))
-        .map_err(|_| ApiError::new(400, "INVALID_JSON"))
+    js::parse(&String::from_utf8_lossy(&bytes)).map_err(|_| ApiError::new(400, "INVALID_JSON"))
 }
 
-pub(crate) fn input_string(value: Option<&Value>, limit: usize) -> ApiResult<&str> {
+pub(crate) fn input_string(value: Option<&js::Value>, limit: usize) -> ApiResult<&str> {
     value
-        .and_then(Value::as_str)
+        .and_then(js::Value::as_str)
         .filter(|text| !text.is_empty() && text.encode_utf16().count() <= limit)
         .ok_or(ApiError::INVALID_INPUT)
 }

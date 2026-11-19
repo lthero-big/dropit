@@ -27,5 +27,7 @@ Integration order: this design commit, request/string/repository implementation,
 typed text responses/events, then parity and full regression. The parser's return
 type and input validator signatures change internally; output Value APIs remain.
 The broadcaster's existing publish(Value) method is preserved, so RHEA-243's
-upload completion/event fixes can be merged independently without touching
-uploads.rs. RHEA-246's packaging/maintenance work has no required signature change.
+upload completion/event fixes can be merged independently. Only uploads.rs's
+json_size/session_mime input helper types change for the shared parser; the
+completion/locking/notification/event sequence is untouched. RHEA-246's
+packaging/maintenance work has no required signature change.

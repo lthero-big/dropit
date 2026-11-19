@@ -352,7 +352,7 @@ pub struct Item {
     pub space_id: String,
     pub user_id: Option<String>,
     pub kind: String,
-    pub text: Option<String>,
+    pub text: Option<crate::js::JsString>,
     pub filename: Option<String>,
     pub mime: Option<String>,
     pub size: i64,
@@ -394,7 +394,14 @@ pub fn item(row: &Row<'_>) -> rusqlite::Result<Item> {
         space_id: row.get("spaceId")?,
         user_id: row.get("userId")?,
         kind: row.get("kind")?,
-        text: row.get("text")?,
+        text: match row.get_ref("text")? {
+            rusqlite::types::ValueRef::Null => None,
+            value => Some(
+                String::from_utf8_lossy(value.as_bytes()?)
+                    .into_owned()
+                    .into(),
+            ),
+        },
         filename: row.get("filename")?,
         mime: row.get("mime")?,
         size: row.get("size")?,
@@ -442,7 +449,7 @@ pub fn groups(db: &Connection, space: &str) -> ApiResult<Vec<String>> {
 }
 
 pub struct TextInput {
-    pub text: String,
+    pub text: crate::js::JsString,
     pub group: Option<String>,
     pub device: Option<Device>,
 }
@@ -496,7 +503,8 @@ pub fn insert_text(
         VALUES (?1,?2,?3,'text',?4,?5,?5,?6,?7,?6,?8,?9,?10,?11)",
         params![id, space_id, account.user.id, input.text, size, time, expires_at, input.group,
             device.map(|d| &d.id), device.map(|d| &d.name), device.map(|d| &d.kind)])?;
-    let inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    let mut inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    inserted.text = Some(input.text);
     tx.commit()?;
     Ok(inserted)
 }
@@ -544,7 +552,8 @@ pub fn insert_room_text(
         params![id, space_id, input.text, size, time, expires_at, input.group,
             device.map(|d| &d.id), device.map(|d| &d.name), device.map(|d| &d.kind)],
     )?;
-    let inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    let mut inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    inserted.text = Some(input.text);
     tx.commit()?;
     Ok(inserted)
 }

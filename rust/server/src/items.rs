@@ -7,11 +7,11 @@ use axum::{
     http::StatusCode,
 };
 use rusqlite::{Connection, TransactionBehavior, params};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::{
-    ApiError, ApiResult, App, Auth, RequestContext, clean_group, db, input_string, js_space, now,
-    read_json, rooms,
+    ApiError, ApiResult, App, Auth, RequestContext, clean_group, db, js_space, now, read_json,
+    rooms,
 };
 
 type Parameters = Result<Path<HashMap<String, String>>, PathRejection>;
@@ -115,10 +115,10 @@ enum GroupChange {
     Delete(String),
 }
 
-fn named(body: &Map<String, Value>) -> ApiResult<String> {
+fn named(body: &crate::js::Object) -> ApiResult<String> {
     clean_group(
         body.get("name")
-            .and_then(Value::as_str)
+            .and_then(crate::js::Value::as_str)
             .ok_or(ApiError::new(400, "INVALID_GROUP"))?,
     )
 }
@@ -246,7 +246,7 @@ async fn change_group(app: &App, target: Target, change: GroupChange) -> ApiResu
     Ok(Json(json!({ "groups": groups })))
 }
 
-fn normalize_tags(value: &Value) -> ApiResult<Vec<String>> {
+fn normalize_tags(value: &crate::js::Value) -> ApiResult<Vec<String>> {
     let values = value
         .as_array()
         .filter(|values| values.len() <= 8)
@@ -314,7 +314,7 @@ pub async fn labels(
             target.can_manage(&space, &current, false)?;
             if !["pinned", "tags", "group"]
                 .iter()
-                .any(|key| body.contains_key(*key))
+                .any(|key| body.contains_key(key))
             {
                 return Err(ApiError::INVALID_INPUT);
             }
@@ -325,10 +325,11 @@ pub async fn labels(
             let before = db::groups(&tx, &target.id)?;
             let group = match body.get("group") {
                 None => current.group.clone(),
-                Some(Value::Null) => None,
-                Some(Value::String(value)) if value.is_empty() => None,
-                Some(Value::String(value)) => {
-                    let group = clean_group(value)?;
+                Some(crate::js::Value::Null) => None,
+                Some(crate::js::Value::String(value)) if value.is_empty() => None,
+                Some(crate::js::Value::String(value)) => {
+                    let group =
+                        clean_group(value.as_str().ok_or(ApiError::new(400, "INVALID_GROUP"))?)?;
                     db::ensure_group(&tx, &target.id, &group, now())?;
                     Some(group)
                 }
@@ -348,7 +349,7 @@ pub async fn labels(
                 }
                 let pinned = body
                     .get("pinned")
-                    .and_then(Value::as_bool)
+                    .and_then(crate::js::Value::as_bool)
                     .unwrap_or(current.pinned);
                 let tags = serde_json::to_string(&tags).map_err(ApiError::internal)?;
                 tx.execute(
@@ -376,11 +377,11 @@ pub async fn edit(
     Extension(context): Extension<RequestContext>,
     parameters: Parameters,
     request: Request,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<crate::js::ItemResponse>> {
     let (target, mut parameters) = target(&app, &context, parameters, true).await?;
     let id = parameters.remove("id").ok_or(ApiError::NOT_FOUND)?;
     let body = read_json(request, app.config.max_text * 6 + 1024).await?;
-    let text = input_string(body.get("text"), usize::MAX)?.to_owned();
+    let text = body.text("text")?;
     let config = app.config.clone();
     let channel = target.id.clone();
     let _gate = app.realtime.gate.lock().await;
@@ -394,7 +395,7 @@ pub async fn edit(
                 return Err(ApiError::INVALID_INPUT);
             }
             target.can_manage(&space, &current, true)?;
-            if text.trim_matches(js_space).is_empty() {
+            if text.is_blank() {
                 return Err(ApiError::new(400, "EMPTY_TEXT"));
             }
             if text.len() > config.max_text {
@@ -440,12 +441,12 @@ pub async fn edit(
                 "UPDATE items SET text=?,size=?,storedBytes=?,updatedAt=? WHERE id=?",
                 params![text, size, size, now(), id],
             )?;
-            let updated = target.item(&tx, &id)?;
+            let mut updated = target.item(&tx, &id)?;
+            updated.text = Some(text);
             tx.commit()?;
             Ok(updated)
         })
         .await?;
-    app.realtime
-        .publish(&channel, json!({ "type": "item.updated", "item": item }));
-    Ok(Json(json!({ "item": item })))
+    app.realtime.publish_item(&channel, "item.updated", &item);
+    Ok(Json(crate::js::ItemResponse { item }))
 }

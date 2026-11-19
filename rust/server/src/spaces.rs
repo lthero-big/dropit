@@ -18,9 +18,9 @@ use crate::{
     read_json,
 };
 
-fn value_i64(value: Option<&Value>, default: i64, min: i64, max: i64) -> ApiResult<i64> {
+fn value_i64(value: Option<&crate::js::Value>, default: i64, min: i64, max: i64) -> ApiResult<i64> {
     let value = match value {
-        None | Some(Value::Null) => default,
+        None | Some(crate::js::Value::Null) => default,
         Some(value) => value.as_i64().ok_or(ApiError::INVALID_INPUT)?,
     };
     if !(min..=max).contains(&value) {
@@ -29,15 +29,13 @@ fn value_i64(value: Option<&Value>, default: i64, min: i64, max: i64) -> ApiResu
     Ok(value)
 }
 
-async fn body_if_json(
-    request: axum::extract::Request,
-) -> ApiResult<serde_json::Map<String, Value>> {
+async fn body_if_json(request: axum::extract::Request) -> ApiResult<crate::js::Object> {
     if header_value(request.headers(), "content-type")
         .is_some_and(|value| value.starts_with("application/json"))
     {
         read_json(request, 2048).await
     } else {
-        Ok(serde_json::Map::new())
+        Ok(crate::js::Object::new())
     }
 }
 
@@ -133,7 +131,11 @@ pub async fn create_invite(
     let hours = value_i64(body.get("expiresInHours"), 168, 1, 720)?;
     let role = match body.get("role") {
         None => "viewer",
-        Some(Value::String(role)) if role == "viewer" || role == "editor" => role.as_str(),
+        Some(crate::js::Value::String(role))
+            if matches!(role.as_str(), Some("viewer" | "editor")) =>
+        {
+            role.as_str().unwrap()
+        }
         _ => return Err(ApiError::INVALID_INPUT),
     }
     .to_owned();
@@ -232,7 +234,7 @@ pub async fn set_member_role(
     let body = read_json(request, 1024).await?;
     let role = body
         .get("role")
-        .and_then(Value::as_str)
+        .and_then(crate::js::Value::as_str)
         .filter(|role| matches!(*role, "viewer" | "editor"))
         .ok_or(ApiError::INVALID_INPUT)?
         .to_owned();
