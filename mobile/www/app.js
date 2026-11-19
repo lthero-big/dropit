@@ -163,7 +163,8 @@ function offerUpdate(offer, { auto }) {
   $('upd-meta').textContent = `当前 ${installedName} · 安装包 ${formatSize(offer.size)}`;
   $('upd-notes').textContent = offer.notes || '';
   $('upd-msg').textContent = '';
-  $('upd-skip').hidden = !auto;
+  $('upd-skip').hidden = !auto || offer.force === true;
+  $('upd-later').hidden = offer.force === true;
   $('upd-install').onclick = () => installUpdate(offer);
   return new Promise(resolve => {
     $('upd-later').onclick = () => resolve();
