@@ -8,7 +8,7 @@ Public prose that matches the code: `docs/api.md` sections "Items", "Resumable f
 
 ## Routes
 
-Both bases exist: `/api/spaces/:space` and `/api/rooms/:room`. Space routes need a member session. Room routes need the unexpired room capability. A room code is not an upload credential.
+Both bases exist: `/api/spaces/:space` and `/api/rooms/:room`. Space routes need a member session. Room routes need the unexpired room capability. A room code is not an upload credential. The Rust room-chunk comparison is `rust/server/tests/room-chunks-compat.mjs`.
 
 | Method | Path | Success | Owner |
 | --- | --- | --- | --- |

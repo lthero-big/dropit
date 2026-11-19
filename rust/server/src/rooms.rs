@@ -567,10 +567,12 @@ pub async fn admin_delete(
 ) -> ApiResult<StatusCode> {
     crate::admin_session(&context)?;
     let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    let keys=app.db.run(move|db| {
+    let (keys, upload_ids)=app.db.run(move|db| {
         let tx=db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM spaces WHERE id=? AND roomKey IS NOT NULL AND expiresAt>?)",rusqlite::params![id,now()],|row|row.get(0))?;
         if !exists { return Err(ApiError::NOT_FOUND); }
+        let mut ids=tx.prepare("SELECT id FROM uploads WHERE spaceId=?")?;
+        let upload_ids=ids.query_map([&id],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?; drop(ids);
         let mut statement=tx.prepare("SELECT fileKey FROM items WHERE spaceId=?1 AND fileKey IS NOT NULL UNION SELECT thumbnailKey FROM items WHERE spaceId=?1 AND thumbnailKey IS NOT NULL UNION SELECT key FROM upload_chunks WHERE uploadId IN (SELECT id FROM uploads WHERE spaceId=?1)")?;
         let keys=statement.query_map([&id],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?; drop(statement);
         for key in &keys { tx.execute("INSERT OR IGNORE INTO garbage (key) VALUES (?)",[key])?; }
@@ -578,8 +580,9 @@ pub async fn admin_delete(
         tx.execute("DELETE FROM items WHERE spaceId=?",[&id])?;
         tx.execute("DELETE FROM shares WHERE spaceId=?",[&id])?;
         tx.execute("DELETE FROM spaces WHERE id=?",[&id])?;
-        tx.commit()?; Ok(keys)
+        tx.commit()?; Ok((keys, upload_ids))
     }).await?;
+    crate::uploads::abort_sessions(&app, &upload_ids).await;
     let directory = crate::downloads::files_dir(&app.config.data);
     for key in keys {
         let path = crate::downloads::object_path(&directory, &key)?;

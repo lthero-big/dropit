@@ -16,7 +16,8 @@ use crate::{ApiError, ApiResult, App, db, downloads, now};
 pub async fn run_once(app: &App) -> ApiResult<()> {
     let time = now();
     let expired = app.db.run(move |db| db::expire(db, time)).await?;
-    for item in expired {
+    crate::uploads::abort_sessions(app, &expired.upload_ids).await;
+    for item in &expired.items {
         app.realtime.publish(
             &item.space_id,
             json!({ "type": "item.deleted", "id": item.id }),

@@ -1839,6 +1839,7 @@ pub async fn update_user(
     } else {
         None
     };
+    let user_id = id.clone();
     app.db.run(move |db| {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current: Option<(String, bool, String)> = tx.query_row("SELECT role,disabled,email FROM users WHERE id=?", [&id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
@@ -1850,6 +1851,13 @@ pub async fn update_user(
         if next_disabled && !old_disabled { tx.execute("DELETE FROM sessions WHERE userId=?", [&id])?; tx.execute("UPDATE access_tokens SET revoked=1 WHERE userId=?", [&id])?; tx.execute("UPDATE device_authorizations SET status='denied' WHERE userId=? AND status='approved'", [&id])?; }
         tx.commit()?; Ok(())
     }).await?;
+    if disabled == Some(true) {
+        let ids = app
+            .db
+            .run(move |db| db::delete_user_uploads(db, &user_id))
+            .await?;
+        crate::uploads::abort_sessions(&app, &ids).await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
