@@ -12,6 +12,7 @@ import {updateOffer, shouldPrompt} from '../../../mobile/www/core.js';
 
 const root = resolve(import.meta.dirname, '../../..');
 const binary = process.env.RUST_SERVER_BIN || resolve(root, 'rust/server/target/debug/dropit-server');
+await mkdir(join(root, 'rust/server/data'), {recursive:true});
 const dir = await mkdtemp(join(root, 'rust/server/data/rhea244-'));
 const output = [];
 const record = (name, reference, candidate) => {output.push({name, reference, candidate, same: JSON.stringify(reference) === JSON.stringify(candidate)});};
