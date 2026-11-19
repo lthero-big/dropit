@@ -507,6 +507,11 @@ sessions, room reuse/codes/PIN lockout/unlock/close/reopen/expiry, room snapshot
 and real WebSocket events, PAT revocation, room file Range and derived images,
 share expiration/exhaustion, single-view races, copy-token isolation, revoked
 and expired download tickets, source retraction and public/room rate budgets.
+Browser `GET/PUT /api/me/share-presets` stores personal expiry and view choices
+in `app_settings` under `sharePresets:<userId>`. Saving deduplicates and sorts
+each list, accepts omitted hours/months from older clients, rejects unsafe
+bounds, and uses the existing share-manage rate budget. Presets do not change
+an existing share link, its token, revocation, expiry, or view count.
 Room/share previews reuse the existing bounded preview pool and image decoder.
 Existing private-space chunk upload routes and their C1–C12 comparisons remain.
 
@@ -518,8 +523,7 @@ checks, 316 room/share checks, and 353 upload/chunk checks. Browser smoke was
 rerun after the selector-stability fix in `719e583`; it passed 3 tests with the
 TS-only short-link test skipped.
 
-Remaining general administration, historical schema upgrades, scheduled
-maintenance, room chunk sessions, share presets, item editing/labels/group
-management and final Rust container packaging are separate migration work. This
-slice does not establish
-that the entire TS product can be switched to Rust yet.
+Personal share presets are covered by this server. Remaining room chunk
+sessions, item editing/labels/group management, update distribution and final
+Rust container packaging are separate migration work. This slice does not
+establish that the entire TS product can be switched to Rust yet.

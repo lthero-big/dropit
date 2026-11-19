@@ -832,3 +832,160 @@ pub async fn media(
         Err(error) => error.into_response(),
     }
 }
+
+const EMPTY_PRESETS: &str = r#"{"hours":[],"days":[],"months":[],"views":[]}"#;
+
+/// Older preferences stored only days and views. Missing keys become empty arrays.
+fn preset_response(saved: Option<&str>) -> ApiResult<Value> {
+    let mut body: Value = serde_json::from_str(EMPTY_PRESETS).map_err(ApiError::internal)?;
+    if let Some(saved) = saved {
+        let saved: Value =
+            serde_json::from_str(saved).map_err(|_| ApiError::internal("share presets"))?;
+        if let (Some(body), Some(saved)) = (body.as_object_mut(), saved.as_object()) {
+            for (key, value) in saved {
+                body.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(body)
+}
+
+fn preset_values(raw: Option<&Value>, max: i64) -> ApiResult<Vec<i64>> {
+    let Some(raw) = raw else {
+        return Err(ApiError::INVALID_INPUT);
+    };
+    let Some(values) = raw.as_array() else {
+        return Err(ApiError::INVALID_INPUT);
+    };
+    if values.len() > 20 {
+        return Err(ApiError::INVALID_INPUT);
+    }
+    let mut numbers = Vec::with_capacity(values.len());
+    for value in values {
+        // JSON numbers stay exact. A fractional value is not a JavaScript safe integer.
+        let Some(number) = value
+            .as_i64()
+            .filter(|_| value.as_f64().is_some_and(|float| float.fract() == 0.0))
+        else {
+            return Err(ApiError::INVALID_INPUT);
+        };
+        if !(1..=max).contains(&number) || number > (1_i64 << 53) {
+            return Err(ApiError::INVALID_INPUT);
+        }
+        if !numbers.contains(&number) {
+            numbers.push(number);
+        }
+    }
+    numbers.sort_unstable();
+    Ok(numbers)
+}
+
+fn normalized_presets(input: &Map<String, Value>) -> ApiResult<Value> {
+    let empty = Value::Array(Vec::new());
+    let hours = preset_values(input.get("hours").or(Some(&empty)), 87_600)?;
+    let days = preset_values(input.get("days"), 3_650)?;
+    let months = preset_values(input.get("months").or(Some(&empty)), 121)?;
+    let views = preset_values(input.get("views"), 1_000_000)?;
+    if hours.len() + days.len() + months.len() > 20 {
+        return Err(ApiError::INVALID_INPUT);
+    }
+    Ok(json!({ "hours": hours, "days": days, "months": months, "views": views }))
+}
+
+pub async fn share_presets(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+) -> ApiResult<Json<Value>> {
+    let user_id = browser_session(&context)?.account.user.id.clone();
+    let saved = app
+        .db
+        .run(move |db| Ok(db::setting(db, &format!("sharePresets:{user_id}"))?))
+        .await?;
+    Ok(Json(preset_response(saved.as_deref())?))
+}
+
+pub async fn save_share_presets(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    request: Request,
+) -> ApiResult<Json<Value>> {
+    let auth = browser_session(&context)?;
+    let user_id = auth.account.user.id.clone();
+    manage_limit(&app, &context)?;
+    let presets = normalized_presets(&read_json(request, 2048).await?)?;
+    let stored = presets.to_string();
+    app.db
+        .run(move |db| {
+            db.execute(
+                "INSERT INTO app_settings (key,value,updatedAt,updatedBy) VALUES (?,?,?,?)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updatedAt=excluded.updatedAt, updatedBy=excluded.updatedBy",
+                rusqlite::params![format!("sharePresets:{user_id}"), stored, now(), user_id],
+            )?;
+            Ok(())
+        })
+        .await?;
+    Ok(Json(presets))
+}
+
+#[cfg(test)]
+mod preset_tests {
+    use super::{normalized_presets, preset_response};
+    use serde_json::{Value, json};
+
+    fn numbers(value: &Value, key: &str) -> Vec<i64> {
+        value[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item.as_i64().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn legacy_presets_fill_missing_units() {
+        let body = preset_response(Some(r#"{"days":[14],"views":[50]}"#)).unwrap();
+        assert_eq!(numbers(&body, "hours"), Vec::<i64>::new());
+        assert_eq!(numbers(&body, "days"), vec![14]);
+        assert_eq!(numbers(&body, "months"), Vec::<i64>::new());
+        assert_eq!(numbers(&body, "views"), vec![50]);
+        assert!(
+            preset_response(None).unwrap()["hours"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn presets_dedupe_sort_and_reject_bounds() {
+        let saved = normalized_presets(
+            json!({"hours":[6,2,6],"days":[30,3,30],"months":[2,1,2],"views":[200,20,200]})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(numbers(&saved, "hours"), vec![2, 6]);
+        assert_eq!(numbers(&saved, "days"), vec![3, 30]);
+        assert_eq!(numbers(&saved, "months"), vec![1, 2]);
+        assert_eq!(numbers(&saved, "views"), vec![20, 200]);
+        let omitted =
+            normalized_presets(json!({"days":[],"views":[]}).as_object().unwrap()).unwrap();
+        assert!(omitted["hours"].as_array().unwrap().is_empty());
+        for invalid in [
+            json!({}),
+            json!({"days":"3","views":[]}),
+            json!({"days":[0],"views":[]}),
+            json!({"days":[3651],"views":[]}),
+            json!({"days":[1.5],"views":[]}),
+            json!({"days":[],"views":[1000001]}),
+            json!({"hours":[87601],"days":[],"months":[],"views":[]}),
+            json!({"hours":null,"days":[],"months":[],"views":[]}),
+            json!({"hours":[2,3,4,5,6,7,8,9,10,11],"days":[2,3,4,5,6,7,8,9,10,11],"months":[2],"views":[]}),
+        ] {
+            assert!(
+                normalized_presets(invalid.as_object().unwrap()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+}
