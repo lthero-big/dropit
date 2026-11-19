@@ -145,7 +145,7 @@ export function updateOffer(server, currentCode, status, body) {
 
 /** Prompt on launch unless the user chose 「跳过这个版本」 for exactly this versionCode. */
 export function shouldPrompt(offer, skipped) {
-  return offer?.kind === 'update' && String(offer.versionCode) !== String(skipped ?? '');
+  return offer?.kind === 'update' && (offer.force === true || String(offer.versionCode) !== String(skipped ?? ''));
 }
 
 export function formatSize(bytes) {

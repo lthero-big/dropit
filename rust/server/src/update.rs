@@ -7,7 +7,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -20,14 +23,12 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::io::AsyncReadExt;
 use tokio::{sync::watch, time::interval};
+use tokio_util::io::ReaderStream;
 
 use crate::{ApiError, ApiResult, App, RequestContext, browser::BuildInfo, now};
 
 const MAX_APK_BYTES: u64 = 200 * 1024 * 1024;
-const UPDATE_HOURS_MIN: u64 = 6;
-const UPDATE_HOURS_MAX: u64 = 168;
 
 #[derive(Clone)]
 struct UpdateSettings {
@@ -86,7 +87,7 @@ struct UpdateCheckReport {
     #[serde(flatten)]
     state: UpdateState,
     enabled: bool,
-    interval_hours: u64,
+    interval_hours: f64,
     next_check_at: Option<i64>,
     image: String,
     repo: String,
@@ -112,19 +113,46 @@ pub(crate) struct UpdateService {
     settings: UpdateSettings,
     cache_path: PathBuf,
     state: Mutex<UpdateState>,
+    checking: tokio::sync::Mutex<()>,
+    generation: AtomicU64,
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    client: reqwest::Client,
+    github: String,
+    docker: String,
 }
 
 impl UpdateService {
     pub(crate) fn new(build: BuildInfo, data_dir: &Path) -> Result<Self, String> {
-        let settings = load_settings()?;
+        Self::with_settings(build, data_dir, load_settings()?)
+    }
+
+    fn with_settings(
+        build: BuildInfo,
+        data_dir: &Path,
+        settings: UpdateSettings,
+    ) -> Result<Self, String> {
         let key = cache_key(&build, &settings);
-        let state = read_cache(&data_dir.join("update-check.json"), &key)
-            .unwrap_or_else(|| initial_state(settings.enabled));
+        let state = if settings.enabled {
+            read_cache(&data_dir.join("update-check.json"), &key)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| initial_state(settings.enabled));
         Ok(Self {
             build,
             settings,
             cache_path: data_dir.join("update-check.json"),
             state: Mutex::new(state),
+            checking: tokio::sync::Mutex::new(()),
+            generation: AtomicU64::new(0),
+            clock: Arc::new(now),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .user_agent("dropit-update-check")
+                .build()
+                .map_err(|_| "update HTTP client failed")?,
+            github: "https://api.github.com".into(),
+            docker: "https://hub.docker.com".into(),
         })
     }
 
@@ -134,15 +162,18 @@ impl UpdateService {
             .lock()
             .map(|value| value.clone())
             .unwrap_or_else(|_| initial_state(false));
-        let next_check_at = state
-            .checked_at
-            .map(|value| value + self.settings.interval_ms);
+        let next_check_at = self.settings.enabled.then(|| {
+            state
+                .checked_at
+                .map(|v| v + self.settings.interval_ms)
+                .unwrap_or_else(|| (self.clock)() + 30_000)
+        });
         UpdateReport {
             current: self.build.clone(),
             check: UpdateCheckReport {
                 state,
                 enabled: self.settings.enabled,
-                interval_hours: (self.settings.interval_ms / 3_600_000) as u64,
+                interval_hours: self.settings.interval_ms as f64 / 3_600_000.0,
                 next_check_at,
                 image: self.settings.image.clone(),
                 repo: self.settings.repo.clone(),
@@ -168,7 +199,7 @@ impl UpdateService {
             .lock()
             .ok()
             .and_then(|state| state.checked_at)
-            .is_none_or(|checked_at| now() - checked_at >= self.settings.interval_ms);
+            .is_none_or(|checked_at| (self.clock)() - checked_at >= self.settings.interval_ms);
         if due {
             self.check_now().await;
         }
@@ -182,13 +213,18 @@ impl UpdateService {
                 .map(|value| value.clone())
                 .unwrap_or_else(|_| initial_state(false));
         }
+        let generation = self.generation.load(Ordering::SeqCst);
+        let _guard = self.checking.lock().await;
         let current = self
             .state
             .lock()
             .map(|value| value.clone())
             .unwrap_or_else(|_| initial_state(true));
+        if generation != self.generation.load(Ordering::SeqCst) {
+            return current;
+        }
         if let Some(checked_at) = current.checked_at
-            && now() - checked_at < 60_000
+            && (self.clock)() - checked_at < 60_000
             && current.status != UpdateStatus::Error
         {
             return current;
@@ -199,11 +235,11 @@ impl UpdateService {
             Ok(state) => state,
             Err(code) => UpdateState {
                 status: UpdateStatus::Error,
-                checked_at: Some(now()),
+                checked_at: Some((self.clock)()),
                 error: Some(match code.as_str() {
                     "HTTP_403" | "HTTP_429" => "RATE_LIMITED".into(),
                     "HTTP_408" | "TIMEOUT" => "TIMEOUT".into(),
-                    _ => "NETWORK".into(),
+                    _ => code,
                 }),
                 ..current
             },
@@ -211,6 +247,7 @@ impl UpdateService {
         if let Ok(mut state) = self.state.lock() {
             *state = next.clone();
         }
+        self.generation.fetch_add(1, Ordering::SeqCst);
         persist_cache(
             &self.cache_path,
             &cache_key(&self.build, &self.settings),
@@ -220,23 +257,19 @@ impl UpdateService {
     }
 
     async fn fetch(&self) -> Result<UpdateState, String> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .user_agent("dropit-update-check")
-            .build()
-            .map_err(|_| "NETWORK".to_owned())?;
+        let client = &self.client;
         let mut state = if self.build.install == "docker" {
-            self.docker_state(&client).await?
+            self.docker_state(client).await?
         } else {
-            self.github_state(&client).await?
+            self.github_state(client).await?
         };
         // A release tag is informational, but a newer semver release still
         // counts as available even when the branch comparison is identical.
         if let Ok(release) = get_json(
-            &client,
+            client,
             &format!(
-                "https://api.github.com/repos/{}/releases/latest",
-                self.settings.repo
+                "{}/repos/{}/releases/latest",
+                self.github, self.settings.repo
             ),
         )
         .await
@@ -248,10 +281,12 @@ impl UpdateService {
             state
                 .latest
                 .get_or_insert_with(LatestRelease::default)
-                .version = Some(version.clone());
+                .version
+                .get_or_insert(version.clone());
             if compare_versions(&version, &self.build.version) > 0 && self.build.version != "0.0.0"
             {
                 let latest = state.latest.get_or_insert_with(LatestRelease::default);
+                latest.version = Some(version.clone());
                 latest.url = release
                     .get("html_url")
                     .and_then(Value::as_str)
@@ -272,7 +307,7 @@ impl UpdateService {
         let base = UpdateState {
             status: UpdateStatus::Unknown,
             source: Some("github".into()),
-            checked_at: Some(now()),
+            checked_at: Some((self.clock)()),
             latest: None,
             error: None,
             reason: None,
@@ -301,7 +336,12 @@ impl UpdateService {
             latest: Some(LatestRelease {
                 commit: result.1,
                 behind_by: Some(result.0),
-                url: result.2,
+                url: result.2.or_else(|| {
+                    Some(format!(
+                        "https://github.com/{}/commits/{}",
+                        self.settings.repo, self.settings.branch
+                    ))
+                }),
                 ..LatestRelease::default()
             }),
             ..base
@@ -309,10 +349,7 @@ impl UpdateService {
     }
 
     async fn docker_state(&self, client: &reqwest::Client) -> Result<UpdateState, String> {
-        let repo = format!(
-            "https://hub.docker.com/v2/repositories/{}",
-            self.settings.image
-        );
+        let repo = format!("{}/v2/repositories/{}", self.docker, self.settings.image);
         let latest = get_json(client, &format!("{repo}/tags/latest")).await?;
         let digest = latest
             .get("digest")
@@ -340,7 +377,7 @@ impl UpdateService {
         let mut state = UpdateState {
             status: UpdateStatus::Unknown,
             source: Some("dockerhub".into()),
-            checked_at: Some(now()),
+            checked_at: Some((self.clock)()),
             latest: Some(LatestRelease {
                 digest,
                 commit: commit.clone(),
@@ -362,7 +399,9 @@ impl UpdateService {
             if local == remote {
                 state.status = UpdateStatus::UpToDate;
                 state.latest.as_mut().unwrap().behind_by = Some(0);
-            } else if let Some((behind, _, _)) = self.behind_by(client, local, remote).await? {
+            } else if let Some((behind, _, _)) =
+                self.behind_by(client, local, remote).await.unwrap_or(None)
+            {
                 state.status = if behind > 0 {
                     UpdateStatus::Available
                 } else {
@@ -370,9 +409,10 @@ impl UpdateService {
                 };
                 state.latest.as_mut().unwrap().behind_by = Some(behind);
             } else {
+                state.status = UpdateStatus::Available;
                 state.reason = Some("COMPARE_UNAVAILABLE".into());
             }
-        } else if let Some(remote) = version {
+        } else if let Some(remote) = version.filter(|_| self.build.version != "0.0.0") {
             state.status = if compare_versions(&remote, &self.build.version) > 0 {
                 UpdateStatus::Available
             } else {
@@ -398,8 +438,11 @@ impl UpdateService {
         target: &str,
     ) -> Result<Option<(u64, Option<String>, Option<String>)>, String> {
         let url = format!(
-            "https://api.github.com/repos/{}/compare/{}...{}",
-            self.settings.repo, commit, target
+            "{}/repos/{}/compare/{}...{}",
+            self.github,
+            self.settings.repo,
+            commit,
+            url::form_urlencoded::byte_serialize(target.as_bytes()).collect::<String>()
         );
         let body = match get_json(client, &url).await {
             Ok(body) => body,
@@ -442,23 +485,55 @@ fn initial_state(enabled: bool) -> UpdateState {
 }
 
 fn load_settings() -> Result<UpdateSettings, String> {
-    let flag = std::env::var("UPDATE_CHECK")
+    parse_settings(|key| std::env::var(key).ok())
+}
+
+fn parse_settings(env: impl Fn(&str) -> Option<String>) -> Result<UpdateSettings, String> {
+    let flag = env("UPDATE_CHECK")
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
     let enabled = !matches!(flag.as_str(), "0" | "false" | "off" | "no" | "disabled");
-    let hours = std::env::var("UPDATE_CHECK_HOURS")
-        .unwrap_or_else(|_| "12".into())
-        .parse::<u64>()
-        .map_err(|_| "Invalid UPDATE_CHECK_HOURS".to_owned())?;
-    if !(UPDATE_HOURS_MIN..=UPDATE_HOURS_MAX).contains(&hours) {
+    let hours = env("UPDATE_CHECK_HOURS")
+        .unwrap_or_else(|| "12".into())
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "Invalid UPDATE_CHECK_HOURS")?;
+    if !hours.is_finite() || !(6.0..=168.0).contains(&hours) {
         return Err("Invalid UPDATE_CHECK_HOURS (6-168)".into());
     }
-    let image = std::env::var("UPDATE_IMAGE").unwrap_or_else(|_| "lthero1/dropit".into());
-    let repo = std::env::var("UPDATE_REPO").unwrap_or_else(|_| "lthero-big/dropit".into());
-    let branch = std::env::var("UPDATE_BRANCH").unwrap_or_else(|_| "main".into());
-    if !valid_pair(&image)
-        || !valid_pair(&repo)
+    let setting = |key, fallback: &str| {
+        env(key)
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| v.trim().to_owned())
+            .unwrap_or_else(|| fallback.to_owned())
+    };
+    let image = setting("UPDATE_IMAGE", "lthero1/dropit");
+    let repo = setting("UPDATE_REPO", "lthero-big/dropit");
+    let branch = setting("UPDATE_BRANCH", "main");
+    let image_valid = image.split('/').count() == 2
+        && image.split('/').all(|part| {
+            !part.is_empty()
+                && part.as_bytes()[0].is_ascii_alphanumeric()
+                && part.as_bytes()[part.len() - 1].is_ascii_alphanumeric()
+                && part.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+                })
+                && !part
+                    .as_bytes()
+                    .windows(2)
+                    .any(|pair| pair.iter().all(|b| matches!(b, b'.' | b'_' | b'-')))
+        });
+    let repo_valid = repo.split('/').count() == 2
+        && repo.split('/').all(|part| {
+            !part.is_empty()
+                && part.len() <= 100
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        });
+    if !image_valid
+        || !repo_valid
         || branch.is_empty()
         || branch.len() > 100
         || branch.contains("..")
@@ -470,23 +545,11 @@ fn load_settings() -> Result<UpdateSettings, String> {
     }
     Ok(UpdateSettings {
         enabled,
-        interval_ms: (hours * 3_600_000) as i64,
+        interval_ms: (hours * 3_600_000.0).round() as i64,
         image,
         repo,
         branch,
     })
-}
-
-fn valid_pair(value: &str) -> bool {
-    let mut parts = value.split('/');
-    let valid = |part: &str| {
-        !part.is_empty()
-            && part.len() <= 100
-            && part.bytes().all(|b| {
-                b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
-            })
-    };
-    parts.next().is_some_and(valid) && parts.next().is_some_and(valid) && parts.next().is_none()
 }
 
 fn upgrade_command(install: &str) -> String {
@@ -657,21 +720,16 @@ pub async fn android_download(
 ) -> ApiResult<Response> {
     app.limit("app-download", &context.ip, app.config.rate_upload)?;
     let Some(release) = read_android_release(&app.config.data).await else {
-        return Err(ApiError::NOT_FOUND);
+        return Err(ApiError::new(404, "NO_RELEASE"));
     };
     if file != release.file {
-        return Err(ApiError::NOT_FOUND);
+        return Err(ApiError::new(404, "NO_RELEASE"));
     }
     let path = android_dir(&app.config.data).join(&release.file);
-    let mut input = tokio::fs::File::open(path)
+    let input = tokio::fs::File::open(path)
         .await
-        .map_err(|_| ApiError::NOT_FOUND)?;
-    let mut bytes = Vec::with_capacity(release.size as usize);
-    input
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| ApiError::NOT_FOUND)?;
-    let mut response = Response::new(Body::from(bytes));
+        .map_err(|_| ApiError::new(404, "NO_RELEASE"))?;
+    let mut response = Response::new(Body::from_stream(ReaderStream::new(input)));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/vnd.android.package-archive"),
@@ -727,16 +785,17 @@ async fn read_android_release(data_dir: &Path) -> Option<AndroidRelease> {
             .ok()?,
     )
     .ok()?;
-    let version_code = raw.get("versionCode")?.as_u64()?;
+    let version_code = integer(raw.get("versionCode")?)?;
     let version_name = raw.get("versionName")?.as_str()?.to_owned();
     let file = raw.get("file")?.as_str()?.to_owned();
     let sha256 = raw.get("sha256")?.as_str()?.to_owned();
-    let size = raw.get("size")?.as_u64()?;
+    let size = integer(raw.get("size")?)?;
     let notes = raw.get("notes").and_then(Value::as_str).unwrap_or_default();
-    let min_version_code = raw.get("minVersionCode").and_then(Value::as_u64);
+    let min_version_code = raw.get("minVersionCode").and_then(integer);
     let force = raw.get("force").and_then(Value::as_bool);
     if !(1..=2_100_000_000).contains(&version_code)
         || version_name.is_empty()
+        || !version_name.as_bytes()[0].is_ascii_alphanumeric()
         || version_name.len() > 40
         || !version_name
             .bytes()
@@ -747,9 +806,15 @@ async fn read_android_release(data_dir: &Path) -> Option<AndroidRelease> {
         || !file
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        || file.starts_with('.')
+        || !file.as_bytes()[0].is_ascii_alphanumeric()
         || file.contains("..")
-        || notes.len() > 4000
+        || notes.encode_utf16().count() > 4000
+        || raw
+            .get("notes")
+            .is_some_and(|v| !v.is_null() && !v.is_string())
+        || raw.get("publishedAt").is_some_and(|v| {
+            !v.is_null() && v.as_str().is_none_or(|s| s.encode_utf16().count() > 40)
+        })
         || raw.get("minVersionCode").is_some_and(|_| {
             min_version_code.is_none()
                 || min_version_code.is_some_and(|minimum| minimum < 1 || minimum > version_code)
@@ -783,6 +848,171 @@ async fn read_android_release(data_dir: &Path) -> Option<AndroidRelease> {
     })
 }
 
+fn integer(value: &Value) -> Option<u64> {
+    let number = value.as_f64()?;
+    (number.is_finite()
+        && (0.0..=9_007_199_254_740_991.0).contains(&number)
+        && number.fract() == 0.0)
+        .then_some(number as u64)
+}
+
 fn android_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("app").join("android")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, routing::get};
+    use std::sync::atomic::{AtomicI64, AtomicUsize};
+    use uuid::Uuid;
+
+    #[test]
+    fn settings_match_ts_valid_and_invalid_inputs() {
+        for (key, value) in [
+            ("UPDATE_REPO", " Lthero-Big/Dropit "),
+            ("UPDATE_REPO", ""),
+            ("UPDATE_CHECK_HOURS", "6.5"),
+            ("UPDATE_IMAGE", " a.b/c-d "),
+        ] {
+            assert!(
+                parse_settings(|k| (k == key).then(|| value.into())).is_ok(),
+                "{key}={value}"
+            );
+        }
+        for (key, value) in [
+            ("UPDATE_IMAGE", "A/b"),
+            ("UPDATE_IMAGE", "a../b"),
+            ("UPDATE_REPO", "a/b/c"),
+            ("UPDATE_BRANCH", "../x"),
+            ("UPDATE_CHECK_HOURS", "NaN"),
+            ("UPDATE_CHECK_HOURS", "5.9"),
+        ] {
+            assert!(parse_settings(|k| (k == key).then(|| value.into())).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn controlled_network_clock_cache_concurrency_and_fallbacks() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mode = Arc::new(AtomicUsize::new(0));
+        let router = Router::new().fallback(get({
+            let calls = calls.clone();
+            let mode = mode.clone();
+            move |uri: axum::http::Uri| {
+                let calls = calls.clone();
+                let mode = mode.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let path = uri.path();
+                    if path.ends_with("/releases/latest") {
+                        return (axum::http::StatusCode::NOT_FOUND, Json(json!({})));
+                    }
+                    if path.ends_with("/tags/latest") {
+                        return (
+                            axum::http::StatusCode::OK,
+                            Json(json!({"digest":"sha256:abc"})),
+                        );
+                    }
+                    if path.ends_with("/tags") {
+                        return (
+                            axum::http::StatusCode::OK,
+                            Json(json!({"results":[{"name":"bbbbbbb","digest":"sha256:abc"}]})),
+                        );
+                    }
+                    match mode.load(Ordering::SeqCst) {
+                        1 => (axum::http::StatusCode::TOO_MANY_REQUESTS, Json(json!({}))),
+                        2 => (axum::http::StatusCode::NOT_FOUND, Json(json!({}))),
+                        _ => (
+                            axum::http::StatusCode::OK,
+                            Json(json!({"ahead_by":2,"commits":[{"sha":"bbbbbbb"}]})),
+                        ),
+                    }
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let directory = std::env::temp_dir().join(format!("dropit-update-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let time = Arc::new(AtomicI64::new(now() - 100_000));
+        let settings = parse_settings(|_| None).unwrap();
+        let build = BuildInfo {
+            version: "0.3.2".into(),
+            commit: Some("aaaaaaa".into()),
+            build_date: None,
+            install: "source".into(),
+        };
+        let mut checker = UpdateService {
+            build: build.clone(),
+            settings: settings.clone(),
+            cache_path: directory.join("update-check.json"),
+            state: Mutex::new(initial_state(true)),
+            checking: tokio::sync::Mutex::new(()),
+            generation: AtomicU64::new(0),
+            clock: {
+                let time = time.clone();
+                Arc::new(move || time.load(Ordering::SeqCst))
+            },
+            client: reqwest::Client::new(),
+            github: base.clone(),
+            docker: base,
+        };
+        let (one, two) = tokio::join!(checker.check_now(), checker.check_now());
+        assert!(one.status == UpdateStatus::Available && two.status == one.status);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        checker.check_now().await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "manual gap reuses cached result"
+        );
+        let cached = read_cache(&checker.cache_path, &cache_key(&build, &settings)).unwrap();
+        assert!(cached.status == UpdateStatus::Available);
+        let mut upgraded = build.clone();
+        upgraded.commit = Some("ccccccc".into());
+        assert!(read_cache(&checker.cache_path, &cache_key(&upgraded, &settings)).is_none());
+        checker.settings.enabled = false;
+        let disabled =
+            UpdateService::with_settings(build.clone(), &directory, checker.settings.clone())
+                .unwrap();
+        assert!(disabled.report().check.state.status == UpdateStatus::Disabled);
+        assert!(disabled.report().check.next_check_at.is_none());
+        checker.settings.enabled = true;
+        mode.store(1, Ordering::SeqCst);
+        time.fetch_add(60_001, Ordering::SeqCst);
+        let (one, two) = tokio::join!(checker.check_now(), checker.check_now());
+        assert!(one.status == UpdateStatus::Error && two.status == one.status);
+        assert_eq!(one.error.as_deref(), Some("RATE_LIMITED"));
+        assert_eq!(one.latest.unwrap().commit.as_deref(), Some("bbbbbbb"));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "failed concurrent checks coalesce too"
+        );
+        checker.build.install = "docker".into();
+        for mode_value in [1, 2] {
+            mode.store(mode_value, Ordering::SeqCst);
+            time.fetch_add(60_001, Ordering::SeqCst);
+            let state = checker.check_now().await;
+            assert!(state.status == UpdateStatus::Available);
+            assert_eq!(state.reason.as_deref(), Some("COMPARE_UNAVAILABLE"));
+        }
+        checker.build.install = "source".into();
+        checker.client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        time.fetch_add(60_001, Ordering::SeqCst);
+        assert_eq!(checker.check_now().await.error.as_deref(), Some("TIMEOUT"));
+        checker.client = reqwest::Client::new();
+        server.abort();
+        let _ = server.await;
+        assert_eq!(checker.check_now().await.error.as_deref(), Some("NETWORK"));
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
