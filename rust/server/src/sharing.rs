@@ -850,6 +850,16 @@ fn preset_response(saved: Option<&str>) -> ApiResult<Value> {
     Ok(body)
 }
 
+/// `Number.isSafeInteger`: finite, no fractional part after IEEE rounding, and
+/// strictly inside `-(2^53) < n < 2^53`. `2.0` and `2e1` are integers.
+fn js_safe_integer(value: &Value) -> Option<i64> {
+    let number = value.as_f64()?;
+    if !number.is_finite() || number.fract() != 0.0 || number.abs() >= (1_u64 << 53) as f64 {
+        return None;
+    }
+    Some(number as i64)
+}
+
 fn preset_values(raw: Option<&Value>, max: i64) -> ApiResult<Vec<i64>> {
     let Some(raw) = raw else {
         return Err(ApiError::INVALID_INPUT);
@@ -862,14 +872,10 @@ fn preset_values(raw: Option<&Value>, max: i64) -> ApiResult<Vec<i64>> {
     }
     let mut numbers = Vec::with_capacity(values.len());
     for value in values {
-        // JSON numbers stay exact. A fractional value is not a JavaScript safe integer.
-        let Some(number) = value
-            .as_i64()
-            .filter(|_| value.as_f64().is_some_and(|float| float.fract() == 0.0))
-        else {
+        let Some(number) = js_safe_integer(value) else {
             return Err(ApiError::INVALID_INPUT);
         };
-        if !(1..=max).contains(&number) || number > (1_i64 << 53) {
+        if !(1..=max).contains(&number) {
             return Err(ApiError::INVALID_INPUT);
         }
         if !numbers.contains(&number) {
@@ -971,6 +977,20 @@ mod preset_tests {
         let omitted =
             normalized_presets(json!({"days":[],"views":[]}).as_object().unwrap()).unwrap();
         assert!(omitted["hours"].as_array().unwrap().is_empty());
+        // serde_json keeps the IEEE value, matching Number.isSafeInteger.
+        let rounded = normalized_presets(
+            serde_json::from_str::<Value>(
+                r#"{"hours":[2.0],"days":[1e0],"months":[1.0000000000000001],"views":[2e1]}"#,
+            )
+            .unwrap()
+            .as_object()
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(numbers(&rounded, "hours"), vec![2]);
+        assert_eq!(numbers(&rounded, "days"), vec![1]);
+        assert_eq!(numbers(&rounded, "months"), vec![1]);
+        assert_eq!(numbers(&rounded, "views"), vec![20]);
         for invalid in [
             json!({}),
             json!({"days":"3","views":[]}),

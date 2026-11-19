@@ -204,6 +204,19 @@ async function flow(kind, seed, m) {
     await check('presets put browser required', '/api/me/share-presets', { method: 'PUT', token: m.pat, json: empty }, 403, 'BROWSER_SESSION_REQUIRED');
     await check('clear presets', '/api/me/share-presets', { method: 'PUT', cookie: alice, json: { days: [], views: [] } }, 200);
     await check('presets cleared', '/api/me/share-presets', { cookie: alice }, 200);
+    const rawPresets = [
+      ['decimal integer', '{"hours":[2.0],"days":[1.0],"months":[1.0],"views":[20.0]}', { hours: [2], days: [1], months: [1], views: [20] }],
+      ['exponent integer', '{"hours":[2e0],"days":[1e0],"months":[1e0],"views":[2e1]}', { hours: [2], days: [1], months: [1], views: [20] }],
+      ['rounded integer', '{"hours":[],"days":[1.0000000000000001],"months":[],"views":[20]}', { hours: [], days: [1], months: [], views: [20] }],
+      ['fraction', '{"hours":[1.5],"days":[],"months":[],"views":[]}', null],
+      ['unsafe integer', '{"hours":[],"days":[],"months":[],"views":[9007199254740992]}', null],
+    ];
+    for (const [label, body, saved] of rawPresets) {
+      const result = await req(s, '/api/me/share-presets', { method: 'PUT', cookie: alice, body, headers: { 'content-type': 'application/json' } });
+      expect(result, saved ? 200 : 400, saved ? undefined : 'INVALID_INPUT');
+      if (saved) assert.deepEqual(result.body, saved, label);
+      transcript.push([label, result.status, normalize(result.body), result.headers.get('cache-control'), result.headers.get('content-type')]);
+    }
     await check('history browser required', '/api/shares', { token: m.pat }, 403, 'BROWSER_SESSION_REQUIRED');
     await check('revoke browser required', `/api/shares/${share.id}/revoke`, {method:'POST', token:m.pat},403,'BROWSER_SESSION_REQUIRED');
     await check('delete browser required', `/api/shares/${share.id}`, {method:'DELETE', token:m.pat},403,'BROWSER_SESSION_REQUIRED');
