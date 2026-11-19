@@ -177,6 +177,46 @@ async function flow(kind, seed, m) {
     const opened = await check('open share', `/api/s/${share.token}`, {}, 200, null, 'opened');
     await check('exhausted', `/api/s/${share.token}`, {}, 404, 'NOT_FOUND');
     await check('exhausted copy', `/api/shares/${share.id}/link`, { cookie: alice }, 404, 'NOT_FOUND');
+    const empty = { hours: [], days: [], months: [], views: [] };
+    await check('presets signed out', '/api/me/share-presets', {}, 401, 'UNAUTHENTICATED');
+    await check('presets put signed out', '/api/me/share-presets', { method: 'PUT', json: { days: [], views: [] } }, 401, 'UNAUTHENTICATED');
+    await check('presets empty', '/api/me/share-presets', { cookie: alice }, 200);
+    sql(data, 'INSERT INTO app_settings (key,value,updatedAt,updatedBy) VALUES (?,?,?,?)', `sharePresets:${m.alice.id}`, JSON.stringify({ days: [14], views: [50] }), Date.now(), m.alice.id);
+    await check('legacy presets', '/api/me/share-presets', { cookie: alice }, 200);
+    const expected = { hours: [2, 6], days: [3, 30], months: [1, 2], views: [20, 200] };
+    await check('save presets', '/api/me/share-presets', { method: 'PUT', cookie: alice, json: { hours: [6, 2, 6], days: [30, 3, 30], months: [2, 1, 2], views: [200, 20, 200] } }, 200);
+    assert.deepEqual(JSON.parse(lookup(data, 'SELECT value FROM app_settings WHERE key=?', `sharePresets:${m.alice.id}`).value), expected);
+    await check('member presets isolated', '/api/me/share-presets', { cookie: bob }, 200);
+    await check('member save presets', '/api/me/share-presets', { method: 'PUT', cookie: bob, json: { days: [14], views: [50] } }, 200);
+    await check('owner presets unchanged', '/api/me/share-presets', { cookie: alice }, 200);
+    await check('viewer presets empty', '/api/me/share-presets', { cookie: viewer }, 200);
+    for (const invalid of [
+      {}, { days: '3', views: [] }, { days: [0], views: [] }, { days: [3651], views: [] },
+      { days: [1.5], views: [] }, { days: ['3'], views: [] }, { days: [], views: [-1] },
+      { days: [], views: [1000001] }, { days: [], views: [2.5] }, { days: Array(21).fill(2), views: [] },
+      { ...empty, hours: [87601] }, { ...empty, hours: [0] }, { ...empty, hours: [1.5] },
+      { ...empty, months: [122] }, { ...empty, months: [-1] }, { ...empty, months: [1.5] },
+      { ...empty, hours: null }, { ...empty, months: '1' },
+      { ...empty, hours: Array.from({ length: 10 }, (_, i) => i + 2), days: Array.from({ length: 10 }, (_, i) => i + 2), months: [2] },
+    ]) await check('invalid presets', '/api/me/share-presets', { method: 'PUT', cookie: alice, json: invalid }, 400, 'INVALID_INPUT');
+    await check('presets unchanged after invalid', '/api/me/share-presets', { cookie: alice }, 200);
+    await check('presets browser required', '/api/me/share-presets', { token: m.pat }, 403, 'BROWSER_SESSION_REQUIRED');
+    await check('presets put browser required', '/api/me/share-presets', { method: 'PUT', token: m.pat, json: empty }, 403, 'BROWSER_SESSION_REQUIRED');
+    await check('clear presets', '/api/me/share-presets', { method: 'PUT', cookie: alice, json: { days: [], views: [] } }, 200);
+    await check('presets cleared', '/api/me/share-presets', { cookie: alice }, 200);
+    const rawPresets = [
+      ['decimal integer', '{"hours":[2.0],"days":[1.0],"months":[1.0],"views":[20.0]}', { hours: [2], days: [1], months: [1], views: [20] }],
+      ['exponent integer', '{"hours":[2e0],"days":[1e0],"months":[1e0],"views":[2e1]}', { hours: [2], days: [1], months: [1], views: [20] }],
+      ['rounded integer', '{"hours":[],"days":[1.0000000000000001],"months":[],"views":[20]}', { hours: [], days: [1], months: [], views: [20] }],
+      ['fraction', '{"hours":[1.5],"days":[],"months":[],"views":[]}', null],
+      ['unsafe integer', '{"hours":[],"days":[],"months":[],"views":[9007199254740992]}', null],
+    ];
+    for (const [label, body, saved] of rawPresets) {
+      const result = await req(s, '/api/me/share-presets', { method: 'PUT', cookie: alice, body, headers: { 'content-type': 'application/json' } });
+      expect(result, saved ? 200 : 400, saved ? undefined : 'INVALID_INPUT');
+      if (saved) assert.deepEqual(result.body, saved, label);
+      transcript.push([label, result.status, normalize(result.body), result.headers.get('cache-control'), result.headers.get('content-type')]);
+    }
     await check('history browser required', '/api/shares', { token: m.pat }, 403, 'BROWSER_SESSION_REQUIRED');
     await check('revoke browser required', `/api/shares/${share.id}/revoke`, {method:'POST', token:m.pat},403,'BROWSER_SESSION_REQUIRED');
     await check('delete browser required', `/api/shares/${share.id}`, {method:'DELETE', token:m.pat},403,'BROWSER_SESSION_REQUIRED');
@@ -217,13 +257,16 @@ async function interop(creator, reader, seed, m) {
     const item = expect(await req(s, `/api/spaces/${m.aliceSpace}/items/text`, { method: 'POST', cookie, json: { text: 'cross implementation' } }), 201).item;
     const share = expect(await req(s, `/api/spaces/${m.aliceSpace}/items/${item.id}/shares`, { method: 'POST', cookie, json: { expiresIn: 'never' } }), 201);
     const inv = expect(await req(s, `/api/spaces/${m.aliceSpace}/invites`, { method: 'POST', cookie, json: { role: 'editor' } }), 201);
+    const presets = { hours: [2], days: [14], months: [1], views: [20] };
+    expect(await req(s, '/api/me/share-presets', { method: 'PUT', cookie, json: presets }), 200);
     await stop(s); s = await start(reader, data);
     expect(await req(s, `/api/rooms/${room.token}`), 200);
     assert.equal(expect(await req(s, '/api/rooms/enter', { method: 'POST', json: { code: room.code, pin: '1234' } }), 200).token, room.token);
     assert.equal(expect(await req(s, `/api/s/${share.token}`), 200).item.text, 'cross implementation');
     assert.equal(expect(await req(s, `/api/shares/${share.id}/link`, { cookie }), 200).url, share.url);
     expect(await req(s, `/api/invites/${inv.token}/accept`, { method: 'POST', cookie: await login(s, 'bob@example.test') }), 200);
-    console.log(`PASS ${creator} -> ${reader}: persisted room/PIN, share/copy token, cookie, invite`);
+    assert.deepEqual(expect(await req(s, '/api/me/share-presets', { cookie }), 200), presets);
+    console.log(`PASS ${creator} -> ${reader}: persisted room/PIN, share/copy token, cookie, invite, share presets`);
   } finally { await stop(s); }
 }
 async function rateCases(kind,seed) {
@@ -258,7 +301,16 @@ async function rateCases(kind,seed) {
     const room=expect(await req(server,'/api/rooms',{method:'POST',json:{code:'rate01'}}),201);
     for(let n=0;n<4;n++) expect(await req(server,`/api/rooms/${room.token}`),200);
     expect(await req(server,`/api/rooms/${room.token}`),429,'RATE_LIMITED');
-    console.log(`PASS ${kind}: success-free guessing, wrong guesses, public shares and room access rate limits`);
+  } finally {await stop(server);}
+  server=await start(kind,data,{RATE_UPLOAD:'3',RATE_ROOM:'2'});
+  try {
+    const cookie = await login(server, 'alice@example.test');
+    for (let n = 0; n < 3; n++) expect(await req(server, '/api/me/share-presets', { method: 'PUT', cookie, json: { days: [], views: [] } }), 200);
+    const limited = await req(server, '/api/me/share-presets', { method: 'PUT', cookie, json: { days: [1], views: [] } });
+    expect(limited, 429, 'RATE_LIMITED');
+    assert.ok(Number(limited.headers.get('retry-after')) > 0);
+    assert.deepEqual(expect(await req(server, '/api/me/share-presets', { cookie }), 200), { hours: [], days: [], months: [], views: [] });
+    console.log(`PASS ${kind}: success-free guessing, wrong guesses, public shares, room access and preset save rate limits`);
   } finally {await stop(server);}
 }
 

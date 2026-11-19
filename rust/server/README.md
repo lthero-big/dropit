@@ -519,6 +519,13 @@ sessions, room reuse/codes/PIN lockout/unlock/close/reopen/expiry, room snapshot
 and real WebSocket events, PAT revocation, room file Range and derived images,
 share expiration/exhaustion, single-view races, copy-token isolation, revoked
 and expired download tickets, source retraction and public/room rate budgets.
+Browser `GET/PUT /api/me/share-presets` stores personal expiry and view choices
+in `app_settings` under `sharePresets:<userId>`. Saving uses JavaScript
+`Number.isSafeInteger` before the field bounds, so decimal and exponent integers
+are accepted, then deduplicates and sorts each list. Omitted hours/months stay
+empty. Fractions and values at or above `2^53` are rejected. Saving uses the
+existing share-manage rate budget. Presets do not change an existing share link,
+its token, revocation, expiry, or view count.
 Room/share previews reuse the existing bounded preview pool and image decoder.
 Existing private-space chunk upload routes and their C1–C12 comparisons remain.
 

@@ -323,6 +323,10 @@ async fn main() -> StartupResult<()> {
             "/api/rooms/{room}/shares/{shareId}",
             delete(sharing::revoke_room),
         )
+        .route(
+            "/api/me/share-presets",
+            get(sharing::share_presets).put(sharing::save_share_presets),
+        )
         .route("/api/shares", get(sharing::managed_shares))
         .route("/api/shares/{shareId}/link", get(sharing::managed_link))
         .route(
@@ -1024,7 +1028,7 @@ async fn logout(
     ))
 }
 
-fn browser_session(context: &RequestContext) -> ApiResult<&Auth> {
+pub(crate) fn browser_session(context: &RequestContext) -> ApiResult<&Auth> {
     let auth = context.require_auth()?;
     if auth.bearer.is_some() {
         return Err(ApiError::new(403, "BROWSER_SESSION_REQUIRED"));
