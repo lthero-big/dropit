@@ -5,7 +5,7 @@ services:
   dropit:
     build:
       context: .
-      dockerfile: Dockerfile.rust
+      dockerfile: Dockerfile
       args:
         DROPIT_VERSION: ${DROPIT_VERSION:-}
         DROPIT_COMMIT: ${DROPIT_COMMIT:-}
