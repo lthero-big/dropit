@@ -5,7 +5,9 @@ async function login(page) {
   await page.goto('/')
   await page.getByLabel('邮箱', { exact: true }).fill(process.env.DROPIT_SMOKE_EMAIL)
   await page.getByLabel('密码', { exact: true }).fill(process.env.DROPIT_SMOKE_PASSWORD)
+  const signedIn = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/auth/password/login')
   await page.getByRole('button', { name: '用密码登录', exact: true }).click()
+  expect((await signedIn).status()).toBe(200)
   await expect(page.getByRole('heading', { name: '私人空间', exact: true })).toBeVisible()
 }
 
