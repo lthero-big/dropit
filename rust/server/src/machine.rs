@@ -28,7 +28,7 @@ pub struct Bearer {
 pub struct AccessToken {
     pub id: String,
     pub user_id: String,
-    pub name: String,
+    pub name: crate::js::JsString,
     pub scopes: Vec<String>,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
@@ -41,7 +41,7 @@ pub struct DeviceAuthorization {
     pub id: String,
     pub device_code_hash: String,
     pub user_code_hash: String,
-    pub name: String,
+    pub name: crate::js::JsString,
     pub ip_summary: String,
     pub scopes: Vec<String>,
     pub token_lifetime_ms: Option<i64>,
@@ -54,7 +54,7 @@ pub struct DeviceAuthorization {
 }
 
 pub struct TokenOptions {
-    pub name: String,
+    pub name: crate::js::JsString,
     pub scopes: Vec<String>,
     pub lifetime_ms: Option<i64>,
 }
@@ -118,19 +118,11 @@ pub fn token_options(body: &crate::js::Object, allow_web: bool) -> ApiResult<Tok
     })
 }
 
-fn person_name(value: Option<&crate::js::Value>) -> ApiResult<String> {
-    let raw = value
-        .and_then(crate::js::Value::as_str)
-        .filter(|value| value.encode_utf16().count() <= 80)
-        .ok_or(ApiError::INVALID_INPUT)?;
-    let name: String = raw
-        .chars()
-        .filter(|ch| *ch > '\u{1f}' && *ch != '\u{7f}')
-        .collect();
-    let name = name.trim();
-    (!name.is_empty())
-        .then(|| name.to_owned())
-        .ok_or(ApiError::INVALID_INPUT)
+pub(crate) fn person_name(value: Option<&crate::js::Value>) -> ApiResult<crate::js::JsString> {
+    value
+        .and_then(crate::js::Value::as_js_str)
+        .ok_or(ApiError::INVALID_INPUT)?
+        .clean_name()
 }
 
 pub fn user_code() -> ApiResult<String> {
@@ -175,7 +167,7 @@ pub fn access_token_value(record: &AccessToken) -> Value {
     json!({
         "id": record.id,
         "userId": record.user_id,
-        "name": record.name,
+        "name": record.name.decoded(),
         "scopes": record.scopes,
         "createdAt": record.created_at,
         "lastUsedAt": record.last_used_at,
@@ -286,7 +278,12 @@ pub fn token_live(
         .any(|scope| scope == required_scope))
 }
 
-pub fn rename_token(db: &Connection, id: &str, user_id: &str, name: &str) -> ApiResult<()> {
+pub fn rename_token(
+    db: &Connection,
+    id: &str,
+    user_id: &str,
+    name: &crate::js::JsString,
+) -> ApiResult<()> {
     if db.execute(
         "UPDATE access_tokens SET name=? WHERE id=? AND userId=?",
         params![name, id, user_id],

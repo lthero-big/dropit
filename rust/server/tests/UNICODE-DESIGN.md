@@ -23,6 +23,16 @@ wire endpoints, authentication order, quotas and existing disk bytes unchanged.
    HTTP/WS compatibility suite. Record fresh/edited/historical/restarted paths
    independently; never normalize away a Unicode difference in the harness.
 
+The metadata extension applies JS strings to groups, tags and incoming user/PAT
+names. NFC normalization operates on valid runs separated by lone code units;
+length checks follow the TS validator's UTF-16 or code-point rule. Filtering can
+join two previously separated surrogate units, so the result is re-encoded from
+UTF-16. SQLite user/group/device/file name reads share the TEXT decoder; tag JSON
+uses the byte-string JSON decoder and propagates parse errors instead of silently
+clearing tags. Typed snapshots and public-share JSON preserve those tag units.
+Account/PAT creation responses retain the transient name; stored views decode
+the SQLite bytes. Crypto's JS UTF-8 conversion remains a separate boundary.
+
 Integration order: this design commit, request/string/repository implementation,
 typed text responses/events, then parity and full regression. The parser's return
 type and input validator signatures change internally; output Value APIs remain.
@@ -31,3 +41,9 @@ upload completion/event fixes can be merged independently. Only uploads.rs's
 json_size/session_mime input helper types change for the shared parser; the
 completion/locking/notification/event sequence is untouched. RHEA-246's
 packaging/maintenance work has no required signature change.
+
+For metadata, uploads.rs's JSON session creation accepts a JS filename and binds
+`NewUpload.filename` as raw TEXT. Filename cleanup applies TS NFKC, replacements
+and UTF-16 truncation. Existing session reads return scalar decoded filenames, so
+RHEA-243's completion gate/notification order is unchanged. A combined checkout
+must adapt any additional NewUpload initializer's filename to the same JS type.

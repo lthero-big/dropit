@@ -610,7 +610,7 @@ pub async fn items(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<Box<serde_json::value::RawValue>>> {
     let Path(raw) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let space = scope(&app, &context, &raw).await?;
     let id = space.id.clone();
@@ -647,19 +647,18 @@ pub async fn text(
     let group = match body.get("group") {
         None | Some(crate::js::Value::Null) => header_value(&headers, "x-dropit-group")
             .filter(|v| !v.is_empty())
-            .map(|v| crate::decode_uri_component(v).ok_or(ApiError::new(400, "INVALID_GROUP")))
+            .map(|v| {
+                crate::decode_uri_component(v)
+                    .map(Into::into)
+                    .ok_or(ApiError::new(400, "INVALID_GROUP"))
+            })
             .transpose()?,
-        Some(crate::js::Value::String(value)) => Some(
-            value
-                .as_str()
-                .ok_or(ApiError::new(400, "INVALID_GROUP"))?
-                .to_owned(),
-        ),
-        Some(_) => return Err(ApiError::new(400, "INVALID_GROUP")),
+        Some(crate::js::Value::String(value)) => Some(value.clone()),
+        _ => return Err(ApiError::new(400, "INVALID_GROUP")),
     };
     let group = group
         .filter(|value| !value.is_empty())
-        .map(|value| crate::clean_group(&value))
+        .map(|value| value.clean_group())
         .transpose()?;
     let input = db::TextInput {
         text: text.to_owned(),

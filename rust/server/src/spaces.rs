@@ -214,7 +214,7 @@ pub async fn members(
                 .query_map([&space_id], |row| {
                     Ok(json!({
                         "userId": row.get::<_, String>(0)?, "email": row.get::<_, String>(1)?,
-                        "name": row.get::<_, String>(2)?, "role": row.get::<_, String>(3)?,
+                        "name": db::text(row, 2)?, "role": row.get::<_, String>(3)?,
                     }))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?)

@@ -108,7 +108,7 @@ async function request(server, path, { raw, method = 'GET', cookie, headers = {}
     body: bytes, signal: AbortSignal.timeout(15000),
   });
   const wire = await response.text(); checks++;
-  return { status: response.status, body: JSON.parse(wire), wire, headers: response.headers };
+  return { status: response.status, body: wire ? JSON.parse(wire) : null, wire, headers: response.headers };
 }
 
 function expect(response, status, code) {
@@ -168,6 +168,111 @@ async function inspect(server, base, cookie, expected) {
     assert.equal(snapshot.body.items.find(item => item.id === id)?.text, text); checks++;
   }
   ws.socket.terminate();
+}
+
+async function metadataFlow(server, data, base, cookie, m, ws, roomBase, roomId) {
+  const state = { items: [], users: [], facts: [], groups: ['r���x', 'g���x', 'g���x', 'label���x'] };
+  const write = async (path, raw, method, status, session = cookie) => {
+    const response = await request(server, path, { method, raw, cookie: session });
+    expect(response, status); return response;
+  };
+  const eventItem = async (response, type = 'item.updated') => {
+    const event = await ws.next(); assert.equal(event.body.type, type);
+    assert.deepEqual(event.body.item, response.body.item);
+  };
+  const created = await write(base + '/items/text', String.raw`{"text":"group boundary","group":"g\ud800x"}`, 'POST', 201);
+  assert.equal(created.body.item.group, 'g\ud800x'); await eventItem(created, 'item.created');
+  const first = read(data, 'SELECT hex(groupName) AS hex FROM items WHERE id=?', created.body.item.id)[0];
+  assert.equal(first.hex, '67EDA08078');
+  state.items.push({ base, id: created.body.item.id, group: 'g���x', tags: [] });
+  state.facts.push({ case: 'text-group', immediate: created.body.item.group, hex: first.hex });
+  const group = await write(base + '/groups', String.raw`{"name":"g\udc00x"}`, 'POST', 201);
+  assert.deepEqual(group.body.groups, ['历史分组', 'g���x', 'g���x']);
+  assert.equal(read(data, "SELECT count(*) AS n FROM item_groups WHERE hex(name)='67EDB08078'")[0].n, 1);
+
+  const rawTags = String.raw`{"tags":["tag\ud800x","#tag\ud800x","\udc00","�","\ue000"]}`;
+  const tags = ['tag\ud800x', '\udc00', '�', '\ue000'];
+  const labeled = await write(`${base}/items/${m.existing.id}/labels`, rawTags, 'PATCH', 200);
+  assert.deepEqual(labeled.body.item.tags, tags); await eventItem(labeled);
+  const storedTags = read(data, 'SELECT tags FROM items WHERE id=?', m.existing.id)[0].tags;
+  assert.equal(storedTags, JSON.stringify(tags));
+  state.facts.push({ case: 'tags', tags, storedTags });
+  for (const invalid of [String.raw`{"tags":["\u0000"]}`, '{"tags":["' + String.raw`\ud800`.repeat(25) + '"]}', String.raw`{"group":"g\u0085x"}`]) {
+    expect(await request(server, `${base}/items/${m.existing.id}/labels`, { method: 'PATCH', cookie, raw: invalid }), 400,
+      invalid.includes('group') ? 'INVALID_GROUP' : 'INVALID_INPUT');
+  }
+  const rename = await write(base + '/groups/' + encodeURIComponent('历史分组'), String.raw`{"name":"r\udc00x"}`, 'PATCH', 200);
+  assert.ok(rename.body.groups.includes('r���x'));
+  const renamed = await ws.next(); assert.equal(renamed.body.type, 'item.updated');
+  assert.equal(renamed.body.item.group, 'r���x'); assert.deepEqual(renamed.body.item.tags, tags);
+  const relabeled = await write(`${base}/items/${m.existing.id}/labels`, String.raw`{"group":"label\ud800x"}`, 'PATCH', 200);
+  assert.equal(relabeled.body.item.group, 'label\ud800x'); await eventItem(relabeled);
+  state.items.push({ base, id: m.existing.id, group: 'label���x', tags });
+  // Omitted group uses the TS-read replacement string, which cannot name the
+  // original WTF-8 group. Preserve the resulting error rather than fixing TS.
+  expect(await request(server, `${base}/items/${m.existing.id}/labels`, { method: 'PATCH', cookie, raw: '{"pinned":true}' }), 404, 'GROUP_NOT_FOUND');
+  const share = await write(`${base}/items/${m.existing.id}/shares`, '{"expiresIn":"never"}', 'POST', 201);
+  const publicItem = await request(server, '/api/s/' + share.body.token); expect(publicItem, 200);
+  assert.deepEqual(publicItem.body.item.tags, tags);
+  const managed = await request(server, '/api/shares', { cookie }); expect(managed, 200);
+  state.share = share.body.token; state.shareTags = tags;
+
+  for (const [id, name, hex, readName] of [[m.bob.id, 'Bob\ud800x', '426F62EDA08078', 'Bob���x'], [m.alice.id, 'Alice\udc00x', '416C696365EDB08078', 'Alice���x']]) {
+    await write('/api/admin/users/' + id, JSON.stringify({ name }), 'PATCH', 204);
+    assert.equal(read(data, 'SELECT hex(name) AS hex FROM users WHERE id=?', id)[0].hex, hex);
+    state.users.push({ id, name: readName }); state.facts.push({ case: 'user-name', immediate: name, hex, readName });
+  }
+  for (const raw of [String.raw`{"email":"unicode-invalid@example.test","name":"Invalid","role":"user\ud800"}`, '{"email":"unicode-invalid@example.test","name":"Invalid","role":null}']) {
+    expect(await request(server, '/api/admin/users', { method: 'POST', cookie, raw }), 400, 'INVALID_INPUT');
+  }
+  const provision = await write('/api/admin/users', String.raw`{"email":"unicode-new@example.test","name":"New\ud800x"}`, 'POST', 201);
+  assert.equal(provision.body.name, 'New\ud800x');
+  state.users.push({ id: provision.body.id, name: 'New���x' });
+  await write('/api/admin/registration', '{"policy":"open"}', 'PUT', 200);
+  const registration = await write('/api/auth/password/register', JSON.stringify({ email: 'unicode-register@example.test', name: 'Reg\udc00x', password: 'Password-\ud800-1234' }), 'POST', 201);
+  assert.equal(registration.body.user.name, 'Reg\udc00x');
+  state.users.push({ id: registration.body.user.id, name: 'Reg���x' });
+  // Node crypto replaces a lone UTF-16 unit once, unlike SQLite's three-byte read.
+  expect(await request(server, '/api/auth/password/login', { method: 'POST', raw: JSON.stringify({ email: 'unicode-register@example.test', password: 'Password-�-1234' }) }), 200);
+  const token = await write('/api/tokens', String.raw`{"name":"PAT\ud800x"}`, 'POST', 201);
+  assert.equal(token.body.name, 'PAT\ud800x');
+  await write('/api/tokens/' + token.body.id, String.raw`{"name":"PAT\udc00x"}`, 'PATCH', 204);
+  state.token = token.body.id;
+  const upload = await write(base + '/uploads', String.raw`{"filename":"file\ud800.txt","size":4,"mime":"text/plain"}`, 'POST', 201);
+  const fileRow = read(data, 'SELECT filename,hex(filename) AS hex FROM uploads WHERE id=?', upload.body.uploadId)[0];
+  assert.equal(fileRow.hex, '66696C65EDA0802E747874');
+  const uploadRead = await request(server, base + '/uploads/' + upload.body.uploadId, { cookie }); expect(uploadRead, 200);
+  assert.equal(fileRow.filename, 'file���.txt');
+  assert.equal('filename' in uploadRead.body, false);
+  expect(await request(server, base + '/uploads/' + upload.body.uploadId, { cookie, method: 'DELETE' }), 204);
+  state.facts.push({ case: 'upload-filename', hex: fileRow.hex, readName: fileRow.filename });
+  const roomSocket = connect(server, roomBase); assert.equal((await roomSocket.next()).body.type, 'snapshot');
+  const roomLabels = await write(`${roomBase}/items/${roomId}/labels`, String.raw`{"group":"room\ud800x","tags":["room\udc00"]}`, 'PATCH', 200, null);
+  assert.equal(roomLabels.body.item.group, 'room\ud800x'); assert.deepEqual(roomLabels.body.item.tags, ['room\udc00']);
+  assert.deepEqual((await roomSocket.next()).body.item, roomLabels.body.item); roomSocket.socket.terminate();
+  state.items.push({ base: roomBase, id: roomId, group: 'room���x', tags: ['room\udc00'] });
+  return state;
+}
+
+async function inspectMetadata(server, base, cookie, state) {
+  for (const scope of new Set(state.items.map(item => item.base))) {
+    const snapshot = await request(server, scope + '/items', { cookie: scope === base ? cookie : undefined }); expect(snapshot, 200);
+    const ws = connect(server, scope, scope === base ? cookie : undefined), live = await ws.next();
+    for (const { id, group, tags } of state.items.filter(item => item.base === scope)) {
+      for (const value of [snapshot.body, live.body]) {
+        const item = value.items.find(item => item.id === id);
+        assert.equal(item.group, group); assert.deepEqual(item.tags, tags); checks++;
+      }
+    }
+    if (scope === base) assert.deepEqual(snapshot.body.groups, state.groups);
+    ws.socket.terminate();
+  }
+  const users = await request(server, '/api/admin/users', { cookie }); expect(users, 200);
+  for (const expected of state.users) assert.equal(users.body.users.find(user => user.id === expected.id).name, expected.name);
+  for (const path of ['/api/me', '/api/spaces', base + '/members']) expect(await request(server, path, { cookie }), 200);
+  const tokens = await request(server, '/api/tokens', { cookie }); expect(tokens, 200);
+  assert.equal(tokens.body.tokens.find(token => token.id === state.token).name, 'PAT���x');
+  const shared = await request(server, '/api/s/' + state.share); expect(shared, 200); assert.deepEqual(shared.body.item.tags, state.shareTags);
 }
 
 async function run(kind, seed, m) {
@@ -256,20 +361,24 @@ async function run(kind, seed, m) {
     expect(await request(server, path, { method: 'POST', cookie, raw: '{"text":"' + 'x'.repeat(65537) + '"}' }), 413, 'TEXT_TOO_LARGE');
     expect(await request(server, path, { method: 'POST', cookie, raw: '{"text":"' + 'x'.repeat(65536 * 6 + 1024) + '"}' }), 413, 'BODY_TOO_LARGE');
     assert.equal(read(data, 'SELECT count(*) AS n FROM items')[0].n, before, 'errors must not insert rows');
+    const metadata = await metadataFlow(server, data, base, cookie, m, ws, roomBase, created.body.item.id);
     ws.socket.terminate();
     await inspect(server, base, cookie, expected);
+    await inspectMetadata(server, base, cookie, metadata);
     await stop(server);
     server = await start(kind, data);
     await inspect(server, base, cookie, expected);
     await inspect(server, roomBase, undefined, roomExpected);
+    await inspectMetadata(server, base, cookie, metadata);
     await stop(server);
     // Restart the other real implementation on the original database, without
     // exporting/importing strings through JS or changing the stored schema.
     server = await start(kind === 'ts' ? 'rust' : 'ts', data);
     await inspect(server, base, cookie, expected);
     await inspect(server, roomBase, undefined, roomExpected);
+    await inspectMetadata(server, base, cookie, metadata);
     const crossRead = { kind: kind === 'ts' ? 'rust' : 'ts', status: 200, wsSnapshot: true };
-    return { kind, rows, persistedItems: expected.size, sameProcessGetAndWs: true, restartedGetAndWs: true, crossRead };
+    return { kind, rows, metadata: metadata.facts, persistedItems: expected.size, sameProcessGetAndWs: true, restartedGetAndWs: true, crossRead };
   } finally { await stop(server); }
 }
 

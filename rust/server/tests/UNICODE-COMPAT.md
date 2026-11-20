@@ -20,6 +20,23 @@ from `hex(CAST(text AS BLOB))`, not re-encoding the result of a SQLite string re
 | `"\ud800\ud83d\ude00"` | `"\ud800😀"` | `EDA080F09F9880` | `"���😀"` |
 | `"a\\ud800b"` | `"a\\ud800b"` | `615C756438303062` | literal backslash-u text |
 
+Metadata has two storage behaviors:
+
+| Field | Immediate response/event | Storage | Later read |
+| --- | --- | --- | --- |
+| Text group `g\ud800x` | Original lone unit | TEXT hex `67EDA08078` | `g���x` |
+| Explicit group `g\udc00x` | Group list already read from SQLite | TEXT hex `67EDB08078` | `g���x` |
+| Tag `tag\ud800x` | Original lone unit | JSON string `"tag\ud800x"` | Original lone unit |
+| User name `Bob\ud800x` | PATCH 204; creation returns original | TEXT hex `426F62EDA08078` | `Bob���x` |
+
+Default regression includes the review's four original failures, group rename,
+tag deduplication, actual U+FFFD/private-use tags, negative length/control cases,
+public shares, anonymous room metadata, user self/admin/member/owner views,
+registration and PAT names, JSON upload filenames, real restarts and cross reads.
+Group normalization/limits and ordinary ASCII protocol validation still apply.
+The existing TS behavior where an omitted group uses a replacement-decoded name
+and can return GROUP_NOT_FOUND is explicitly tested rather than normalized away.
+
 TS accepts both create and PATCH with a lone surrogate. The response and live
 `item.created` / `item.updated` preserve the original UTF-16 code units. TS binds
 those code units to SQLite as invalid UTF-8 bytes (the surrogate's three-byte
@@ -42,15 +59,16 @@ including ignored and duplicate fields; valid JSON syntax is checked by RawValue
 before field validation. Byte-identical decoded keys implement last-value wins;
 lone units remain distinct from literal U+FFFD, private-use code points and
 backslash-u text. Numbers retain serde_json's arbitrary-precision representation.
-Existing scalar field validators keep their business rules; text uses an explicit
-JS-string accessor.
+Display names, groups, tags and text use JS-string accessors; protocol enum/ID
+validators continue to use scalar UTF-8 accessors.
 
 `ToSql` binds text bytes as TEXT (not BLOB); the byte length equals
 Buffer.byteLength even for a lone unit. `db::item` reads TEXT bytes with
 from_utf8_lossy, preserving the measured three replacements per surrogate and the
 separately stored size. It never rewrites history. Create/PATCH return the transient
 input string, while subsequent reads use the stored decoding. Typed responses and
-item events serialize directly, bypassing serde_json::Value's scalar-string limit.
+item events, snapshots and public shares serialize directly, bypassing
+serde_json::Value's scalar-string limit.
 The existing broadcast queue, limits, gate, write transactions and ordinary Value
 publishers retain their behavior. This follows the authorized
 [internal design](UNICODE-DESIGN.md).
@@ -101,3 +119,15 @@ The same full run passes auth/mock OAuth, 228 file responses, 199 login/text
 responses, 290 item/label/group checks, PAT/device/WebView/CLI, 527 realtime checks,
 408 room/share checks, update HTTP (including slow 200 MiB download/cancel/file
 release), and 353 upload/chunk responses.
+
+The 2026-11-20 metadata repair extends the default target to 690 HTTP/state
+checks. It adds all four independent-review failures plus group rename, raw tags
+on snapshots/public shares, account/PAT name creation and updates, upload-session
+filename bytes, crypto UTF-8 behavior, and invalid role rejection. The unchanged
+independent-review script also reports zero gaps for its four cases. The updated
+unit suite has 17 tests; all Unicode tests remain enabled by default.
+Fmt, strict locked clippy, locked build and the complete locked Cargo test run
+pass on the metadata candidate: 17 unit tests and 10 process targets, zero ignored.
+The full run includes 199 login/text, 228 file, 290 item/label/group, 526 realtime,
+408 room/share and 353 upload/chunk checks, plus auth/mock OAuth, machine access
+and update HTTP.

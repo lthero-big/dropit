@@ -926,7 +926,7 @@ async fn login(
         .unwrap_or_default()
         .trim_matches(js_space)
         .to_lowercase();
-    let password = input_string(body.get("password"), 256)?.to_owned();
+    let password = input_js_string(body.get("password"), 256)?.utf8();
     if email.is_empty() || email.encode_utf16().count() > 200 {
         return Err(ApiError::INVALID_INPUT);
     }
@@ -934,7 +934,7 @@ async fn login(
     let invite = match body.get("invite") {
         None | Some(crate::js::Value::Null) => None,
         Some(crate::js::Value::String(value)) if value.is_empty() => None,
-        value => Some(password::hash(input_string(value, 128)?)),
+        value => Some(password::hash(&input_js_string(value, 128)?.utf8())),
     };
     let email_to_find = email.clone();
     let account = app
@@ -1075,6 +1075,10 @@ async fn create_token(
     body.as_object_mut()
         .expect("token response object")
         .insert("token".into(), raw.into());
+    let mut body = js::to_value(&body)?;
+    body.as_object_mut()
+        .unwrap()
+        .insert("name", js::Value::String(record.name));
     Ok((StatusCode::CREATED, Json(body)))
 }
 
@@ -1099,21 +1103,10 @@ async fn rename_token(
     let auth = browser_session(&context)?;
     let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let body = read_json(request, 2048).await?;
-    let name = body
-        .get("name")
-        .and_then(crate::js::Value::as_str)
-        .filter(|value| !value.trim().is_empty() && value.encode_utf16().count() <= 80)
-        .map(|value| {
-            value
-                .chars()
-                .filter(|ch| *ch > '\u{1f}' && *ch != '\u{7f}')
-                .collect::<String>()
-        })
-        .filter(|value| !value.trim().is_empty())
-        .ok_or(ApiError::INVALID_INPUT)?;
+    let name = machine::person_name(body.get("name"))?;
     let user_id = auth.account.user.id.clone();
     app.db
-        .run(move |db| machine::rename_token(db, &id, &user_id, name.trim()))
+        .run(move |db| machine::rename_token(db, &id, &user_id, &name))
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1515,7 +1508,7 @@ async fn items(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<Box<serde_json::value::RawValue>>> {
     let id = context.require_auth()?.account.user.id.clone();
     let Path(space_id) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let snapshot = app
@@ -1558,20 +1551,20 @@ async fn text(
         return Err(ApiError::new(413, "TEXT_TOO_LARGE"));
     }
     let group = match body.get("group") {
-        None | Some(crate::js::Value::Null) => header_group,
+        None | Some(crate::js::Value::Null) => header_group.map(Into::into),
         value => Some(
             value
-                .and_then(crate::js::Value::as_str)
+                .and_then(crate::js::Value::as_js_str)
                 .ok_or(ApiError::new(400, "INVALID_GROUP"))?
-                .to_owned(),
+                .clone(),
         ),
     };
     let group = group
         .filter(|value| !value.is_empty())
-        .map(|value| clean_group(&value))
+        .map(|value| value.clean_group())
         .transpose()?;
     let input = TextInput {
-        text: text.to_owned(),
+        text: text.clone(),
         group,
         device: parse_device(&headers),
     };
@@ -1733,6 +1726,13 @@ pub(crate) async fn read_json(request: Request, limit: usize) -> ApiResult<js::O
         })?;
     // JSON.parse accepts huge numbers in unused fields. Keep them parseable before validating used fields.
     js::parse(&String::from_utf8_lossy(&bytes)).map_err(|_| ApiError::new(400, "INVALID_JSON"))
+}
+
+pub(crate) fn input_js_string(value: Option<&js::Value>, limit: usize) -> ApiResult<&js::JsString> {
+    value
+        .and_then(js::Value::as_js_str)
+        .filter(|value| !value.is_empty() && value.utf16_len() <= limit)
+        .ok_or(ApiError::INVALID_INPUT)
 }
 
 pub(crate) fn input_string(value: Option<&js::Value>, limit: usize) -> ApiResult<&str> {

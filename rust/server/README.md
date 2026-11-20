@@ -145,6 +145,15 @@ See [the internal design](tests/UNICODE-DESIGN.md) and
 `cargo test --locked --test unicode -- --nocapture` runs strict TS/Rust parity
 by default; there are no ignored Unicode cases.
 
+The same boundary also covers item groups, explicit group creation/rename,
+labels/tags and account/PAT names. Group/name TEXT reads replace invalid bytes;
+tags are stored as JSON strings and retain escaped lone units on later reads.
+Snapshots and public shares serialize those tags directly instead of dropping
+them. Name/group/tag validation counts JS UTF-16 units or code points as the
+original validator requires. JSON upload filenames retain their raw TEXT bytes;
+the upload completion/locking/event code is unchanged. Crypto inputs use JS
+UTF-8 encoding (one replacement per lone unit), independently of SQLite reads.
+
 ## Run locally
 
 Create a new isolated fixture from the repository root after building TS.

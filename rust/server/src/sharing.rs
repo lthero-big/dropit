@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use rusqlite::OptionalExtension;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -72,15 +72,11 @@ fn valid_token(raw: &str) -> bool {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
 }
 
-fn public_item(item: &db::Item) -> ApiResult<Value> {
-    let mut value = serde_json::to_value(item).map_err(ApiError::internal)?;
-    let object = value
+fn public_share_item(shared: &Shared) -> ApiResult<crate::js::Value> {
+    let mut item = crate::js::to_value(&shared.item)?;
+    let object = item
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("item"))?;
-    let has_thumbnail = object
-        .get("hasThumbnail")
-        .cloned()
-        .unwrap_or(Value::Bool(false));
     for key in [
         "id",
         "spaceId",
@@ -94,31 +90,7 @@ fn public_item(item: &db::Item) -> ApiResult<Value> {
     ] {
         object.remove(key);
     }
-    object.insert("hasThumbnail".into(), has_thumbnail);
-    Ok(value)
-}
-
-fn public_share_item(shared: &Shared) -> ApiResult<Value> {
-    let item = public_item(&shared.item)?;
-    let object = item.as_object().ok_or_else(|| ApiError::internal("item"))?;
-    let mut output = Map::new();
-    for key in [
-        "kind",
-        "text",
-        "filename",
-        "mime",
-        "size",
-        "hasThumbnail",
-        "createdAt",
-        "expiresAt",
-        "pinned",
-        "tags",
-    ] {
-        if let Some(value) = object.get(key) {
-            output.insert(key.into(), value.clone());
-        }
-    }
-    Ok(Value::Object(output))
+    Ok(item)
 }
 
 fn expires_at(raw: &str, time: i64) -> ApiResult<Option<i64>> {
@@ -386,11 +358,11 @@ fn managed_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(Value, Option<Strin
     let copy: Option<String> = row.get(7)?;
     let item_id: Option<String> = row.get(8)?;
     let kind: Option<String> = row.get(9)?;
-    let filename: Option<String> = row.get(10)?;
-    let text: Option<String> = row.get(11)?;
+    let filename: Option<String> = db::optional_text(row, 10)?;
+    let text: Option<String> = db::optional_text(row, 11)?;
     let item_expires: Option<i64> = row.get(12)?;
     let space_id: Option<String> = row.get(13)?;
-    let space_name: Option<String> = row.get(14)?;
+    let space_name: Option<String> = db::optional_text(row, 14)?;
     let space_expires: Option<i64> = row.get(15)?;
     let closed: Option<i64> = row.get(16)?;
     let visible: Option<bool> = row.get(17)?;
@@ -610,7 +582,7 @@ async fn read_shared(app: &App, raw: &str, access: Option<&str>, spend: bool) ->
             if changed != 1 { return Err(ApiError::NOT_FOUND); }
             views + 1
         } else { views };
-        let file: db::StoredFile = tx.query_row("SELECT filename,size,fileKey,thumbnailKey FROM items WHERE id=?", [item_id], |row| Ok(db::StoredFile { filename: row.get(0)?, size: row.get(1)?, file_key: row.get(2)?, thumbnail_key: row.get(3)? }))?;
+        let file: db::StoredFile = tx.query_row("SELECT filename,size,fileKey,thumbnailKey FROM items WHERE id=?", [item_id], |row| Ok(db::StoredFile { filename: db::optional_text(row, 0)?, size: row.get(1)?, file_key: row.get(2)?, thumbnail_key: row.get(3)? }))?;
         tx.commit()?;
         Ok(Shared { item, file, expires_at: expires, max_views, views: next_views })
     }).await
@@ -621,13 +593,18 @@ pub async fn open_public(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<crate::js::Value>> {
     let Path(raw) = path.map_err(|_| ApiError::NOT_FOUND)?;
     public_limit(&app, &context, &raw)?;
     let (shared, access) = open_shared(&app, &raw).await?;
-    Ok(Json(
-        json!({ "item": public_share_item(&shared)?, "linkExpiresAt": shared.expires_at, "views": shared.views, "maxViews": shared.max_views, "access": access }),
-    ))
+    let mut response = crate::js::to_value(
+        &json!({ "linkExpiresAt": shared.expires_at, "views": shared.views, "maxViews": shared.max_views, "access": access }),
+    )?;
+    response
+        .as_object_mut()
+        .unwrap()
+        .insert("item", public_share_item(&shared)?);
+    Ok(Json(response))
 }
 
 async fn public_file_response(
@@ -711,7 +688,7 @@ async fn open_shared(app: &App, raw: &str) -> ApiResult<(Shared, String)> {
         let item = db::item_by_id(&tx, &item_id, time)?.filter(|item| item.space_id == space_id).ok_or(ApiError::NOT_FOUND)?;
         let changed = tx.execute("UPDATE shares SET views=views+1,downloadTicketHash=?,downloadTicketExpiresAt=? WHERE tokenHash=? AND revoked=0 AND (maxViews IS NULL OR views<maxViews)", rusqlite::params![ticket, time + 600000, hash])?;
         if changed != 1 { return Err(ApiError::NOT_FOUND); }
-        let file = tx.query_row("SELECT filename,size,fileKey,thumbnailKey FROM items WHERE id=?", [item_id], |row| Ok(db::StoredFile { filename: row.get(0)?, size: row.get(1)?, file_key: row.get(2)?, thumbnail_key: row.get(3)? }))?;
+        let file = tx.query_row("SELECT filename,size,fileKey,thumbnailKey FROM items WHERE id=?", [item_id], |row| Ok(db::StoredFile { filename: db::optional_text(row, 0)?, size: row.get(1)?, file_key: row.get(2)?, thumbnail_key: row.get(3)? }))?;
         tx.commit()?; Ok((Shared { item, file, expires_at: expires, max_views, views: views + 1 }, returned_access))
     }).await
 }

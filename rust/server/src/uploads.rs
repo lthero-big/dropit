@@ -706,7 +706,7 @@ pub async fn create_upload(
     app.limit("upload:ip", &context.ip, app.config.rate_upload)?;
     app.limit("upload:user", &auth.account.user.id, app.config.rate_upload)?;
     let body = crate::read_json(request, 8192).await?;
-    let filename = crate::input_string(body.get("filename"), 4096)?.to_owned();
+    let filename = crate::input_js_string(body.get("filename"), 4096)?.clean_filename();
     let size = json_size(body.get("size"), app.config.max_file)?;
     let mime = session_mime(body.get("mime"))?;
     let created_at = now();
@@ -715,7 +715,7 @@ pub async fn create_upload(
         space_id: space_id.clone(),
         user_id: auth.account.user.id.clone(),
         principal: format!("user:{}", auth.account.user.id),
-        filename: clean_filename(&filename),
+        filename,
         mime,
         size,
         chunk_size: app.config.upload_chunk_bytes,
