@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    ApiError, ApiResult, App, RequestContext, db, header_value, input_string, now, origin_for,
-    parse_device, password, read_json,
+    ApiError, ApiResult, App, RequestContext, db, header_value, now, origin_for, parse_device,
+    password, read_json,
 };
 
 const ROOM_CODE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz";
@@ -184,7 +184,7 @@ fn valid_pin(value: &str) -> bool {
     (4..=32).contains(&length) && !value.chars().any(|ch| ch < ' ' || ch == '\u{7f}')
 }
 
-fn device_key(value: Option<&Value>) -> ApiResult<Option<String>> {
+fn device_key(value: Option<&crate::js::Value>) -> ApiResult<Option<String>> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -209,19 +209,25 @@ pub async fn create(
     {
         read_json(request, 2048).await?
     } else {
-        serde_json::Map::new()
+        crate::js::Object::new()
     };
     let device = device_key(body.get("deviceKey"))?;
     let custom_code = match body.get("code") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) if value.is_empty() => None,
-        Some(Value::String(value)) if valid_custom_code(value, false) => Some(value.clone()),
+        None | Some(crate::js::Value::Null) => None,
+        Some(crate::js::Value::String(value)) if value.is_empty() => None,
+        Some(crate::js::Value::String(value))
+            if value.as_str().is_some_and(|v| valid_custom_code(v, false)) =>
+        {
+            Some(value.as_str().unwrap().to_owned())
+        }
         Some(_) => return Err(ApiError::new(400, "INVALID_CODE")),
     };
     let pin = match body.get("pin") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(value)) if value.is_empty() => None,
-        Some(Value::String(value)) if valid_pin(value) => Some(pin_hash(&app, value).await?),
+        None | Some(crate::js::Value::Null) => None,
+        Some(crate::js::Value::String(value)) if value.is_empty() => None,
+        Some(crate::js::Value::String(value)) if value.as_str().is_some_and(valid_pin) => {
+            Some(pin_hash(&app, value.as_str().unwrap()).await?)
+        }
         Some(_) => return Err(ApiError::new(400, "INVALID_PIN")),
     };
     if custom_code.is_some() {
@@ -349,7 +355,7 @@ pub async fn enter(
     let body = read_json(request, 2048).await?;
     let code = body
         .get("code")
-        .and_then(Value::as_str)
+        .and_then(crate::js::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty() && value.len() <= 64)
         .ok_or(ApiError::new(400, "INVALID_CODE"))?;
@@ -369,7 +375,7 @@ pub async fn enter(
         }
         let pin = body
             .get("pin")
-            .and_then(Value::as_str)
+            .and_then(crate::js::Value::as_str)
             .filter(|value| value.len() <= 256)
             .unwrap_or_default();
         if pin.is_empty() {
@@ -418,9 +424,10 @@ pub async fn change_code(
     let body = read_json(request, 2048).await?;
     let key = body
         .get("deviceKey")
-        .and_then(Value::as_str)
+        .and_then(crate::js::Value::as_str)
         .ok_or(ApiError::INVALID_INPUT)?;
-    let key = device_key(Some(&Value::String(key.to_owned())))?.ok_or(ApiError::INVALID_INPUT)?;
+    let key = device_key(Some(&crate::js::Value::String(key.to_owned().into())))?
+        .ok_or(ApiError::INVALID_INPUT)?;
     let space = load_room(&app, &raw).await?;
     if space.device_hash.as_deref() != Some(password::hash(&format!("room-device:{key}")).as_str())
     {
@@ -438,9 +445,13 @@ pub async fn change_code(
     }
     let code = if body.contains_key("code") {
         match body.get("code") {
-            Some(Value::Null) => Some(random_code()?),
-            Some(Value::String(value)) if value.is_empty() => Some(random_code()?),
-            Some(Value::String(value)) if valid_custom_code(value, true) => Some(value.clone()),
+            Some(crate::js::Value::Null) => Some(random_code()?),
+            Some(crate::js::Value::String(value)) if value.is_empty() => Some(random_code()?),
+            Some(crate::js::Value::String(value))
+                if value.as_str().is_some_and(|v| valid_custom_code(v, true)) =>
+            {
+                Some(value.as_str().unwrap().to_owned())
+            }
             _ => return Err(ApiError::new(400, "INVALID_CODE")),
         }
     } else {
@@ -448,9 +459,11 @@ pub async fn change_code(
     };
     let pin = if body.contains_key("pin") {
         match body.get("pin") {
-            Some(Value::Null) => None,
-            Some(Value::String(value)) if value.is_empty() => None,
-            Some(Value::String(value)) if valid_pin(value) => Some(pin_hash(&app, value).await?),
+            Some(crate::js::Value::Null) => None,
+            Some(crate::js::Value::String(value)) if value.is_empty() => None,
+            Some(crate::js::Value::String(value)) if value.as_str().is_some_and(valid_pin) => {
+                Some(pin_hash(&app, value.as_str().unwrap()).await?)
+            }
             _ => return Err(ApiError::new(400, "INVALID_PIN")),
         }
     } else {
@@ -597,7 +610,7 @@ pub async fn items(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<Box<serde_json::value::RawValue>>> {
     let Path(raw) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let space = scope(&app, &context, &raw).await?;
     let id = space.id.clone();
@@ -613,7 +626,7 @@ pub async fn text(
     Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
     request: axum::extract::Request,
-) -> ApiResult<(StatusCode, Json<Value>)> {
+) -> ApiResult<(StatusCode, Json<crate::js::ItemResponse>)> {
     let Path(raw) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let space = scope(&app, &context, &raw).await?;
     caller_limit(
@@ -624,24 +637,28 @@ pub async fn text(
     )?;
     let headers = request.headers().clone();
     let body = read_json(request, app.config.max_text * 6 + 1024).await?;
-    let text = input_string(body.get("text"), usize::MAX)?;
-    if text.trim_matches(crate::js_space).is_empty() {
+    let text = body.text("text")?;
+    if text.is_blank() {
         return Err(ApiError::new(400, "EMPTY_TEXT"));
     }
     if text.len() > app.config.max_text {
         return Err(ApiError::new(413, "TEXT_TOO_LARGE"));
     }
     let group = match body.get("group") {
-        None | Some(Value::Null) => header_value(&headers, "x-dropit-group")
+        None | Some(crate::js::Value::Null) => header_value(&headers, "x-dropit-group")
             .filter(|v| !v.is_empty())
-            .map(|v| crate::decode_uri_component(v).ok_or(ApiError::new(400, "INVALID_GROUP")))
+            .map(|v| {
+                crate::decode_uri_component(v)
+                    .map(Into::into)
+                    .ok_or(ApiError::new(400, "INVALID_GROUP"))
+            })
             .transpose()?,
-        Some(Value::String(value)) => Some(value.clone()),
-        Some(_) => return Err(ApiError::new(400, "INVALID_GROUP")),
+        Some(crate::js::Value::String(value)) => Some(value.clone()),
+        _ => return Err(ApiError::new(400, "INVALID_GROUP")),
     };
     let group = group
         .filter(|value| !value.is_empty())
-        .map(|value| crate::clean_group(&value))
+        .map(|value| value.clean_group())
         .transpose()?;
     let input = db::TextInput {
         text: text.to_owned(),
@@ -666,9 +683,8 @@ pub async fn text(
             .publish(&channel, json!({"type":"groups","groups":groups}));
     }
     let item = item?;
-    app.realtime
-        .publish(&channel, json!({ "type": "item.created", "item": item }));
-    Ok((StatusCode::CREATED, Json(json!({ "item": item }))))
+    app.realtime.publish_item(&channel, "item.created", &item);
+    Ok((StatusCode::CREATED, Json(crate::js::ItemResponse { item })))
 }
 
 pub async fn delete_item(

@@ -16,6 +16,22 @@ use crate::{
     migrations, now,
 };
 
+/// Decode SQLite TEXT at the same boundary as better-sqlite3/V8.
+pub fn text(row: &Row<'_>, column: impl rusqlite::RowIndex) -> rusqlite::Result<String> {
+    Ok(String::from_utf8_lossy(row.get_ref(column)?.as_bytes()?).into_owned())
+}
+pub fn optional_text(
+    row: &Row<'_>,
+    column: impl rusqlite::RowIndex,
+) -> rusqlite::Result<Option<String>> {
+    match row.get_ref(column)? {
+        rusqlite::types::ValueRef::Null => Ok(None),
+        value => Ok(Some(
+            String::from_utf8_lossy(value.as_bytes()?).into_owned(),
+        )),
+    }
+}
+
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
@@ -100,7 +116,7 @@ pub(crate) fn account(row: &Row<'_>) -> rusqlite::Result<Account> {
         user: User {
             id: row.get("id")?,
             email: row.get("email")?,
-            name: row.get("name")?,
+            name: text(row, "name")?,
             role: row.get("role")?,
             disabled: row.get("disabled")?,
             pending: row.get("pending")?,
@@ -219,9 +235,9 @@ pub fn spaces(db: &Connection, user_id: &str) -> ApiResult<Vec<Value>> {
         FROM spaces s JOIN members m ON m.spaceId=s.id LEFT JOIN users o ON o.id=s.ownerId WHERE m.userId=?")?;
     let rows = stmt.query_map([user_id], |row| {
         Ok(json!({
-            "id": row.get::<_, String>(0)?, "name": row.get::<_, String>(1)?,
+            "id": row.get::<_, String>(0)?, "name": text(row, 1)?,
             "ownerId": row.get::<_, Option<String>>(2)?, "expiresAt": row.get::<_, Option<i64>>(3)?,
-            "role": row.get::<_, String>(4)?, "ownerName": row.get::<_, Option<String>>(5)?,
+            "role": row.get::<_, String>(4)?, "ownerName": optional_text(row, 5)?,
         }))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -251,7 +267,7 @@ pub fn space(db: &Connection, id: &str, user_id: &str, write: bool) -> ApiResult
          FROM spaces s JOIN members m ON m.spaceId=s.id WHERE s.id=? AND m.userId=? AND coalesce(s.roomKey,'')=''",
         params![id, user_id],
         |row| Ok((Space {
-            id: row.get(0)?, name: row.get(1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
+            id: row.get(0)?, name: text(row, 1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
             room_key: row.get(4)?, device_hash: row.get(5)?, room_code: row.get(6)?, pin_hash: row.get(7)?,
             created_at: row.get(8)?, last_active_at: row.get(9)?, closed_at: row.get(10)?, created_by: row.get(11)?,
         }, row.get::<_, bool>(12)?)),
@@ -270,7 +286,7 @@ pub fn room(db: &Connection, id: &str, time: i64) -> ApiResult<Space> {
          FROM spaces WHERE id=? AND roomKey IS NOT NULL AND closedAt IS NULL AND expiresAt>?",
         params![id, time],
         |row| Ok(Space {
-            id: row.get(0)?, name: row.get(1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
+            id: row.get(0)?, name: text(row, 1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
             room_key: row.get(4)?, device_hash: row.get(5)?, room_code: row.get(6)?, pin_hash: row.get(7)?,
             created_at: row.get(8)?, last_active_at: row.get(9)?, closed_at: row.get(10)?, created_by: row.get(11)?,
         }),
@@ -283,7 +299,7 @@ pub fn room_by_code(db: &Connection, code: &str, time: i64) -> ApiResult<Option<
          FROM spaces WHERE roomCode=? AND roomKey IS NOT NULL AND closedAt IS NULL AND expiresAt>?",
         params![code, time],
         |row| Ok(Space {
-            id: row.get(0)?, name: row.get(1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
+            id: row.get(0)?, name: text(row, 1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
             room_key: row.get(4)?, device_hash: row.get(5)?, room_code: row.get(6)?, pin_hash: row.get(7)?,
             created_at: row.get(8)?, last_active_at: row.get(9)?, closed_at: row.get(10)?, created_by: row.get(11)?,
         }),
@@ -296,7 +312,7 @@ pub fn device_room(db: &Connection, device_hash: &str, time: i64) -> ApiResult<O
          FROM spaces WHERE deviceHash=? AND roomKey IS NOT NULL AND closedAt IS NULL AND expiresAt>?",
         params![device_hash, time],
         |row| Ok(Space {
-            id: row.get(0)?, name: row.get(1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
+            id: row.get(0)?, name: text(row, 1)?, expires_at: row.get(2)?, owner_id: row.get(3)?,
             room_key: row.get(4)?, device_hash: row.get(5)?, room_code: row.get(6)?, pin_hash: row.get(7)?,
             created_at: row.get(8)?, last_active_at: row.get(9)?, closed_at: row.get(10)?, created_by: row.get(11)?,
         }),
@@ -326,7 +342,7 @@ pub fn readable_file(
             params![item_id, space_id, time],
             |row| {
                 Ok(StoredFile {
-                    filename: row.get(0)?,
+                    filename: optional_text(row, 0)?,
                     size: row.get(1)?,
                     file_key: row.get(2)?,
                     thumbnail_key: row.get(3)?,
@@ -352,7 +368,7 @@ pub struct Item {
     pub space_id: String,
     pub user_id: Option<String>,
     pub kind: String,
-    pub text: Option<String>,
+    pub text: Option<crate::js::JsString>,
     pub filename: Option<String>,
     pub mime: Option<String>,
     pub size: i64,
@@ -360,27 +376,21 @@ pub struct Item {
     pub updated_at: i64,
     pub expires_at: i64,
     pub pinned: bool,
-    pub tags: Vec<String>,
+    pub tags: Vec<crate::js::JsString>,
     pub has_thumbnail: bool,
-    pub group: Option<String>,
+    pub group: Option<crate::js::JsString>,
     pub device: Option<Device>,
 }
 
 pub fn item(row: &Row<'_>) -> rusqlite::Result<Item> {
     let tags = row.get::<_, String>("tags")?;
-    let tags = match serde_json::from_str::<Value>(&tags) {
-        Ok(Value::Array(values)) => values
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    };
+    let tags: Vec<crate::js::JsString> = serde_json::from_str(&tags).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     let device = match row.get::<_, Option<String>>("deviceId")? {
         Some(id) if !id.is_empty() => Some(Device {
             id,
-            name: row
-                .get::<_, Option<String>>("deviceName")?
+            name: optional_text(row, "deviceName")?
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "未命名设备".into()),
             kind: row
@@ -394,8 +404,15 @@ pub fn item(row: &Row<'_>) -> rusqlite::Result<Item> {
         space_id: row.get("spaceId")?,
         user_id: row.get("userId")?,
         kind: row.get("kind")?,
-        text: row.get("text")?,
-        filename: row.get("filename")?,
+        text: match row.get_ref("text")? {
+            rusqlite::types::ValueRef::Null => None,
+            value => Some(
+                String::from_utf8_lossy(value.as_bytes()?)
+                    .into_owned()
+                    .into(),
+            ),
+        },
+        filename: optional_text(row, "filename")?,
         mime: row.get("mime")?,
         size: row.get("size")?,
         created_at: row.get("createdAt")?,
@@ -403,7 +420,7 @@ pub fn item(row: &Row<'_>) -> rusqlite::Result<Item> {
         expires_at: row.get("expiresAt")?,
         pinned: row.get::<_, i64>("pinned")? != 0,
         tags,
-        group: row.get("groupName")?,
+        group: optional_text(row, "groupName")?.map(Into::into),
         has_thumbnail: row
             .get::<_, Option<String>>("thumbnailKey")?
             .is_some_and(|v| !v.is_empty()),
@@ -421,15 +438,28 @@ pub fn item_by_id(db: &Connection, item_id: &str, time: i64) -> ApiResult<Option
         .optional()?)
 }
 
-pub fn snapshot(db: &Connection, space: Space) -> ApiResult<Value> {
-    let mut items = db.prepare("SELECT * FROM items WHERE spaceId=? AND expiresAt>? ORDER BY pinned DESC, createdAt DESC, id DESC")?;
-    let items = items
+pub fn snapshot(db: &Connection, space: Space) -> ApiResult<Box<serde_json::value::RawValue>> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Snapshot {
+        r#type: &'static str,
+        items: Vec<Item>,
+        groups: Vec<String>,
+        server_time: i64,
+        expires_at: Option<i64>,
+    }
+    let mut statement = db.prepare("SELECT * FROM items WHERE spaceId=? AND expiresAt>? ORDER BY pinned DESC, createdAt DESC, id DESC")?;
+    let items = statement
         .query_map(params![space.id, now()], item)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let groups = groups(db, &space.id)?;
-    Ok(
-        json!({ "type": "snapshot", "items": items, "groups": groups, "serverTime": now(), "expiresAt": space.expires_at }),
-    )
+    serde_json::value::to_raw_value(&Snapshot {
+        r#type: "snapshot",
+        items,
+        groups: groups(db, &space.id)?,
+        server_time: now(),
+        expires_at: space.expires_at,
+    })
+    .map_err(ApiError::internal)
 }
 
 pub fn groups(db: &Connection, space: &str) -> ApiResult<Vec<String>> {
@@ -437,13 +467,13 @@ pub fn groups(db: &Connection, space: &str) -> ApiResult<Vec<String>> {
         "SELECT name FROM item_groups WHERE spaceId=? ORDER BY position, createdAt, name",
     )?;
     Ok(stmt
-        .query_map([space], |row| row.get::<_, String>(0))?
+        .query_map([space], |row| text(row, 0))?
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 pub struct TextInput {
-    pub text: String,
-    pub group: Option<String>,
+    pub text: crate::js::JsString,
+    pub group: Option<crate::js::JsString>,
     pub device: Option<Device>,
 }
 
@@ -496,7 +526,9 @@ pub fn insert_text(
         VALUES (?1,?2,?3,'text',?4,?5,?5,?6,?7,?6,?8,?9,?10,?11)",
         params![id, space_id, account.user.id, input.text, size, time, expires_at, input.group,
             device.map(|d| &d.id), device.map(|d| &d.name), device.map(|d| &d.kind)])?;
-    let inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    let mut inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    inserted.text = Some(input.text);
+    inserted.group = input.group;
     tx.commit()?;
     Ok(inserted)
 }
@@ -544,7 +576,9 @@ pub fn insert_room_text(
         params![id, space_id, input.text, size, time, expires_at, input.group,
             device.map(|d| &d.id), device.map(|d| &d.name), device.map(|d| &d.kind)],
     )?;
-    let inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    let mut inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    inserted.text = Some(input.text);
+    inserted.group = input.group;
     tx.commit()?;
     Ok(inserted)
 }
@@ -892,7 +926,7 @@ pub struct NewUpload {
     pub space_id: String,
     pub user_id: String,
     pub principal: String,
-    pub filename: String,
+    pub filename: crate::js::JsString,
     pub mime: String,
     pub size: i64,
     pub chunk_size: i64,
@@ -965,7 +999,7 @@ pub fn upload_session(db: &Connection, id: &str, time: i64) -> ApiResult<Option<
                     id: row.get(0)?,
                     space_id: row.get(1)?,
                     user_id: row.get(2)?,
-                    filename: row.get(3)?,
+                    filename: text(row, 3)?,
                     mime: row.get(4)?,
                     size: row.get(5)?,
                     chunk_size: row.get(6)?,
@@ -1172,7 +1206,7 @@ fn check_writer(
             |row| {
                 Ok(Space {
                     id: row.get(0)?,
-                    name: row.get(1)?,
+                    name: text(row, 1)?,
                     expires_at: row.get(2)?,
                     owner_id: row.get(3)?,
                     room_key: None,
@@ -1314,7 +1348,12 @@ fn writable_account(
     Ok(account)
 }
 
-pub(crate) fn ensure_group(db: &Connection, space: &str, group: &str, time: i64) -> ApiResult<()> {
+pub(crate) fn ensure_group(
+    db: &Connection,
+    space: &str,
+    group: &(impl rusqlite::ToSql + ?Sized),
+    time: i64,
+) -> ApiResult<()> {
     let exists: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM item_groups WHERE spaceId=? AND name=?)",
         params![space, group],
