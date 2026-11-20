@@ -1,0 +1,35 @@
+# Rust migration candidate. Use a separate Compose project and volume while
+# running compatibility acceptance; do not point this at the production volume.
+name: ${DROPIT_RUST_PROJECT:-dropit-rust}
+services:
+  dropit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        DROPIT_VERSION: ${DROPIT_VERSION:-}
+        DROPIT_COMMIT: ${DROPIT_COMMIT:-}
+        DROPIT_BUILD_DATE: ${DROPIT_BUILD_DATE:-}
+    image: ${DROPIT_RUST_IMAGE:-dropit:rust-migration}
+    container_name: ${DROPIT_RUST_CONTAINER:-dropit-rust}
+    restart: unless-stopped
+    ports:
+      - "${DROPIT_RUST_BIND:-127.0.0.1}:${DROPIT_RUST_PORT:-18787}:8787"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: production
+      APP_ORIGIN: ${APP_ORIGIN:-http://127.0.0.1:18787}
+      PORT: "8787"
+      HOST: 0.0.0.0
+      DATA_DIR: /data
+      STATIC_DIR: /app/public
+      TRUST_PROXY: ${TRUST_PROXY:-loopback}
+      CLEANUP_INTERVAL_MS: ${CLEANUP_INTERVAL_MS:-60000}
+    volumes:
+      - dropit-rust-data:/data
+
+volumes:
+  dropit-rust-data:
+    name: ${DROPIT_RUST_VOLUME:-dropit-rust-data}

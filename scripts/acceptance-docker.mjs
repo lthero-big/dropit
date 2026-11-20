@@ -149,9 +149,13 @@ async function checkProduction(base, origin) {
   record('AC-G1 missing origin', missingOrigin.status === 403, `status ${missingOrigin.status}`);
   const roomResponse = await fetch(`${base}/api/rooms`, { method: 'POST', headers: { origin } });
   const room = await roomResponse.json();
-  const entropy = typeof room.token === 'string' ? Buffer.from(room.token, 'base64url').length : 0;
-  record('AC-E1 room token', roomResponse.status === 201 && entropy === 32 && room.expiresAt - Date.now() <= 24 * 3600 * 1000 + 5000,
-    `status ${roomResponse.status} bytes ${entropy}`);
+  const capability = typeof room.token === 'string' ? room.token : '';
+  const capabilityShape = /^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/.test(capability);
+  const roomCode = typeof room.code === 'string' ? room.code : '';
+  record('AC-E1 room capability', roomResponse.status === 201 && capabilityShape
+    && /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz]{6}$/.test(roomCode)
+    && room.expiresAt - Date.now() <= 24 * 3600 * 1000 + 5000,
+    `status ${roomResponse.status} capability ${capabilityShape ? 'UUID.proof' : 'invalid'} code ${roomCode}`);
   const list = await fetch(`${base}/api/rooms`);
   record('AC-E1 no room list', list.status === 404, `status ${list.status}`);
   const unknown = await fetch(`${base}/api/rooms/not-a-real-room/items`);

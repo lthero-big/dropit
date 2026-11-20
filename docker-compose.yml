@@ -10,6 +10,7 @@ services:
     # (or ./scripts/update.sh --docker, which does git pull + rebuild + restart).
     build:
       context: .
+      dockerfile: Dockerfile # Rust runtime; TS remains the fixed compatibility reference.
       args:
         DROPIT_VERSION: ${DROPIT_VERSION:-}
         DROPIT_COMMIT: ${DROPIT_COMMIT:-}

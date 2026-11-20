@@ -13,6 +13,9 @@ export interface AndroidRelease {
   sha256: string;
   size: number;
   publishedAt: string | null;
+  /** Optional policy: clients below this code must install before continuing. */
+  minVersionCode?: number;
+  force?: boolean;
 }
 
 export const ANDROID_RELEASE_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.apk$/;
@@ -26,6 +29,8 @@ export function parseAndroidRelease(raw: unknown): AndroidRelease | null {
   const { versionCode, versionName, file, sha256, size } = r;
   const notes = r.notes ?? '';
   const publishedAt = r.publishedAt ?? null;
+  const minVersionCode = r.minVersionCode;
+  const force = r.force;
   if (typeof versionCode !== 'number' || !Number.isSafeInteger(versionCode) || versionCode < 1 || versionCode > 2100000000) return null;
   if (typeof versionName !== 'string' || !/^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$/.test(versionName)) return null;
   if (typeof notes !== 'string' || notes.length > 4000) return null;
@@ -33,5 +38,8 @@ export function parseAndroidRelease(raw: unknown): AndroidRelease | null {
   if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) return null;
   if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 1 || size > MAX_APK_BYTES) return null;
   if (publishedAt !== null && (typeof publishedAt !== 'string' || publishedAt.length > 40)) return null;
-  return { versionCode, versionName, notes, file, sha256, size, publishedAt };
+  if (minVersionCode !== undefined && (typeof minVersionCode !== 'number' || !Number.isSafeInteger(minVersionCode) || minVersionCode < 1 || minVersionCode > versionCode)) return null;
+  if (force !== undefined && typeof force !== 'boolean') return null;
+  return { versionCode, versionName, notes, file, sha256, size, publishedAt,
+    ...(minVersionCode === undefined ? {} : { minVersionCode }), ...(force === undefined ? {} : { force }) };
 }

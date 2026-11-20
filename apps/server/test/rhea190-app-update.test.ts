@@ -24,13 +24,14 @@ async function fixture() {
 
 test('RHEA-190 au: manifest validation', () => {
   assert.deepEqual(parseAndroidRelease(good), good);
+  assert.deepEqual(parseAndroidRelease({ ...good, minVersionCode: 4, force: true }), { ...good, minVersionCode: 4, force: true });
   assert.equal(parseAndroidRelease({ ...good, notes: undefined })?.notes, '');
   for (const bad of [
     { ...good, versionCode: 0 }, { ...good, versionCode: 1.5 }, { ...good, versionCode: '5' },
     { ...good, versionName: '' }, { ...good, versionName: '0.3.2 beta' },
     { ...good, file: '../etc/passwd.apk' }, { ...good, file: 'x.zip' }, { ...good, file: '.hidden.apk' }, { ...good, file: 'a/b.apk' },
     { ...good, sha256: 'A'.repeat(64) }, { ...good, sha256: 'abc' }, { ...good, size: 0 }, { ...good, size: 300 * 1024 * 1024 },
-    { ...good, notes: 'x'.repeat(4001) }, null, [], 'x',
+    { ...good, notes: 'x'.repeat(4001) }, { ...good, minVersionCode: 6 }, { ...good, minVersionCode: 0 }, { ...good, force: 'yes' }, null, [], 'x',
   ]) assert.equal(parseAndroidRelease(bad), null, JSON.stringify(bad)?.slice(0, 80));
 });
 
