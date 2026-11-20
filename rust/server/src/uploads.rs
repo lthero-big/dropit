@@ -1084,10 +1084,10 @@ async fn finish_room_complete(
     let space_id = space_id.to_owned();
     let upload_id = upload.id.clone();
     let config = app.config.clone();
-    // Commit before taking the gate. A room snapshot reads the database before
-    // it acquires the same gate, so holding the gate across this write lets a
-    // connecting socket sit ahead of the commit. The gate still covers the
-    // groups / item.created publish that follows.
+    // Gate then DB, matching room text, retract, and the room snapshot. A retract
+    // cannot commit between this write and item.created. The gate drops before
+    // the caller flushes garbage.
+    let _gate = app.realtime.gate.lock().await;
     let committed = app
         .db
         .run(move |db| {
@@ -1100,7 +1100,6 @@ async fn finish_room_complete(
             Ok((item, (before != after).then_some(after)))
         })
         .await;
-    let _gate = app.realtime.gate.lock().await;
     let (item, groups) = committed?;
     // A committed group stays even when the later item insert fails. Publish it
     // before returning that error, matching resolveGroup before addItem.
@@ -1110,11 +1109,10 @@ async fn finish_room_complete(
     }
     let item = match item {
         Ok(item) => item,
-        Err(error) => {
-            drop(_gate);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
+    // Still holding the gate, after the commit and before item.created.
+    crate::realtime::test_barrier("room-complete-committed").await;
     app.realtime
         .publish(&channel, json!({ "type": "item.created", "item": item }));
     drop(_gate);
@@ -1380,8 +1378,8 @@ pub async fn complete_room(
         let _ = app.db.run(move |db| db::delete_upload(db, &id)).await;
     }
     let (item, _groups, _channel) = result?;
-    // Publish already happened under the commit gate. Flush garbage only after
-    // that gate is released so a retract cannot overtake item.created.
+    // Publish already happened inside the commit gate. Flush garbage only after
+    // that gate is released so file removal cannot sit ahead of item.created.
     drop(slot);
     let _ = flush_garbage(&app, &directory).await;
     Ok((StatusCode::CREATED, Json(json!({ "item": item }))))

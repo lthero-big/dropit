@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { connect as netConnect, createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
@@ -188,6 +189,7 @@ async function connect(server, path, cookie, token) {
       const timer = setTimeout(() => reject(new Error('WS event timeout')), 5000);
       waiters.push(value => { clearTimeout(timer); resolveNext(value); });
     }),
+    drain: () => queue.splice(0, queue.length),
   };
 }
 function hold(server, path, cookie, bytes, extraLength = 100000) {
@@ -748,7 +750,8 @@ async function reviewProbe(kind) {
     const fifth = await req(server, `${base}/items/file`, { method: 'POST', body: Buffer.from('x'), headers: { 'content-type': 'application/octet-stream', 'x-file-name': 'fifth.bin' } });
     assert.equal(fifth.status, 429, 'four held legacy uploads must occupy all slots');
     const capacity = await complete(server, room.token, upload.uploadId);
-    note(kind + '-review-capacity', { saturation: fifth.status, complete: capacity.status, code: codeOf(capacity) });
+    const capacityEvidence = { saturation: fifth.status, complete: capacity.status, code: codeOf(capacity) };
+    note(kind + '-review-capacity', capacityEvidence);
     assert.equal(lookup(data, 'SELECT id FROM uploads WHERE id=?', upload.uploadId), undefined, 'UPLOAD_BUSY must delete the session');
     for (const socket of held) socket.destroy();
     await delay(150);
@@ -765,8 +768,15 @@ async function reviewProbe(kind) {
     assert.equal(failure.status, 413);
     const state = expect(await req(server, `${groupBase}/items`), 200);
     await delay(150);
-    note(kind + '-review-failed-group', { status: failure.status, persisted: lookup(data, 'SELECT name FROM item_groups WHERE spaceId=? AND name=?', groupRoom.token.split('.')[0], 'failed-group')?.name ?? null, groupsEvents: groupEvents.filter(e => e.type === 'groups'), items: state.items.length });
+    const failedGroup = {
+      status: failure.status,
+      persisted: lookup(data, 'SELECT name FROM item_groups WHERE spaceId=? AND name=?', groupRoom.token.split('.')[0], 'failed-group')?.name ?? null,
+      groupsEvents: groupEvents.filter(event => event.type === 'groups').map(event => ({ type: event.type, groups: event.groups })),
+      items: state.items.length,
+    };
+    note(kind + '-review-failed-group', failedGroup);
     watch.ws.terminate();
+    return { capacity: capacityEvidence, failedGroup };
   } finally {
     for (const socket of held) socket.destroy();
     await stop(server);
@@ -803,18 +813,244 @@ async function snapshotProbe(kind) {
     expect(await completed, 201);
     expect(await retracted, 204);
     await delay(150);
-    note(kind + '-review-snapshot', { containsCommittedItem: snapshot.items.some(item => item.id === row.id), duplicateCreatedEvents: events.filter(event => event.type === 'item.created' && event.item.id === row.id).length, events: events.filter(event => ['item.created', 'item.deleted'].includes(event.type)).map(event => event.type), persistedAfterRetract: !!lookup(data, 'SELECT id FROM items WHERE id=?', row.id) });
+    const snapshotEvidence = {
+      containsCommittedItem: snapshot.items.some(item => item.id === row.id),
+      duplicateCreatedEvents: events.filter(event => event.type === 'item.created' && event.item.id === row.id).length,
+      events: events.filter(event => ['item.created', 'item.deleted'].includes(event.type)).map(event => event.type),
+      persistedAfterRetract: !!lookup(data, 'SELECT id FROM items WHERE id=?', row.id),
+    };
+    note(kind + '-review-snapshot', snapshotEvidence);
     watch.ws.terminate();
+    return snapshotEvidence;
   } finally { await stop(server); }
 }
 
+function assertCapacity(evidence) {
+  assert.equal(evidence.saturation, 429, 'legacy saturation must be 429');
+  assert.equal(evidence.complete, 429, 'room complete must share the upload slots');
+  assert.equal(evidence.code, 'UPLOAD_BUSY');
+}
+function assertFailedGroup(evidence) {
+  assert.equal(evidence.status, 413);
+  assert.equal(evidence.persisted, 'failed-group');
+  assert.equal(evidence.items, 0);
+  assert.equal(evidence.groupsEvents.length > 0, true, 'a committed group must be broadcast when complete fails');
+  assert.equal(evidence.groupsEvents.some(event => event.type === 'groups' && event.groups.includes('failed-group')), true);
+}
+function assertSnapshotEvidence(evidence) {
+  assert.equal(evidence.containsCommittedItem, true);
+  assert.equal(evidence.duplicateCreatedEvents, 0);
+  assert.deepEqual(evidence.events, ['item.deleted']);
+  assert.equal(evidence.persistedAfterRetract, false);
+}
+function rejectsRecordedDefect(name, check) {
+  let failed = false;
+  try { check(); } catch { failed = true; }
+  assert.equal(failed, true, name + ' assertion must reject the recorded old Rust defect');
+}
+function assertRecordedDefectsFail() {
+  rejectsRecordedDefect('capacity', () => assertCapacity({ saturation: 429, complete: 201, code: null }));
+  rejectsRecordedDefect('failed-group', () => assertFailedGroup({ status: 413, persisted: 'failed-group', groupsEvents: [], items: 0 }));
+  rejectsRecordedDefect('snapshot', () => assertSnapshotEvidence({
+    containsCommittedItem: true,
+    duplicateCreatedEvents: 1,
+    events: ['item.deleted', 'item.created'],
+    persistedAfterRetract: false,
+  }));
+}
+
+function track(promise) {
+  let finished = false;
+  const wrapped = promise.then(
+    value => { finished = true; return value; },
+    error => { finished = true; throw error; },
+  );
+  wrapped.catch(() => {});
+  return { finished: () => finished, promise: wrapped };
+}
+async function waitReached(dir, name, timeout = 10000) {
+  const path = resolve(dir, name + '.reached');
+  const start = Date.now();
+  while (!existsSync(path)) {
+    if (Date.now() - start > timeout) throw new Error('barrier not reached: ' + name);
+    await delay(10);
+  }
+}
+async function releaseBarrier(dir, name) {
+  await writeFile(resolve(dir, name + '.release'), '1');
+}
+function itemIds(data, spaceId) {
+  const db = openDb(data, true);
+  try { return db.prepare('SELECT id FROM items WHERE spaceId=? ORDER BY id').all(spaceId).map(row => row.id); }
+  finally { db.close(); }
+}
+function clientIds(snapshot, events) {
+  const ids = new Set((snapshot.items ?? []).map(item => item.id));
+  for (const event of events) {
+    if (event.type === 'item.created') ids.add(event.item.id);
+    if (event.type === 'item.deleted') ids.delete(event.id);
+  }
+  return [...ids].sort();
+}
+function assertNoCreatedAfterDeleted(events) {
+  let deleted = false;
+  for (const event of events) {
+    if (event.type === 'item.deleted') deleted = true;
+    if (deleted && event.type === 'item.created') assert.fail('item.created arrived after item.deleted');
+  }
+}
+async function openRoom(server, token, dir) {
+  const watchPromise = connect(server, `/api/rooms/${token}/ws`);
+  await waitReached(dir, 'room-snapshot-before-read');
+  const watch = await watchPromise;
+  return watch;
+}
+
+async function barrierProbe() {
+  const data = resolve(temp, 'barrier');
+  await cp(seed, data, { recursive: true });
+  const barrier = resolve(data, 'barrier');
+  await mkdir(barrier);
+  const server = await start('rust', data, { DROPIT_BARRIER_DIR: barrier });
+  try {
+    const room = await createRoom(server);
+    const spaceId = room.token.split('.')[0];
+    const seeded = expect(await req(server, `/api/rooms/${room.token}/items/text`, {
+      method: 'POST', json: { text: 'barrier-seed' },
+    }), 201).item;
+    const watch = await openRoom(server, room.token, barrier);
+    const removing = track(req(server, `/api/rooms/${room.token}/items/${seeded.id}`, { method: 'DELETE' }));
+    await delay(400);
+    assert.equal(removing.finished(), false, 'delete must not finish between the snapshot read and the gate');
+    assert.equal(lookup(data, 'SELECT id FROM items WHERE id=?', seeded.id)?.id, seeded.id);
+    await releaseBarrier(barrier, 'room-snapshot-before-read');
+    await waitReached(barrier, 'room-snapshot-after-read');
+    await delay(400);
+    assert.equal(removing.finished(), false, 'delete must stay blocked while the snapshot read holds the gate');
+    assert.equal(lookup(data, 'SELECT id FROM items WHERE id=?', seeded.id)?.id, seeded.id);
+    await releaseBarrier(barrier, 'room-snapshot-after-read');
+    const snapshot = await watch.next();
+    assert.equal(snapshot.type, 'snapshot');
+    assert.equal(snapshot.items.some(item => item.id === seeded.id), true);
+    expect(await removing.promise, 204);
+    await delay(200);
+    const deletedEvents = watch.drain();
+    const deletedTypes = deletedEvents.filter(event => event.type === 'item.created' || event.type === 'item.deleted').map(event => event.type);
+    assert.deepEqual(deletedTypes, ['item.deleted']);
+    assertNoCreatedAfterDeleted(deletedEvents);
+    assert.equal(lookup(data, 'SELECT id FROM items WHERE id=?', seeded.id), undefined);
+    assert.deepEqual(clientIds(snapshot, deletedEvents), itemIds(data, spaceId));
+    watch.ws.terminate();
+    note('rust-barrier-delete', { blockedThroughRead: true, events: deletedTypes, clientMatchesDb: true });
+  } finally {
+    await stop(server);
+  }
+
+  const writeData = resolve(temp, 'barrier-write');
+  await cp(seed, writeData, { recursive: true });
+  const writeBarrier = resolve(writeData, 'barrier');
+  await mkdir(writeBarrier);
+  const writeServer = await start('rust', writeData, { DROPIT_BARRIER_DIR: writeBarrier });
+  try {
+    const room = await createRoom(writeServer);
+    const spaceId = room.token.split('.')[0];
+    const watch = await openRoom(writeServer, room.token, writeBarrier);
+    const writing = track(req(writeServer, `/api/rooms/${room.token}/items/text`, {
+      method: 'POST', json: { text: 'barrier-write' },
+    }));
+    await delay(400);
+    assert.equal(writing.finished(), false, 'write must not finish between the snapshot read and the gate');
+    assert.equal(lookup(writeData, 'SELECT id FROM items WHERE text=?', 'barrier-write'), undefined);
+    await releaseBarrier(writeBarrier, 'room-snapshot-before-read');
+    await waitReached(writeBarrier, 'room-snapshot-after-read');
+    await delay(400);
+    assert.equal(writing.finished(), false, 'write must stay blocked while the snapshot read holds the gate');
+    assert.equal(lookup(writeData, 'SELECT id FROM items WHERE text=?', 'barrier-write'), undefined);
+    await releaseBarrier(writeBarrier, 'room-snapshot-after-read');
+    const writtenSnapshot = await watch.next();
+    const created = expect(await writing.promise, 201).item;
+    await delay(200);
+    const writtenEvents = watch.drain();
+    assert.equal(writtenSnapshot.items.some(item => item.id === created.id), false);
+    assert.equal(writtenEvents.filter(event => event.type === 'item.created' && event.item.id === created.id).length, 1);
+    assertNoCreatedAfterDeleted(writtenEvents);
+    assert.deepEqual(clientIds(writtenSnapshot, writtenEvents), itemIds(writeData, spaceId));
+    assert.equal(itemIds(writeData, spaceId).includes(created.id), true);
+    watch.ws.terminate();
+    note('rust-barrier-write', { blockedThroughRead: true, clientMatchesDb: true });
+  } finally {
+    await stop(writeServer);
+  }
+
+  const retractData = resolve(temp, 'barrier-retract');
+  await cp(seed, retractData, { recursive: true });
+  const retractBarrier = resolve(retractData, 'barrier');
+  await mkdir(retractBarrier);
+  const retractServer = await start('rust', retractData, { DROPIT_BARRIER_DIR: retractBarrier });
+  try {
+    const room = await createRoom(retractServer);
+    const spaceId = room.token.split('.')[0];
+    const watch = await openRoom(retractServer, room.token, retractBarrier);
+    await releaseBarrier(retractBarrier, 'room-snapshot-before-read');
+    await waitReached(retractBarrier, 'room-snapshot-after-read');
+    await releaseBarrier(retractBarrier, 'room-snapshot-after-read');
+    const snapshot = await watch.next();
+    assert.equal(snapshot.type, 'snapshot');
+    await watch.next();
+    const body = Buffer.from('retract-window');
+    const upload = expect(await createUpload(retractServer, room.token, body, 'retract-window.txt', 'text/plain'), 201);
+    expect(await putChunk(retractServer, room.token, upload.uploadId, 0, body), 204);
+    const completing = track(complete(retractServer, room.token, upload.uploadId));
+    await waitReached(retractBarrier, 'room-complete-committed');
+    const row = lookup(retractData, 'SELECT id FROM items WHERE filename=?', 'retract-window.txt');
+    assert.ok(row, 'the commit must be visible before item.created');
+    assert.equal(completing.finished(), false, 'complete must stay inside the publish barrier');
+    assert.equal(watch.drain().some(event => event.type === 'item.created' || event.type === 'item.deleted'), false);
+    const retracting = track(req(retractServer, `/api/rooms/${room.token}/items/${row.id}`, { method: 'DELETE' }));
+    await delay(400);
+    assert.equal(retracting.finished(), false, 'retract must not finish between commit and item.created');
+    assert.equal(lookup(retractData, 'SELECT id FROM items WHERE id=?', row.id)?.id, row.id);
+    assert.equal(watch.drain().some(event => event.type === 'item.deleted' || event.type === 'item.created'), false);
+    await releaseBarrier(retractBarrier, 'room-complete-committed');
+    expect(await completing.promise, 201);
+    expect(await retracting.promise, 204);
+    await delay(200);
+    const events = watch.drain();
+    const types = events.filter(event => event.type === 'item.created' || event.type === 'item.deleted').map(event => event.type);
+    assert.deepEqual(types, ['item.created', 'item.deleted']);
+    assertNoCreatedAfterDeleted(events);
+    assert.equal(lookup(retractData, 'SELECT id FROM items WHERE id=?', row.id), undefined);
+    assert.deepEqual(clientIds(snapshot, events), itemIds(retractData, spaceId));
+    watch.ws.terminate();
+    note('rust-barrier-retract', { blockedBetweenCommitAndBroadcast: true, events: types, clientMatchesDb: true });
+  } finally {
+    await stop(retractServer);
+  }
+}
+
 try {
-  reference = await prepare();
-  seed = resolve(temp, 'seed');
-  meta = await fixture(seed, { referenceRoot: reference });
-  for (const kind of ['ts', 'rust']) {
-    await reviewProbe(kind);
-    await snapshotProbe(kind);
+  assertRecordedDefectsFail();
+  console.log('PASS recorded old defects fail the review assertions');
+  if (process.env.RHEA243_PROBE !== 'assertions') {
+    reference = await prepare();
+    seed = resolve(temp, 'seed');
+    meta = await fixture(seed, { referenceRoot: reference });
+    if (process.env.RHEA243_PROBE !== 'barrier') {
+      const evidence = {};
+      for (const kind of ['ts', 'rust']) {
+        const reviewed = await reviewProbe(kind);
+        const snapshot = await snapshotProbe(kind);
+        assertCapacity(reviewed.capacity);
+        assertFailedGroup(reviewed.failedGroup);
+        assertSnapshotEvidence(snapshot);
+        evidence[kind] = { capacity: reviewed.capacity, failedGroup: reviewed.failedGroup, snapshot };
+      }
+      assert.deepEqual(evidence.rust.capacity, evidence.ts.capacity, 'capacity evidence diverged');
+      assert.deepEqual(evidence.rust.failedGroup, evidence.ts.failedGroup, 'failed-group evidence diverged');
+      assert.deepEqual(evidence.rust.snapshot, evidence.ts.snapshot, 'snapshot evidence diverged');
+    }
+    await barrierProbe();
+    console.log('PASS review probe assertions');
   }
 } finally {
   for (const child of processes) child.kill('SIGKILL');

@@ -613,20 +613,26 @@ Complete inserts the file in the room with userId NULL. It shares the four-slot
 upload permit with legacy uploads and returns 429 UPLOAD_BUSY when the pool is
 full, then deletes the session and releases the reservation. The permit drops
 on quota failure and cancel as well. A committed group is published even when
-the later item insert fails. The commit finishes before the realtime gate;
-groups and item.created are published while that gate is held, and garbage I/O
-runs after it is released. The room snapshot reads first, then holds the same
-gate until the snapshot is sent and the subscriber is active, so a concurrent
-created event is either inside the snapshot or dropped as pre-snapshot.
+the later item insert fails. Room complete takes the realtime gate before the
+database commit and publishes groups and item.created before releasing it.
+Garbage I/O runs after that release. The room snapshot takes the same gate,
+drains only events already queued, reads the database, then releases the gate
+before sending. A write cannot land between that read and the lock, and a
+retract cannot land between the commit and item.created. Events published
+after the gate drops stay in the socket queue and are not cleared.
 SVG prefix and raster thumbnail rules match private-space complete. A 409 from
 a complete already in progress does not delete the session. A failed complete
 after it begins does. Concurrent completes yield one 201 and one 409.
 
-The comparison is tests/room-chunks-compat.mjs, launched by tests/room_chunks.rs.
-It archives the TypeScript baseline 37ce06ebfab2cd98b81e49ce54fb24ec5daeec68 and
-runs the same HTTP and WebSocket cases against isolated TS and Rust data. On
-2026-11-19 it passed 524 responses, covering protocol and CLI/mobile request
-shapes, conflict, cancel, disconnect, concurrent complete, expiry, limits, item
-caps, session caps, chunk busy, chunk rate isolation, restart, and room
-close/reopen/delete. Thumbnail bytes are not compared; content type image/webp
-and source download bytes are.
+The comparison is tests/room-chunks-compat.mjs, launched by tests/room_chunks.rs
+together with tests/rhea243-review-probe.mjs. Both archive the TypeScript
+baseline 37ce06ebfab2cd98b81e49ce54fb24ec5daeec68 and run against isolated data.
+The probe asserts shared-slot 429 UPLOAD_BUSY, a groups broadcast after a failed
+complete, and no item.created after retract. It also sets DROPIT_BARRIER_DIR,
+a test-only rendezvous that is a no-op when unset, and holds the snapshot read
+and the commit-to-publish section while a conflicting write or retract is in
+flight. On 2026-11-19 the compatibility script passed 524 responses, covering
+protocol and CLI/mobile request shapes, conflict, cancel, disconnect, concurrent
+complete, expiry, limits, item caps, session caps, chunk busy, chunk rate
+isolation, restart, and room close/reopen/delete. Thumbnail bytes are not
+compared; content type image/webp and source download bytes are.
