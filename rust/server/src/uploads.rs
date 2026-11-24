@@ -706,7 +706,7 @@ pub async fn create_upload(
     app.limit("upload:ip", &context.ip, app.config.rate_upload)?;
     app.limit("upload:user", &auth.account.user.id, app.config.rate_upload)?;
     let body = crate::read_json(request, 8192).await?;
-    let filename = crate::input_string(body.get("filename"), 4096)?.to_owned();
+    let filename = crate::input_js_string(body.get("filename"), 4096)?.clean_filename();
     let size = json_size(body.get("size"), app.config.max_file)?;
     let mime = session_mime(body.get("mime"))?;
     let created_at = now();
@@ -715,7 +715,7 @@ pub async fn create_upload(
         space_id: space_id.clone(),
         user_id: Some(auth.account.user.id.clone()),
         principal: format!("user:{}", auth.account.user.id),
-        filename: clean_filename(&filename),
+        filename,
         mime,
         size,
         chunk_size: app.config.upload_chunk_bytes,
@@ -1197,7 +1197,7 @@ pub async fn create_room_upload(
     let room = crate::rooms::scope(&app, &context, &token).await?;
     room_write_limit(&app, &context)?;
     let body = crate::read_json(request, 8192).await?;
-    let filename = crate::input_string(body.get("filename"), 4096)?.to_owned();
+    let filename = crate::input_js_string(body.get("filename"), 4096)?.clean_filename();
     let size = json_size(body.get("size"), app.config.room_max_file)?;
     let mime = session_mime(body.get("mime"))?;
     let created_at = now();
@@ -1206,7 +1206,7 @@ pub async fn create_room_upload(
         space_id: room.id.clone(),
         user_id: None,
         principal: room_principal(&context, &room.id),
-        filename: clean_filename(&filename),
+        filename,
         mime,
         size,
         chunk_size: app.config.upload_chunk_bytes,
@@ -1483,9 +1483,9 @@ fn authorized_upload(
     Ok(upload)
 }
 
-fn json_size(value: Option<&serde_json::Value>, max_file: i64) -> ApiResult<i64> {
+fn json_size(value: Option<&crate::js::Value>, max_file: i64) -> ApiResult<i64> {
     let number = value
-        .and_then(serde_json::Value::as_f64)
+        .and_then(crate::js::Value::as_f64)
         .ok_or(ApiError::INVALID_INPUT)?;
     if number.fract() != 0.0 || !(1.0..(1_u64 << 53) as f64).contains(&number) {
         return Err(ApiError::INVALID_INPUT);
@@ -1497,7 +1497,7 @@ fn json_size(value: Option<&serde_json::Value>, max_file: i64) -> ApiResult<i64>
     Ok(size)
 }
 
-fn session_mime(value: Option<&serde_json::Value>) -> ApiResult<String> {
+fn session_mime(value: Option<&crate::js::Value>) -> ApiResult<String> {
     let raw = crate::input_string(value, 200)?;
     let mime = raw
         .split(';')

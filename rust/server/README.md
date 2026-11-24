@@ -126,11 +126,33 @@ followed by me and successful text creation followed by a snapshot, including
 nested overflow numbers. Overflow numbers in required string fields still produce
 INVALID_INPUT. Existing JSON syntax and body-limit tests remain in the suite.
 
-The review also observed a difference for a JSON string containing an unpaired
-U+D800 code unit between a and b. TS accepts that input and Rust returns
-INVALID_JSON. The full TS write/read/restart behavior for that boundary remains
-unverified and is deferred to the coordinator's complete-migration contract.
-Normal Unicode roundtrip remains covered by the process test.
+RHEA-245 now verifies the unpaired-surrogate boundary with raw HTTP JSON bytes.
+For `{"text":"a\ud800b"}`, TS returns 201 and preserves the escape in the immediate
+response and live item event. SQLite stores `61EDA08062`, which TS reads as
+`a���b` (three U+FFFDs), including after a real process restart; the recorded
+size/storedBytes remain 5. Rust now preserves these distinct boundaries for both
+private-space and room text create/PATCH, live events, snapshots and restarted
+reads. It reads existing TS-written TEXT bytes without rewriting historical rows.
+Valid surrogate pairs, private-use characters, literal escaped backslashes and
+ordinary Unicode still roundtrip.
+
+The request JSON tree retains JS strings and keys as WTF-8. Text binds those
+bytes as SQLite TEXT; stored reads decode invalid UTF-8 with the measured TS
+replacement behavior. Typed item responses/events serialize lone code units as
+JSON escapes. This avoids private-use sentinels or blanket request replacement.
+See [the internal design](tests/UNICODE-DESIGN.md) and
+[the executable evidence](tests/UNICODE-COMPAT.md).
+`cargo test --locked --test unicode -- --nocapture` runs strict TS/Rust parity
+by default; there are no ignored Unicode cases.
+
+The same boundary also covers item groups, explicit group creation/rename,
+labels/tags and account/PAT names. Group/name TEXT reads replace invalid bytes;
+tags are stored as JSON strings and retain escaped lone units on later reads.
+Snapshots and public shares serialize those tags directly instead of dropping
+them. Name/group/tag validation counts JS UTF-16 units or code points as the
+original validator requires. JSON upload filenames retain their raw TEXT bytes;
+the upload completion/locking/event code is unchanged. Crypto inputs use JS
+UTF-8 encoding (one replacement per lone unit), independently of SQLite reads.
 
 ## Run locally
 

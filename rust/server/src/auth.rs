@@ -97,15 +97,15 @@ async fn verify_password(value: String, stored: Option<String>) -> ApiResult<boo
         .map_err(ApiError::internal)?
 }
 
-fn check_password(value: Option<&Value>) -> ApiResult<String> {
-    let value = input_string(value, PASSWORD_MAX)?.to_owned();
+fn check_password(value: Option<&crate::js::Value>) -> ApiResult<String> {
+    let value = crate::input_js_string(value, PASSWORD_MAX)?.utf8();
     if value.chars().count() < PASSWORD_MIN {
         return Err(ApiError::new(400, "PASSWORD_TOO_SHORT"));
     }
     Ok(value)
 }
 
-fn email(value: Option<&Value>) -> ApiResult<String> {
+fn email(value: Option<&crate::js::Value>) -> ApiResult<String> {
     let value = input_string(value, 200)?.trim().to_lowercase();
     let valid = value.len() <= 200
         && value.split_once('@').is_some_and(|(local, host)| {
@@ -122,19 +122,34 @@ fn email(value: Option<&Value>) -> ApiResult<String> {
     valid.then_some(value).ok_or(ApiError::INVALID_INPUT)
 }
 
-fn name(value: Option<&Value>, email: &str) -> ApiResult<String> {
-    let value = match value {
-        None | Some(Value::Null) => email.split('@').next().unwrap_or(email).to_owned(),
-        Some(value) => input_string(Some(value), 80)?.to_owned(),
-    };
-    let value: String = value
-        .chars()
-        .filter(|c| *c > '\u{1f}' && *c != '\u{7f}')
-        .collect();
-    let value = value.trim().to_owned();
-    (!value.is_empty())
-        .then_some(value)
-        .ok_or(ApiError::INVALID_INPUT)
+fn person_name(value: Option<&crate::js::Value>) -> ApiResult<crate::js::JsString> {
+    value
+        .and_then(crate::js::Value::as_js_str)
+        .ok_or(ApiError::INVALID_INPUT)?
+        .clean_name()
+}
+fn name(value: Option<&crate::js::Value>, email: &str) -> ApiResult<crate::js::JsString> {
+    match value {
+        None | Some(crate::js::Value::Null) => {
+            Ok(email.split('@').next().unwrap_or(email).to_owned().into())
+        }
+        Some(crate::js::Value::String(value)) if value.is_empty() => {
+            Ok(email.split('@').next().unwrap_or(email).to_owned().into())
+        }
+        _ => person_name(value),
+    }
+}
+fn user_response(user: &db::User, name: crate::js::JsString) -> ApiResult<crate::js::Value> {
+    let mut response = crate::js::to_value(&json!({"user": user, "mustChangePassword": false}))?;
+    response
+        .as_object_mut()
+        .unwrap()
+        .get_mut("user")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .insert("name", crate::js::Value::String(name));
+    Ok(response)
 }
 
 fn browser(context: &RequestContext) -> ApiResult<Auth> {
@@ -750,6 +765,7 @@ pub async fn setup(
     let email = email(body.get("email"))?;
     let password = check_password(body.get("password"))?;
     let name = name(body.get("name"), &email)?;
+    let response_name = name.clone();
     let hash = hash_password(password).await?;
     let token = random_token()?;
     let session_hash = password::hash(&token);
@@ -774,7 +790,7 @@ pub async fn setup(
     Ok((
         StatusCode::CREATED,
         set_cookie(context.secure_cookie, &token, app.config.session / 1000),
-        Json(json!({"user": account.user, "mustChangePassword": false})),
+        Json(user_response(&account.user, response_name)?),
     ))
 }
 
@@ -791,6 +807,7 @@ pub async fn register(
     let email = email(body.get("email"))?;
     let password = check_password(body.get("password"))?;
     let name = name(body.get("name"), &email)?;
+    let response_name = name.clone();
     let invite_hash = optional_invite(body.get("invite"))?;
     let policy = registration_policy(&app).await?;
     if policy == "closed" {
@@ -822,15 +839,17 @@ pub async fn register(
     Ok((
         StatusCode::CREATED,
         set_cookie(context.secure_cookie, &token, app.config.session / 1000),
-        Json(json!({"user": account.user, "mustChangePassword": false})),
+        Json(user_response(&account.user, response_name)?),
     ))
 }
 
-fn optional_invite(value: Option<&Value>) -> ApiResult<Option<String>> {
+fn optional_invite(value: Option<&crate::js::Value>) -> ApiResult<Option<String>> {
     match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if value.is_empty() => Ok(None),
-        Some(value) => Ok(Some(password::hash(input_string(Some(value), 128)?))),
+        None | Some(crate::js::Value::Null) => Ok(None),
+        Some(crate::js::Value::String(value)) if value.is_empty() => Ok(None),
+        Some(value) => Ok(Some(password::hash(
+            &crate::input_js_string(Some(value), 128)?.utf8(),
+        ))),
     }
 }
 
@@ -937,7 +956,7 @@ pub fn bootstrap_admin(
 fn create_password_user(
     db: &mut Connection,
     email: &str,
-    name: &str,
+    name: &crate::js::JsString,
     hash: &str,
     time: i64,
     first_admin: bool,
@@ -1184,9 +1203,9 @@ pub async fn change_password(
     if let Some(stored) = stored.clone() {
         let current = body
             .get("currentPassword")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+            .and_then(crate::js::Value::as_js_str)
+            .map(crate::js::JsString::utf8)
+            .unwrap_or_default();
         if !verify_password(current.clone(), Some(stored)).await? {
             return Err(ApiError::new(400, "CURRENT_PASSWORD_INVALID"));
         }
@@ -1354,7 +1373,7 @@ pub async fn save_oauth(
     }
     let secret = body
         .get("clientSecret")
-        .and_then(Value::as_str)
+        .and_then(crate::js::Value::as_str)
         .filter(|v| !v.is_empty())
         .map(str::to_owned);
     if secret
@@ -1365,7 +1384,7 @@ pub async fn save_oauth(
     }
     let enabled = match body.get("enabled") {
         None => true,
-        Some(Value::Bool(value)) => *value,
+        Some(crate::js::Value::Bool(value)) => *value,
         Some(_) => return Err(ApiError::INVALID_INPUT),
     };
     let actor = auth.account.user.email.clone();
@@ -1496,7 +1515,7 @@ fn session_value(row: &Row<'_>, current: Option<&str>, online: bool) -> rusqlite
     let id: String = row.get("id")?;
     let session_hash: String = row.get("sessionHash")?;
     let device_id: Option<String> = row.get("deviceId")?;
-    let device_name: Option<String> = row.get("deviceName")?;
+    let device_name: Option<String> = db::optional_text(row, "deviceName")?;
     let device_kind: Option<String> = row.get("deviceKind")?;
     let device = device_id.map(|id| json!({"id": id, "name": device_name.unwrap_or_else(|| "未命名设备".into()), "kind": device_kind.unwrap_or_else(|| "pc".into())}));
     let (browser, os) = describe_agent(row.get::<_, Option<String>>("userAgent")?.as_deref());
@@ -1642,7 +1661,7 @@ pub async fn admin_revoke_session(
 fn user_view(row: &Row<'_>, quota: i64) -> rusqlite::Result<Value> {
     let providers: Option<String> = row.get("providers")?;
     Ok(json!({
-        "id": row.get::<_, String>("id")?, "email": row.get::<_, String>("email")?, "name": row.get::<_, String>("name")?,
+        "id": row.get::<_, String>("id")?, "email": row.get::<_, String>("email")?, "name": db::text(row, "name")?,
         "role": row.get::<_, String>("role")?, "disabled": row.get::<_, i64>("disabled")?,
         "pending": row.get::<_, i64>("pending")?, "createdAt": row.get::<_, i64>("createdAt")?,
         "usedBytes": row.get::<_, i64>("usedBytes")?, "quotaBytes": row.get::<_, Option<i64>>("quotaBytes")?.unwrap_or(quota),
@@ -1717,11 +1736,19 @@ pub async fn create_user(
     admin(&context)?;
     let body = read_json(request, 2048).await?;
     let email = email(body.get("email"))?;
-    let name = name(body.get("name"), &email)?;
-    let mut role = match body.get("role").and_then(Value::as_str).unwrap_or("user") {
-        "user" => "user",
-        "admin" => "admin",
-        _ => return Err(ApiError::INVALID_INPUT),
+    let name = if body.contains_key("name") {
+        person_name(body.get("name"))?
+    } else {
+        name(None, &email)?
+    };
+    let response_name = name.clone();
+    let mut role = match body.get("role") {
+        None => "user",
+        Some(value) => match value.as_str() {
+            Some("user") => "user",
+            Some("admin") => "admin",
+            _ => return Err(ApiError::INVALID_INPUT),
+        },
     };
     if env::var("ADMIN_EMAILS")
         .unwrap_or_default()
@@ -1732,26 +1759,26 @@ pub async fn create_user(
         role = "admin";
     }
     let quota = match body.get("quotaBytes") {
-        None | Some(Value::Null) => None,
-        Some(Value::Number(value)) => value
+        None | Some(crate::js::Value::Null) => None,
+        Some(crate::js::Value::Number(value)) => value
             .as_i64()
             .filter(|v| *v > 0 && *v <= 100 * (1_i64 << 30)),
         _ => None,
     };
     if body.get("quotaBytes").is_some()
-        && body.get("quotaBytes") != Some(&Value::Null)
+        && body.get("quotaBytes") != Some(&crate::js::Value::Null)
         && quota.is_none()
     {
         return Err(ApiError::INVALID_INPUT);
     }
     let temporary = body
         .get("temporaryPassword")
-        .and_then(Value::as_bool)
+        .and_then(crate::js::Value::as_bool)
         .unwrap_or(false);
     if body.get("temporaryPassword").is_some()
         && body
             .get("temporaryPassword")
-            .and_then(Value::as_bool)
+            .and_then(crate::js::Value::as_bool)
             .is_none()
     {
         return Err(ApiError::INVALID_INPUT);
@@ -1781,6 +1808,11 @@ pub async fn create_user(
             .unwrap()
             .insert("temporaryPassword".into(), temporary.into());
     }
+    let mut response = crate::js::to_value(&response)?;
+    response
+        .as_object_mut()
+        .unwrap()
+        .insert("name", crate::js::Value::String(response_name));
     Ok((StatusCode::CREATED, Json(response)))
 }
 
@@ -1792,13 +1824,14 @@ pub async fn update_user(
 ) -> ApiResult<impl IntoResponse> {
     admin(&context)?;
     let body = read_json(request, 2048).await?;
-    if !body.keys().any(|key| {
-        ["disabled", "role", "name", "quotaBytes", "inviteLimit"].contains(&key.as_str())
-    }) {
+    if !body
+        .keys()
+        .any(|key| ["disabled", "role", "name", "quotaBytes", "inviteLimit"].contains(&key))
+    {
         return Err(ApiError::INVALID_INPUT);
     }
     let name = if body.contains_key("name") {
-        Some(name(body.get("name"), "account@example.test")?)
+        Some(person_name(body.get("name"))?)
     } else {
         None
     };
@@ -1816,8 +1849,8 @@ pub async fn update_user(
         .transpose()?;
     let quota = if body.contains_key("quotaBytes") {
         match body.get("quotaBytes") {
-            Some(Value::Null) => Some(None),
-            Some(Value::Number(n))
+            Some(crate::js::Value::Null) => Some(None),
+            Some(crate::js::Value::Number(n))
                 if n.as_i64()
                     .is_some_and(|v| v > 0 && v <= 100 * (1_i64 << 30)) =>
             {
@@ -1830,8 +1863,10 @@ pub async fn update_user(
     };
     let invite_limit = if body.contains_key("inviteLimit") {
         match body.get("inviteLimit") {
-            Some(Value::Null) => Some(None),
-            Some(Value::Number(n)) if n.as_i64().is_some_and(|v| (0..=100).contains(&v)) => {
+            Some(crate::js::Value::Null) => Some(None),
+            Some(crate::js::Value::Number(n))
+                if n.as_i64().is_some_and(|v| (0..=100).contains(&v)) =>
+            {
                 Some(n.as_i64())
             }
             _ => return Err(ApiError::INVALID_INPUT),
@@ -1880,10 +1915,10 @@ pub async fn save_registration(
 ) -> ApiResult<Json<Value>> {
     let auth = admin(&context)?;
     let body = read_json(request, 1024).await?;
-    let policy = match body.get("policy").and_then(Value::as_str) {
+    let policy = match body.get("policy").and_then(crate::js::Value::as_str) {
         Some("closed") | Some("invite") | Some("open") => body
             .get("policy")
-            .and_then(Value::as_str)
+            .and_then(crate::js::Value::as_str)
             .unwrap()
             .to_owned(),
         _ => return Err(ApiError::INVALID_INPUT),
@@ -1998,11 +2033,17 @@ pub async fn create_admin_invite(
 ) -> ApiResult<impl IntoResponse> {
     let auth = admin(&context)?;
     let body = read_json(request, 2048).await?;
-    let kind = body.get("kind").and_then(Value::as_str).unwrap_or("space");
-    let max = body.get("maxUses").and_then(Value::as_i64).unwrap_or(1);
+    let kind = body
+        .get("kind")
+        .and_then(crate::js::Value::as_str)
+        .unwrap_or("space");
+    let max = body
+        .get("maxUses")
+        .and_then(crate::js::Value::as_i64)
+        .unwrap_or(1);
     let hours = body
         .get("expiresInHours")
-        .and_then(Value::as_i64)
+        .and_then(crate::js::Value::as_i64)
         .unwrap_or(if kind == "registration" { 168 } else { 24 });
     if !(1..=100).contains(&max)
         || !(1..=720).contains(&hours)
@@ -2016,8 +2057,12 @@ pub async fn create_admin_invite(
         None
     };
     let role = if kind == "space" {
-        match body.get("role").and_then(Value::as_str).unwrap_or("editor") {
-            "viewer" | "editor" => body.get("role").and_then(Value::as_str),
+        match body
+            .get("role")
+            .and_then(crate::js::Value::as_str)
+            .unwrap_or("editor")
+        {
+            "viewer" | "editor" => body.get("role").and_then(crate::js::Value::as_str),
             _ => return Err(ApiError::INVALID_INPUT),
         }
     } else {
@@ -2059,7 +2104,7 @@ pub async fn create_personal_invite(
     let max = 1;
     let hours = body
         .get("expiresInHours")
-        .and_then(Value::as_i64)
+        .and_then(crate::js::Value::as_i64)
         .unwrap_or(168);
     if !(1..=720).contains(&hours) {
         return Err(ApiError::INVALID_INPUT);

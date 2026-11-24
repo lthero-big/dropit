@@ -117,6 +117,18 @@ impl Realtime {
         self.hub.lock().unwrap().publish(space, event);
     }
 
+    pub fn publish_item(&self, space: &str, kind: &str, item: &crate::db::Item) {
+        #[derive(serde::Serialize)]
+        struct Event<'a> {
+            #[serde(rename = "type")]
+            kind: &'a str,
+            item: &'a crate::db::Item,
+        }
+        let payload =
+            serde_json::to_string(&Event { kind, item }).expect("item JSON serialization");
+        self.hub.lock().unwrap().publish_encoded(space, payload);
+    }
+
     pub fn revoke_token(&self, token_id: &str) {
         let mut hub = self.hub.lock().unwrap();
         for connection in hub.connections.values_mut() {
@@ -147,7 +159,10 @@ impl Realtime {
 
 impl Hub {
     fn publish(&mut self, space: &str, event: Value) {
-        let payload: Arc<str> = event.to_string().into();
+        self.publish_encoded(space, event.to_string());
+    }
+    fn publish_encoded(&mut self, space: &str, payload: String) {
+        let payload: Arc<str> = payload.into();
         for c in self.connections.values_mut().filter(|c| c.space == space) {
             if *c.close.borrow() {
                 continue;
