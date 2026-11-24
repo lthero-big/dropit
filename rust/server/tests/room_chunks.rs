@@ -4,6 +4,7 @@ fn room_chunk_compatibility() {
     for script in [
         "tests/room-chunks-compat.mjs",
         "tests/rhea243-review-probe.mjs",
+        "tests/review3-cleanup-probe.mjs",
     ] {
         let status = std::process::Command::new("node")
             .arg(script)

@@ -1071,7 +1071,10 @@ async fn finish_room_complete(
         .transpose()?;
     let thumb_size = thumbnail.as_ref().map(|(_, _, size)| *size).unwrap_or(0);
     let input = db::FileInput {
-        filename: upload.filename.clone(),
+        // TS sanitizes again after reading the persisted session name. A lone
+        // UTF-16 unit at the cutoff has become three replacement characters on
+        // that read, so apply the 180-unit limit to the stored-read value too.
+        filename: clean_filename(&upload.filename),
         mime: upload.mime.clone(),
         size: assembled.size as i64,
         stored_bytes: assembled.size as i64 + thumb_size,
@@ -1377,11 +1380,12 @@ pub async fn complete_room(
         let id = upload_id.clone();
         let _ = app.db.run(move |db| db::delete_upload(db, &id)).await;
     }
-    let (item, _groups, _channel) = result?;
     // Publish already happened inside the commit gate. Flush garbage only after
-    // that gate is released so file removal cannot sit ahead of item.created.
+    // that gate is released, on failure too. Keep the original business result
+    // even if garbage I/O fails; the durable queue will retry it later.
     drop(slot);
     let _ = flush_garbage(&app, &directory).await;
+    let (item, _groups, _channel) = result?;
     Ok((StatusCode::CREATED, Json(json!({ "item": item }))))
 }
 

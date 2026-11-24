@@ -647,7 +647,8 @@ a complete already in progress does not delete the session. A failed complete
 after it begins does. Concurrent completes yield one 201 and one 409.
 
 The comparison is tests/room-chunks-compat.mjs, launched by tests/room_chunks.rs
-together with tests/rhea243-review-probe.mjs. Both archive the TypeScript
+together with tests/rhea243-review-probe.mjs and tests/review3-cleanup-probe.mjs.
+All three archive the TypeScript
 baseline 37ce06ebfab2cd98b81e49ce54fb24ec5daeec68 and run against isolated data.
 The probe asserts shared-slot 429 UPLOAD_BUSY, a groups broadcast after a failed
 complete, and no item.created after retract. It also sets DROPIT_BARRIER_DIR,
@@ -658,3 +659,15 @@ protocol and CLI/mobile request shapes, conflict, cancel, disconnect, concurrent
 complete, expiry, limits, item caps, session caps, chunk busy, chunk rate
 isolation, restart, and room close/reopen/delete. Thumbnail bytes are not
 compared; content type image/webp and source download bytes are.
+
+The strict cleanup probe extends the third review's unchanged quota-cleanup
+assertion. With maintenance delayed for 24 hours on both implementations, it
+checks files, durable garbage, upload/chunk rows and quota immediately after
+thumbnail quota failure, invalid SVG/raster, incomplete upload and cancellation.
+Replacing a chunk object with a directory causes real read/unlink failures even
+under root: incomplete completion retains its 400, assembly I/O returns 500,
+and failed deletion retains a durable garbage row until an explicit retry.
+Repeated failures followed by successful chunk/legacy uploads check permit
+release. Room session filenames use the accepted JS string boundary on create,
+then sanitize the database-read value again on complete, matching TS's UTF-16
+cutoff, raw SQLite bytes and replacement characters. No schema change is needed.
