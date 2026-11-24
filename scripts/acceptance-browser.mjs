@@ -1,5 +1,5 @@
 // Headless Chrome smoke against a local dropit origin. Saves PNG evidence next to the report.
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -45,6 +45,7 @@ const chrome = spawn('google-chrome', [
   'about:blank',
 ], { stdio: ['ignore', 'pipe', 'pipe'] });
 let chromeLog = '';
+chrome.on('error', error => { chromeLog += String(error); });
 chrome.stderr.on('data', (chunk) => { chromeLog += chunk; });
 chrome.stdout.on('data', (chunk) => { chromeLog += chunk; });
 
@@ -149,6 +150,17 @@ try {
 
   await setViewport(1280, 800);
   await goto(`${target}/login`);
+  if (process.env.DROPIT_BROWSER_SETUP_ONLY === '1') {
+    const deadline = Date.now() + 8000;
+    let setup = false;
+    while (Date.now() < deadline) {
+      setup = await evaluate(`location.pathname === '/setup' && Boolean(document.querySelector('form[aria-label="创建管理员"]'))`);
+      if (setup) break;
+      await new Promise(done => setTimeout(done, 100));
+    }
+    record('AC-A1 empty installation setup', setup, 'login redirects to /setup with administrator form');
+    await shot('setup');
+  } else {
   const loginText = await evaluate('document.body.innerText');
   record('AC-I1 login', loginText.includes('dropit') && loginText.includes('用密码登录') && loginText.includes('进入临时房间'), loginText.slice(0, 120).replaceAll('\n', ' '));
   await shot('login-desktop');
@@ -174,10 +186,10 @@ try {
   let roomUrl = '';
   while (Date.now() < deadline) {
     roomUrl = await evaluate('location.pathname');
-    if (roomUrl.startsWith('/rooms/')) break;
+    if (/^\/r\/[23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz]{6}$/.test(roomUrl)) break;
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  record('AC-E1 browser room', roomUrl.startsWith('/rooms/') && roomUrl.length > '/rooms/'.length + 20, roomUrl);
+  record('AC-E1 browser room', /^\/r\/[23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz]{6}$/.test(roomUrl), roomUrl);
   const shell = await evaluate(`Boolean([...document.querySelectorAll('button')].find((node) => node.textContent.trim() === '登录'))`);
   record('AC-I1 room shell', shell === true, `login button ${shell}`);
   await setViewport(390, 844);
@@ -328,10 +340,15 @@ try {
     record('AC-I1 dark theme', Boolean(trigger) && Boolean(themeItem) && dark === true, `trigger=${Boolean(trigger)} item=${Boolean(themeItem)} dark=${dark}`);
     await shot('dark');
   }
+  }
 } finally {
   await writeFile(join(outDir, `${label}.json`), JSON.stringify(results, null, 2));
   browser?.close();
   if (chrome.exitCode === null && chrome.signalCode === null) {
+    if (process.env.MULTICA_CLI_PATH) {
+      const daemon = JSON.parse(execFileSync(process.env.MULTICA_CLI_PATH, ['daemon', 'status', '--output', 'json'], { encoding: 'utf8' }));
+      if (chrome.pid === daemon.pid) throw new Error('refusing to terminate daemon PID');
+    }
     const closed = once(chrome, 'close');
     chrome.kill('SIGTERM');
     await closed;

@@ -131,7 +131,7 @@ async function checkProduction(base, origin, containerName) {
   if (expectedCommit) {
     const versionRes = await fetch(`${base}/api/version`);
     const versionBody = await versionRes.json().catch(() => ({}));
-    record('AC-H1 build commit binding', versionRes.status === 200 && versionBody.commit === expectedCommit && versionBody.install === 'docker',
+    record('AC-H1 build commit binding', versionRes.status === 200 && versionBody.commit === expectedCommit.slice(0, 7) && versionBody.install === 'docker',
       `status ${versionRes.status} commit=${versionBody.commit ?? 'missing'} install=${versionBody.install ?? 'missing'}`);
   }
   const headers = health.headers;

@@ -18,7 +18,7 @@ assert(!out.startsWith(root + '/') && out !== root, 'keep reports outside the so
 await mkdir(out, { recursive: false }); // never overwrite evidence from another run
 const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 const commit = git('rev-parse', '--verify', revision + '^{commit}');
-const report = { commit, startedAt: new Date().toISOString(), groups: [],
+const report = { commit, finalAcceptance: 'pending parent rerun after PR #97 integration', startedAt: new Date().toISOString(), groups: [],
   limits: ['Mobile coverage is HTTP/WS protocol only; no physical phone UI.',
     'A green baseline does not accept unmerged RHEA-243 / PR #97. Parent must rerun after integration.',
     'Mock OAuth is a real local HTTP flow against a synthetic provider, not live GitHub/Google.'] };
@@ -85,7 +85,7 @@ try {
   report.image = { id: image, revision: commit, version, date, dockerfile: 'Dockerfile', context: 'git archive ' + commit };
   await save();
   // Each default Rust integration target uses the fresh binary and its own fixed TS fixture.
-  await group('rust-tests', 'cargo', ['test', '--locked', '--manifest-path', 'rust/server/Cargo.toml', '--', '--test-threads=1']);
+  await group('rust-tests', 'cargo', ['test', '--no-fail-fast', '--locked', '--manifest-path', 'rust/server/Cargo.toml', '--', '--test-threads=1']);
   await group('image-runtime', 'sh', ['scripts/check-rust-image.sh', image], { DROPIT_COMMIT: commit, DROPIT_VERSION: version, DROPIT_BUILD_DATE: date });
   await group('docker-blackbox', 'node', ['scripts/acceptance-docker.mjs', out], {
     DROPIT_IMAGE: image, DROPIT_EXPECTED_IMAGE_ID: image, DROPIT_EXPECTED_COMMIT: commit });
@@ -98,6 +98,11 @@ try {
   const port = socket.address().port;
   await new Promise(done => socket.close(done));
   const origin = 'http://127.0.0.1:' + port;
+  docker('create', '--name', name, '-p', `127.0.0.1:${port}:8787`, '-e', 'APP_ORIGIN=' + origin, '-e', 'UPDATE_CHECK=0', image);
+  containers.push(name);
+  docker('start', name);
+  await group('browser-setup', 'node', ['scripts/acceptance-browser.mjs', origin, out, 'setup'], { DROPIT_BROWSER_SETUP_ONLY: '1' });
+  docker('rm', '-fv', name); containers.pop();
   docker('create', '--name', name, '-p', `127.0.0.1:${port}:8787`, '-e', 'APP_ORIGIN=' + origin, '-e', 'UPDATE_CHECK=0', image);
   containers.push(name);
   docker('cp', data + '/.', name + ':/data');
@@ -149,6 +154,8 @@ try {
   fixedSource();
 } catch (error) { report.error = String(error); console.error(report.error); }
 finally {
+  const planned = ['dependencies', 'ts-clients', 'playwright-install', 'rust-build', 'rust-image-build', 'rust-tests', 'image-runtime', 'docker-blackbox', 'browser-setup', 'browser-smoke', 'browser-files', 'admin-fixture', 'historical-ts-image', 'volume-rehearsal'];
+  for (const name of planned) if (!report.groups.some(g => g.name === name)) report.groups.push({ name, status: 'skipped', reason: report.error ?? 'prerequisite did not complete' });
   report.cleanup = [];
   for (const name of containers.reverse()) {
     try { docker('rm', '-fv', name); report.cleanup.push({ container: name, removed: true }); }

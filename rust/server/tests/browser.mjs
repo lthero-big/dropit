@@ -1,5 +1,5 @@
 // Run the existing Web smoke against only Rust, using a TS-created schema-19 fixture.
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -45,6 +45,11 @@ try {
   const [code] = await once(smoke, 'exit');
   if (code !== 0) throw new Error('Rust browser smoke failed, exit=' + code);
 } finally {
-  if (backend && backend.exitCode === null && backend.signalCode === null) { const exit = once(backend, 'exit'); backend.kill('SIGTERM'); await exit; }
+  if (backend && backend.exitCode === null && backend.signalCode === null) {
+    if (process.env.MULTICA_CLI_PATH) {
+      const daemon = JSON.parse(execFileSync(process.env.MULTICA_CLI_PATH, ['daemon', 'status', '--output', 'json'], {encoding: 'utf8'}));
+      if (backend.pid === daemon.pid) throw new Error('refusing to terminate daemon PID');
+    }
+    const exit = once(backend, 'exit'); backend.kill('SIGTERM'); await exit; }
   await rm(data, {recursive: true, force: true});
 }
