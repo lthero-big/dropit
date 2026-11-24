@@ -23,7 +23,7 @@ Coverage is deliberately labelled:
 
 No physical mobile UI is tested. Browser OAuth is not a live provider test. Tags and sharing coverage is protocol-level where existing Web controls do not expose it. Existing integration suites can pass before RHEA-243 is merged; this never accepts its missing room-chunk/cleanup implementation. The parent must rerun the final integrated commit after #97 is accepted. This task neither replaces nor resets its exhausted 3/3 review rule.
 
-Every run removes its uniquely named containers with their anonymous volumes, unique image tags, browser profiles, generated fixtures and fresh build directory in cleanup. Reports remain; Docker build cache and downloaded dependency/browser caches remain reusable. It does not use production ports/names/volumes, push images, merge branches or deploy.
+Every run attempts cleanup of its uniquely named containers with their anonymous volumes, unique image tags, browser profiles, generated fixtures and fresh build directory in cleanup. Reports remain; Docker build cache and downloaded dependency/browser caches remain reusable. It does not use production ports/names/volumes, push images, merge branches or deploy.
 
 ## Actual execution — 2026-11-24
 
@@ -90,3 +90,54 @@ rustc 1.94.0 (4a4ef493e 2026-03-02)
 29.1.2
 Python 3.12.3
 ```
+
+## Revision after independent review 1/3 — Docker failure cleanup
+
+The reviewer reproduced a genuine leak in the original script: `docker run -d` could create the container and anonymous volume before its port binding failed, while ownership was only recorded after a successful return. The original normal-run cleanup evidence did not cover that error path.
+
+`scripts/acceptance-docker.mjs` now uses `docker create`, validates and records the returned container ID, then calls `docker start`. Cleanup acts on those exact recorded IDs. It independently attempts every removal with `Promise.allSettled`, then writes `docker.json` and `docker-cleanup.json`. Cleanup errors and report errors are retained in an AggregateError and keep the exit status nonzero. Report writing cannot bypass cleanup; one failed removal cannot bypass the other. No existing resource is deleted based on its name alone.
+
+The new real-Docker regression is part of the full entry point and can also be rerun independently:
+
+```sh
+node scripts/acceptance-docker-cleanup.mjs sha256:<immutable-rust-image-id> ../new-cleanup-report
+```
+
+It intercepts Docker CLI calls only to log real create/remove operations and deliberately reject one removal; all other operations reach the actual Docker daemon. Each case records the actual container IDs and anonymous volume names, primary command exit code, leftovers before test recovery and any test recovery. The single injected cleanup error intentionally leaves one resource for the regression harness to recover; that expected failure is never reported as successful cleanup by the primary script.
+
+| Scenario | Primary exit | Containers created | Remaining before test recovery | Test recovery | Final container/volume state |
+| --- | --- | --- | --- | --- | --- |
+| busy-prod | 1 | 1 | 0 | 0 | none remaining |
+| busy-dev | 1 | 2 | 0 | 0 | none remaining |
+| wrong-image | 1 | 1 | 0 | 0 | none remaining |
+| report-error | 1 | 2 | 0 | 0 | none remaining |
+| cleanup-error | 1 | 2 | 1 | 1 | none remaining |
+| ordinary | 1 | 2 | 0 | 0 | none remaining |
+
+All six cases passed. Busy production and development ports, wrong image ID, report write failure and ordinary assertion failure left zero owned containers and volumes without recovery. The injected removal failure attempted both removals, preserved its error in `docker-cleanup.json`, and removed the other container; the harness then recovered only the exact recorded failed ID and verified both containers and every recorded volume were absent. The original reviewer-supplied busy-port probe also passed unchanged against the new image: primary exit 1, no leaks, no reviewer recovery needed. OAuth's strict 429/Retry-After assertion remains unchanged.
+
+The new complete foreground run tested clean source `bfc784bb518f6245ce550c9b6b0969fced227d79`, binary SHA-256 `38bc78756086fff99b478de5675924c7e022d42ff75af7eac41280eb0008615c`, standard Rust image `sha256:21724d88f6083b6ba597c89ea3e16568ffd53ca43fd9c1de7d375dcdb6ca12c0` and matching full OCI revision. Interval: 2026-11-24T17:16:45.114Z to 2026-11-24T17:24:36.278Z. The following report-only commit does not change executable/test code.
+
+| Group | Result | Exit |
+| --- | --- | --- |
+| dependencies | passed | 0 |
+| ts-clients | passed | 0 |
+| playwright-install | passed | 0 |
+| rust-build | passed | 0 |
+| rust-image-build | passed | 0 |
+| rust-tests | passed | 0 |
+| image-runtime | passed | 0 |
+| docker-cleanup-regression | passed | 0 |
+| docker-blackbox | failed | 1 |
+| browser-setup | passed | 0 |
+| browser-smoke | passed | 0 |
+| browser-files | passed | 0 |
+| admin-fixture | passed | 0 |
+| historical-ts-image | passed | 0 |
+| volume-rehearsal | passed | 0 |
+
+Overall exit remains 1 (`passed=false`): 14/15 groups passed, including the added cleanup regression. Rust 17 unit tests plus all 11 process targets passed; same-image runtime, browsers (4 passed/1 original TS-only skip, setup 1/1, files 10/10) and historical upgrade/backup/restore/TS rollback passed again. Docker black-box remains 27/28, only the already documented OAuth rate-limit mismatch. The new harness neither changes backend behavior nor weakens that assertion.
+
+All three modified MJS syntax checks and diff checks passed. All run-owned resources were cleaned; post-run inventories for `dropit-accept-`, `dropit-rhea251-` containers and `dropit-rhea246-` volumes were empty. The new evidence archive contains the full manifest, all group logs, six case traces and cleanup JSON, screenshots, original reviewer-probe rerun and post-run inventory. Previous evidence and the reviewer's original failure remain historical evidence rather than being overwritten.
+
+PR #97 snapshot at this revision: `OPEN`, head `22606570603e955f5cfdda8763a082f31a94ac9c`, mergedAt `None`. Final migration acceptance remains the parent's responsibility after the backend gaps are resolved and integrated. RHEA-251 retains the original issue/assignee/stage/PR and review history 1/3; RHEA-243's stopped 3/3 rule is untouched. No main merge, external image publishing or deployment occurred.
