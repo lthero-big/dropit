@@ -87,6 +87,7 @@ try {
   // Each default Rust integration target uses the fresh binary and its own fixed TS fixture.
   await group('rust-tests', 'cargo', ['test', '--no-fail-fast', '--locked', '--manifest-path', 'rust/server/Cargo.toml', '--', '--test-threads=1']);
   await group('image-runtime', 'sh', ['scripts/check-rust-image.sh', image], { DROPIT_COMMIT: commit, DROPIT_VERSION: version, DROPIT_BUILD_DATE: date });
+  await group('docker-cleanup-regression', 'node', ['scripts/acceptance-docker-cleanup.mjs', image, join(out, 'docker-cleanup-regression')]);
   await group('docker-blackbox', 'node', ['scripts/acceptance-docker.mjs', out], {
     DROPIT_IMAGE: image, DROPIT_EXPECTED_IMAGE_ID: image, DROPIT_EXPECTED_COMMIT: commit });
   // Real browsers use the static Web and Rust runtime from this exact image.
@@ -154,7 +155,7 @@ try {
   fixedSource();
 } catch (error) { report.error = String(error); console.error(report.error); }
 finally {
-  const planned = ['dependencies', 'ts-clients', 'playwright-install', 'rust-build', 'rust-image-build', 'rust-tests', 'image-runtime', 'docker-blackbox', 'browser-setup', 'browser-smoke', 'browser-files', 'admin-fixture', 'historical-ts-image', 'volume-rehearsal'];
+  const planned = ['dependencies', 'ts-clients', 'playwright-install', 'rust-build', 'rust-image-build', 'rust-tests', 'image-runtime', 'docker-cleanup-regression', 'docker-blackbox', 'browser-setup', 'browser-smoke', 'browser-files', 'admin-fixture', 'historical-ts-image', 'volume-rehearsal'];
   for (const name of planned) if (!report.groups.some(g => g.name === name)) report.groups.push({ name, status: 'skipped', reason: report.error ?? 'prerequisite did not complete' });
   report.cleanup = [];
   for (const name of containers.reverse()) {

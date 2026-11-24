@@ -15,7 +15,7 @@ const image = process.env.DROPIT_IMAGE ?? 'dropit:acceptance';
 const expectedImageId = process.env.DROPIT_EXPECTED_IMAGE_ID?.trim() || '';
 const expectedCommit = process.env.DROPIT_EXPECTED_COMMIT?.trim() || '';
 const results = [];
-const ownedContainers = new Set();
+const ownedContainers = new Map();
 
 async function freePort() {
   const server = createServer();
@@ -93,14 +93,18 @@ function containerEnv(origin, extra, tight) {
 }
 
 async function startContainer(name, port, origin, extra, tight) {
-  const started = await run('docker', [
-    'run', '-d', '--name', name,
+  const created = await run('docker', [
+    'create', '--name', name,
     '-p', `127.0.0.1:${port}:8787`,
     ...containerEnv(origin, extra, tight),
     image,
   ]);
+  const id = created.stdout.trim();
+  if (created.code !== 0 || !/^[a-f0-9]{64}$/.test(id)) throw new Error(created.stderr || created.stdout);
+  ownedContainers.set(name, id);
+  console.log(`CONTAINER ${name} ${id}`);
+  const started = await run('docker', ['start', id]);
   if (started.code !== 0) throw new Error(started.stderr || started.stdout);
-  ownedContainers.add(name);
   if (expectedImageId) {
     const actualImage = await run('docker', ['inspect', '--format', '{{.Image}}', name]);
     if (actualImage.code !== 0 || actualImage.stdout.trim() !== expectedImageId) {
@@ -112,7 +116,7 @@ async function startContainer(name, port, origin, extra, tight) {
 
 async function stop(name) {
   if (!ownedContainers.has(name)) return;
-  const removed = await run('docker', ['rm', '-fv', name]);
+  const removed = await run('docker', ['rm', '-fv', ownedContainers.get(name)]);
   if (removed.code !== 0) throw new Error(removed.stderr);
 }
 async function mkdirReport(dir) {
@@ -306,6 +310,7 @@ const prodName = `${prefix}-prod`;
 const devName = `${prefix}-http`;
 const prodPort = Number(process.env.DROPIT_ACCEPT_PROD_PORT) || await freePort();
 const devPort = Number(process.env.DROPIT_ACCEPT_DEV_PORT) || await freePort();
+let failure;
 try {
   const prodOrigin = `https://127.0.0.1:${prodPort}`;
   const prod = await startContainer(prodName, prodPort, prodOrigin, ['NODE_ENV=production'], true);
@@ -315,18 +320,31 @@ try {
   const dev = await startContainer(devName, devPort, devOrigin, ['NODE_ENV=development'], false);
   await waitFor(dev);
   await checkDevelopment(dev);
-  const dir = process.argv[2] ?? join(tmpdir(), 'dropit-report');
-  await mkdirReport(dir);
-  await writeFile(join(dir, 'docker.json'), JSON.stringify(results, null, 2));
   console.log(`DEV_READY ${dev}`);
-  console.log(`REPORT ${join(dir, 'docker.json')}`);
+} catch (error) {
+  failure = error;
 } finally {
-  const dir = process.argv[2] ?? join(tmpdir(), 'dropit-report');
-  await mkdirReport(dir);
-  await writeFile(join(dir, 'docker.json'), JSON.stringify(results, null, 2));
-  await stop(prodName);
-  await stop(devName);
+  // Always attempt every owned ID before writing reports; neither failure may
+  // prevent other containers (and their anonymous volumes) from being removed.
+  const cleanup = await Promise.allSettled([...ownedContainers].map(async ([name, id]) => {
+    await stop(name);
+    return { name, id, removed: true };
+  }));
+  const errors = cleanup.filter(result => result.status === 'rejected').map(result => result.reason);
+  const entries = [...ownedContainers];
+  const cleanupReport = cleanup.map((result, index) => result.status === 'fulfilled'
+    ? result.value : { name: entries[index][0], id: entries[index][1], removed: false, error: String(result.reason) });
+  console.log(`CLEANUP ${JSON.stringify(cleanupReport)}`);
+  try {
+    const dir = process.argv[2] ?? join(tmpdir(), 'dropit-report');
+    await mkdirReport(dir);
+    await writeFile(join(dir, 'docker.json'), JSON.stringify(results, null, 2));
+    await writeFile(join(dir, 'docker-cleanup.json'), JSON.stringify(cleanupReport, null, 2));
+    console.log(`REPORT ${join(dir, 'docker.json')}`);
+  } catch (error) { errors.push(error); }
+  if (errors.length) failure = new AggregateError([...(failure ? [failure] : []), ...errors], 'acceptance cleanup/report failed');
 }
+if (failure) throw failure;
 
 const failed = results.filter((item) => !item.pass);
 if (failed.length) {
