@@ -337,6 +337,53 @@ data class DeviceTokenResponse(
     val token: AccessTokenInfo? = null,
 )
 
+@Serializable
+data class AuthProvidersInfo(
+    val providers: List<String> = emptyList(),
+    val password: Boolean = true,
+    val registration: String = "invite",
+    val setupRequired: Boolean = false,
+)
+
+@Serializable
+data class AppAuthUser(
+    val id: String,
+    val email: String,
+    val name: String,
+    val role: String = "user",
+) {
+    val isAdmin: Boolean get() = role == "admin"
+}
+
+@Serializable
+data class AppAuthTokenResponse(
+    @SerialName("access_token") val accessToken: String,
+    @SerialName("token_type") val tokenType: String = "Bearer",
+    val scope: String = "",
+    @SerialName("expires_in") val expiresIn: Long = 0L,
+    val user: AppAuthUser,
+    val mustChangePassword: Boolean = false,
+) {
+    val parsedScopes: Set<String>
+        get() = parseScopeString(scope)
+}
+
+@Serializable
+data class AppOAuthLinkResponse(
+    val ticket: String,
+    val state: String,
+    val path: String,
+    val url: String = "",
+    @SerialName("expires_in") val expiresIn: Int = 60,
+)
+
+fun parseScopeString(scope: String?): Set<String> =
+    scope.orEmpty()
+        .split(' ', ',')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .toSet()
+
 data class RawHttpResponse(
     val statusCode: Int,
     val body: String,

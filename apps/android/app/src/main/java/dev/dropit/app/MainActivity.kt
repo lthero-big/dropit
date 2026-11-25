@@ -38,6 +38,7 @@ class MainActivity : ComponentActivity() {
 
         if (savedInstanceState == null) {
             captureShareIntentIfNeeded(intent)
+            captureOAuthCallbackIfNeeded(intent)
         }
 
         setContent {
@@ -79,6 +80,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         captureShareIntentIfNeeded(intent)
+        captureOAuthCallbackIfNeeded(intent)
     }
 
     override fun onStart() {
@@ -101,5 +103,9 @@ class MainActivity : ComponentActivity() {
                 appContainer.shareInbox.captureIntent(snapshotIntent)
             }
         }
+    }
+
+    private fun captureOAuthCallbackIfNeeded(incomingIntent: Intent?) {
+        appContainer.oauthCallbackBus.onCallbackIntent(incomingIntent)
     }
 }

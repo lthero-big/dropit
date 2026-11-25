@@ -9,6 +9,7 @@ import dev.dropit.app.core.auth.DataStoreSettingsStore
 import dev.dropit.app.core.auth.DefaultAuthRepository
 import dev.dropit.app.core.auth.LegacyCapacitorMigrator
 import dev.dropit.app.core.auth.MigrationResult
+import dev.dropit.app.core.auth.OAuthCallbackBus
 import dev.dropit.app.core.auth.SettingsStore
 import dev.dropit.app.core.auth.TokenVault
 import dev.dropit.app.core.network.DropitApiClient
@@ -25,6 +26,8 @@ import dev.dropit.app.core.repository.RoomRepository
 import dev.dropit.app.core.repository.ShareInbox
 import dev.dropit.app.core.repository.SpaceRepository
 import dev.dropit.app.core.repository.TransferManager
+import dev.dropit.app.data.account.AccountSettingsRepository
+import dev.dropit.app.data.account.DefaultAccountSettingsRepository
 import dev.dropit.app.data.itemshare.DefaultItemShareRepository
 import dev.dropit.app.data.media.DefaultMediaRepository
 import dev.dropit.app.data.room.AndroidKeystoreRoomKeyStore
@@ -73,8 +76,18 @@ interface AppContainer {
     val itemShareRepository: ItemShareRepository
     val mediaRepository: MediaRepository
 
+    // Stage 7 OAuth deep-link callback bus & full account/admin settings repository
+    val oauthCallbackBus: OAuthCallbackBus
+        get() = FALLBACK_OAUTH_CALLBACK_BUS
+    val accountSettingsRepository: AccountSettingsRepository
+        get() = DefaultAccountSettingsRepository(apiClient = apiClient, authRepository = authRepository)
+
     suspend fun initialize(): MigrationResult
     suspend fun resetForServerSwitch()
+
+    companion object {
+        private val FALLBACK_OAUTH_CALLBACK_BUS = OAuthCallbackBus()
+    }
 }
 
 class DefaultAppContainer(context: Context) : AppContainer {
@@ -233,6 +246,17 @@ class DefaultAppContainer(context: Context) : AppContainer {
     override val itemShareRepository: ItemShareRepository get() = defaultItemShareRepository
     override val mediaRepository: MediaRepository get() = defaultMediaRepository
 
+    override val oauthCallbackBus: OAuthCallbackBus = OAuthCallbackBus()
+
+    private val defaultAccountSettingsRepository: DefaultAccountSettingsRepository by lazy {
+        DefaultAccountSettingsRepository(
+            apiClient = apiClient,
+            authRepository = authRepository,
+        )
+    }
+
+    override val accountSettingsRepository: AccountSettingsRepository get() = defaultAccountSettingsRepository
+
     override suspend fun initialize(): MigrationResult {
         val result = legacyMigrator.migrateIfNeeded()
         settingsStore.getOrCreateDeviceId()
@@ -242,6 +266,7 @@ class DefaultAppContainer(context: Context) : AppContainer {
     }
 
     override suspend fun resetForServerSwitch() {
+        oauthCallbackBus.clearPendingCallback()
         performServerSwitchReset(
             realtimeClient = realtimeClient,
             roomRepository = roomRepository,

@@ -119,6 +119,153 @@ class DropitApiClient(
         return executeRaw(request, authenticated = false, origin = origin, path = "/api/auth/device/token")
     }
 
+    suspend fun getAuthProviders(serverOrigin: String? = null): AuthProvidersInfo {
+        val origin = if (serverOrigin != null) validateOrigin(serverOrigin) else requireConfiguredOrigin()
+        val request = buildRequest(
+            origin = origin,
+            path = "/api/auth/providers",
+            method = "GET",
+            authenticated = false,
+        )
+        return executeJson(
+            request = request,
+            authenticated = false,
+            origin = origin,
+            path = "/api/auth/providers",
+            deserializer = AuthProvidersInfo.serializer(),
+        )
+    }
+
+    suspend fun appPasswordLogin(
+        serverOrigin: String,
+        email: String,
+        password: String,
+        deviceName: String? = null,
+        invite: String? = null,
+    ): AppAuthTokenResponse {
+        val origin = validateOrigin(serverOrigin)
+        val payload = buildJsonObject {
+            put("email", JsonPrimitive(email))
+            put("password", JsonPrimitive(password))
+            deviceName?.trim()?.takeIf { it.isNotEmpty() }?.let { put("deviceName", JsonPrimitive(it)) }
+            invite?.trim()?.takeIf { it.isNotEmpty() }?.let { put("invite", JsonPrimitive(it)) }
+        }
+        val request = buildRequest(
+            origin = origin,
+            path = "/api/auth/app/password/login",
+            method = "POST",
+            jsonBody = json.encodeToString(JsonObject.serializer(), payload),
+            authenticated = false,
+        )
+        return executeJson(
+            request = request,
+            authenticated = false,
+            origin = origin,
+            path = "/api/auth/app/password/login",
+            deserializer = AppAuthTokenResponse.serializer(),
+        )
+    }
+
+    suspend fun exchangeAppOAuthCode(
+        serverOrigin: String,
+        code: String,
+        deviceName: String? = null,
+    ): AppAuthTokenResponse {
+        val origin = validateOrigin(serverOrigin)
+        val payload = buildJsonObject {
+            put("code", JsonPrimitive(code))
+            deviceName?.trim()?.takeIf { it.isNotEmpty() }?.let { put("deviceName", JsonPrimitive(it)) }
+        }
+        val request = buildRequest(
+            origin = origin,
+            path = "/api/auth/app/oauth/exchange",
+            method = "POST",
+            jsonBody = json.encodeToString(JsonObject.serializer(), payload),
+            authenticated = false,
+        )
+        return executeJson(
+            request = request,
+            authenticated = false,
+            origin = origin,
+            path = "/api/auth/app/oauth/exchange",
+            deserializer = AppAuthTokenResponse.serializer(),
+        )
+    }
+
+    suspend fun requestAppOAuthLink(
+        provider: String,
+        appState: String? = null,
+    ): AppOAuthLinkResponse {
+        val cleanProvider = provider.trim().lowercase()
+        if (cleanProvider.isEmpty()) {
+            throw ApiError(
+                errorCode = ApiErrorCode.INVALID_INPUT,
+                rawCode = "INVALID_INPUT",
+                httpStatus = 400,
+                userMessage = "登录方式不能为空",
+            )
+        }
+        val origin = requireConfiguredOrigin()
+        val path = "/api/me/identities/${ServerUrl.encodeURIComponent(cleanProvider)}/app-link"
+        val payload = buildJsonObject {
+            appState?.trim()?.takeIf { it.isNotEmpty() }?.let { put("appState", JsonPrimitive(it)) }
+        }
+        val request = buildRequest(
+            origin = origin,
+            path = path,
+            method = "POST",
+            jsonBody = json.encodeToString(JsonObject.serializer(), payload),
+            authenticated = true,
+        )
+        return executeJson(
+            request = request,
+            authenticated = true,
+            origin = origin,
+            path = path,
+            deserializer = AppOAuthLinkResponse.serializer(),
+        )
+    }
+
+    fun buildAppOAuthLoginUrl(
+        serverOrigin: String,
+        provider: String,
+        appState: String,
+        deviceName: String? = null,
+        invite: String? = null,
+    ): String {
+        val origin = validateOrigin(serverOrigin)
+        val cleanProvider = provider.trim().lowercase()
+        require(cleanProvider.isNotEmpty()) { "OAuth provider must not be blank" }
+        val params = buildList {
+            add("app_redirect=${ServerUrl.encodeURIComponent(APP_OAUTH_REDIRECT_URI)}")
+            add("app_state=${ServerUrl.encodeURIComponent(appState)}")
+            deviceName?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                add("device_name=${ServerUrl.encodeURIComponent(it)}")
+            }
+            invite?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                add("invite=${ServerUrl.encodeURIComponent(it)}")
+            }
+        }
+        return "$origin/api/auth/${ServerUrl.encodeURIComponent(cleanProvider)}?${params.joinToString("&")}"
+    }
+
+    suspend fun buildApiRequest(
+        path: String,
+        method: String,
+        jsonBody: String? = null,
+        authenticated: Boolean = true,
+        serverOriginOverride: String? = null,
+    ): Request {
+        val origin = if (serverOriginOverride != null) validateOrigin(serverOriginOverride) else requireConfiguredOrigin()
+        return buildRequest(
+            origin = origin,
+            path = path,
+            method = method,
+            jsonBody = jsonBody,
+            authenticated = authenticated,
+        )
+    }
+
     suspend fun logout() {
         val origin = requireConfiguredOrigin()
         val request = buildRequest(
@@ -442,6 +589,7 @@ class DropitApiClient(
     }
 
     companion object {
+        const val APP_OAUTH_REDIRECT_URI = "dropit://auth/callback"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val EMPTY_BODY = ByteArray(0).toRequestBody(null)
 
