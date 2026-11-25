@@ -30,11 +30,12 @@
 | 账号 | 邮箱 + 密码（scrypt）与 GitHub / Google OAuth、首次运行 /setup 初始化码、注册策略（关闭 / 仅邀请 / 开放）、管理员重置密码、个人访问令牌、设备码登录 |
 | 管理 | 用户、邀请、令牌、登录设备、运行时限额（即时生效 + 审计）、新版本提示 |
 | 命令行 | `dropit` CLI：发送、上传、下载、分享、`watch` 实时监听、临时房间 |
+| Android 原生客户端 | Kotlin + Jetpack Compose 原生客户端：系统分享确认面板、并行分片断点续传、图片灯箱与音视频在线播放、临时房间、应用内自托管更新（[GitHub Releases](https://github.com/lthero-big/dropit/releases) 下载 APK） |
 | 运维 | 单进程 Node + SQLite（WAL）+ 本地磁盘；单 Docker 镜像；`/healthz` |
 
 ## 截图
 
-> 截图全部来自一个只填充了虚构示例数据的临时实例（`demo@example.com`、示例文件与房间），不含任何真实数据；可用 [`scripts/screenshots.mjs`](scripts/screenshots.mjs) 一键重新生成，说明见 [`docs/screenshots/`](docs/screenshots/)。
+> 截图全部来自虚构示例数据（`demo@example.com`、示例文本 / 图片 / 文件与临时房间），不含任何真实数据；网页端可用 [`scripts/screenshots.mjs`](scripts/screenshots.mjs) 一键重新生成，Android 原生客户端可用 Compose 无头截图套件自动生成，说明见 [`docs/screenshots/`](docs/screenshots/)。
 
 <table>
   <tr>
@@ -59,12 +60,25 @@
   </tr>
 </table>
 
+### Android 原生客户端
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/android-board-light.png" alt="Android 原生剪贴板（纸感浅色）" width="205" /><br /><sub>主剪贴板（纸感浅色）：文本、文件与图片卡片、置顶与分组</sub></td>
+    <td align="center"><img src="docs/screenshots/android-board-dark.png" alt="Android 原生剪贴板（纸感深色）" width="205" /><br /><sub>主剪贴板（纸感深色）：同步纸感配色与实时在线状态</sub></td>
+    <td align="center"><img src="docs/screenshots/android-share-sheet.png" alt="Android 系统分享确认面板" width="205" /><br /><sub>系统分享确认面板：跨应用多文件/文本选空间与分组发送</sub></td>
+    <td align="center"><img src="docs/screenshots/android-transfers.png" alt="Android 原生传输队列" width="205" /><br /><sub>原生传输队列：并行分片上传/下载、实时速度与断点续传</sub></td>
+  </tr>
+</table>
+
+<details>
+<summary>手机浏览器 Web 端截图（移动网页适配）</summary>
 <p align="center">
-  <img src="docs/screenshots/mobile-board.png" alt="手机端剪贴板（浅色）" width="240" />
-  <img src="docs/screenshots/mobile-board-dark.png" alt="手机端剪贴板（深色）" width="240" />
-  <img src="docs/screenshots/mobile-room.png" alt="手机端临时房间" width="240" />
-  <br /><sub>手机端：浅色 / 深色剪贴板与临时房间</sub>
+  <img src="docs/screenshots/mobile-board.png" alt="手机浏览器剪贴板（浅色）" width="220" />
+  <img src="docs/screenshots/mobile-board-dark.png" alt="手机浏览器剪贴板（深色）" width="220" />
+  <img src="docs/screenshots/mobile-room.png" alt="手机浏览器临时房间" width="220" />
 </p>
+</details>
 
 ## 快速开始
 
@@ -127,6 +141,13 @@ dropit login --url https://dropit.example.com
 ```
 
 发布之前可以从源码安装：`pnpm install && pnpm --filter @lthero-big/dropit-cli build && npm install -g ./apps/cli`。详见 [命令行](https://lthero-big.github.io/dropit/start/cli/)。
+
+### Android 原生客户端
+
+原生 Android 客户端使用 Kotlin + Jetpack Compose 编写，支持系统「分享到 dropit」确认面板、WorkManager 并行分片断点续传、图片灯箱与音视频在线播放、临时房间以及应用内自托管更新。
+
+- **下载安装包**：前往 [GitHub Releases](https://github.com/lthero-big/dropit/releases) 下载最新版本的签名 `.apk`（附 `.sha256` 校验文件），安装后输入自托管服务端地址并按提示完成设备码登录即可使用。
+- **源码位置**：[`apps/android/`](apps/android/)。
 
 ## 文档
 

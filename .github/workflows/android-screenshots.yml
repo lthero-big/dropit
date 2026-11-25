@@ -1,0 +1,140 @@
+name: Android Native Screenshots
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "apps/android/**"
+      - ".github/workflows/android-screenshots.yml"
+      - "docs/screenshots/android-*.png"
+permissions:
+  contents: read
+concurrency:
+  group: android-screenshots-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  android-screenshots:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-home-cache-cleanup: true
+      - name: Install CJK system fonts and PNG optimizer
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk pngquant python3-pil
+      - name: Cache Noto Sans CJK SC standalone OTF fonts
+        id: cjk-font-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/dropit-cjk-fonts
+          key: noto-sans-cjk-sc-otf-v1
+      - name: Download Noto Sans CJK SC OTF fonts (Regular / Medium / Bold)
+        if: steps.cjk-font-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.cache/dropit-cjk-fonts
+          BASE_URL="https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese"
+          for name in NotoSansCJKsc-Regular.otf NotoSansCJKsc-Medium.otf NotoSansCJKsc-Bold.otf; do
+            curl -fsSL --retry 3 "$BASE_URL/$name" -o "$HOME/.cache/dropit-cjk-fonts/$name"
+          done
+          ls -lh ~/.cache/dropit-cjk-fonts
+      - name: Render native Android Compose demo screenshots
+        working-directory: apps/android
+        run: |
+          set -euo pipefail
+          OUT_DIR="$PWD/out/screenshots"
+          rm -rf "$OUT_DIR"
+          mkdir -p "$OUT_DIR"
+          chmod +x gradlew
+          DROPIT_RUN_SCREENSHOT_TESTS=1 \
+          DROPIT_REQUIRE_CJK_FONT=1 \
+          DROPIT_SCREENSHOT_FONT_DIR="$HOME/.cache/dropit-cjk-fonts" \
+          DROPIT_SCREENSHOT_OUT_DIR="$OUT_DIR" \
+          ./gradlew :app:recordRoborazziDebug \
+            --tests "dev.dropit.app.screenshots.AndroidDemoScreenshotsTest" \
+            --no-daemon
+      - name: Compress and validate rendered PNGs
+        run: |
+          set -euo pipefail
+          OUT_DIR="apps/android/out/screenshots"
+          EXPECTED=(
+            "android-board-light.png"
+            "android-board-dark.png"
+            "android-share-sheet.png"
+            "android-transfers.png"
+          )
+
+          for name in "${EXPECTED[@]}"; do
+            file="$OUT_DIR/$name"
+            if [ ! -s "$file" ]; then
+              echo "Missing or empty rendered screenshot: $file" >&2
+              exit 1
+            fi
+          done
+
+          pngquant --force --skip-if-larger --quality 75-95 --ext .png "$OUT_DIR"/android-*.png || true
+
+          python3 - "$OUT_DIR" "${EXPECTED[@]}" <<'PY'
+          import os, sys
+          from PIL import Image
+
+          out_dir = sys.argv[1]
+          names = sys.argv[2:]
+          for name in names:
+              path = os.path.join(out_dir, name)
+              size = os.path.getsize(path)
+              with Image.open(path) as img:
+                  w, h = img.size
+                  rgb = img.convert("RGB")
+                  colors = rgb.getcolors(maxcolors=256 * 256)
+                  distinct = len(colors) if colors is not None else 65536
+                  print(f"{name}: {w}x{h}, {size} bytes, distinct_colors>={distinct}")
+                  assert w >= 800 and h >= 1600, f"Unexpected dimensions for {name}: {w}x{h}"
+                  assert distinct >= 16, f"Screenshot appears blank/uniform: {name} ({distinct} colors)"
+          PY
+          ls -lh "$OUT_DIR"
+      - name: Verify committed docs screenshots and markdown links
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re
+          from PIL import Image
+
+          expected = [
+              "docs/screenshots/android-board-light.png",
+              "docs/screenshots/android-board-dark.png",
+              "docs/screenshots/android-share-sheet.png",
+              "docs/screenshots/android-transfers.png",
+          ]
+          for path in expected:
+              assert os.path.isfile(path), f"Missing committed screenshot: {path}"
+              with Image.open(path) as img:
+                  w, h = img.size
+                  assert w >= 800 and h >= 1600, f"Unexpected dimensions for {path}: {w}x{h}"
+
+          readme = open("README.md", encoding="utf-8").read()
+          for path in expected:
+              assert path in readme, f"README.md missing reference to {path}"
+          assert "https://github.com/lthero-big/dropit/releases" in readme, "README.md missing GitHub Releases link"
+
+          shots_readme = open("docs/screenshots/README.md", encoding="utf-8").read()
+          for path in expected:
+              base = os.path.basename(path)
+              assert base in shots_readme, f"docs/screenshots/README.md missing {base}"
+
+          for m in re.finditer(r'src="(docs/screenshots/[^"]+)"', readme):
+              target = m.group(1)
+              assert os.path.isfile(target), f"Broken screenshot link in README.md: {target}"
+
+          print("All committed Android screenshots and README links verified.")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dropit-android-screenshots
+          path: apps/android/out/screenshots/android-*.png
+          retention-days: 30

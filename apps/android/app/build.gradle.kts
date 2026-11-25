@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.roborazzi)
 }
 
 fun escapeBuildConfig(raw: String): String =
@@ -81,6 +82,10 @@ android {
     testOptions {
         unitTests {
             isReturnDefaultValues = true
+            isIncludeAndroidResources = true
+            all {
+                it.systemProperties["robolectric.pixelCopyRenderMode"] = "hardware"
+            }
         }
     }
 
@@ -92,11 +97,13 @@ android {
 }
 
 tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
-    // Track live-server regression env vars so Gradle never serves a stale offline test cache
-    // when running RealServerProtocolRegressionTest against a local dropit server.
+    // Track live-server regression & screenshot env vars so Gradle never serves a stale cache.
     inputs.property("dropitLiveServerUrl", System.getenv("DROPIT_LIVE_SERVER_URL") ?: "")
     inputs.property("dropitRequireLiveServer", System.getenv("DROPIT_REQUIRE_LIVE_SERVER") ?: "")
     inputs.property("dropitLiveExpectedUpdateSha256", System.getenv("DROPIT_LIVE_EXPECTED_UPDATE_SHA256") ?: "")
+    inputs.property("dropitRunScreenshotTests", System.getenv("DROPIT_RUN_SCREENSHOT_TESTS") ?: "")
+    inputs.property("dropitScreenshotOutDir", System.getenv("DROPIT_SCREENSHOT_OUT_DIR") ?: "")
+    inputs.property("dropitScreenshotFontDir", System.getenv("DROPIT_SCREENSHOT_FONT_DIR") ?: "")
 }
 
 dependencies {
@@ -115,6 +122,7 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.extended)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.datastore.preferences)
@@ -139,4 +147,11 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    testImplementation(libs.androidx.test.ext.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.compose)
+    testImplementation(libs.roborazzi.junit.rule)
 }

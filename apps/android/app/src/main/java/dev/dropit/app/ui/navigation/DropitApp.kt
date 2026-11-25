@@ -304,72 +304,12 @@ private fun DropitMainScaffold(
             containerColor = colors.bg,
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             bottomBar = {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    HorizontalDivider(thickness = 1.dp, color = colors.line1)
-                    NavigationBar(
-                        containerColor = colors.surface0,
-                        contentColor = colors.fg,
-                        tonalElevation = 0.dp,
-                    ) {
-                        MainTab.entries.forEach { tab ->
-                            val selected = selectedTab == tab
-                            NavigationBarItem(
-                                selected = selected,
-                                onClick = { selectedTab = tab },
-                                icon = {
-                                    if (tab == MainTab.TRANSFERS &&
-                                        (rootState.activeTransferCount > 0 || rootState.failedTransferCount > 0)
-                                    ) {
-                                        BadgedBox(
-                                            badge = {
-                                                Badge(
-                                                    containerColor = colors.brand,
-                                                    contentColor = colors.brandFg,
-                                                ) {
-                                                    val badgeText = when {
-                                                        rootState.activeTransferCount > 99 -> "99+"
-                                                        rootState.activeTransferCount > 0 -> rootState.activeTransferCount.toString()
-                                                        else -> "!"
-                                                    }
-                                                    Text(
-                                                        text = badgeText,
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                    )
-                                                }
-                                            },
-                                        ) {
-                                            Icon(
-                                                imageVector = tab.icon,
-                                                contentDescription = tab.label,
-                                            )
-                                        }
-                                    } else {
-                                        Icon(
-                                            imageVector = tab.icon,
-                                            contentDescription = tab.label,
-                                        )
-                                    }
-                                },
-                                label = {
-                                    Text(
-                                        text = tab.label,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        maxLines = 1,
-                                        softWrap = false,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                },
-                                colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = colors.brand,
-                                    selectedTextColor = colors.fg,
-                                    indicatorColor = colors.surface2,
-                                    unselectedIconColor = colors.fg3,
-                                    unselectedTextColor = colors.fg3,
-                                ),
-                            )
-                        }
-                    }
-                }
+                DropitBottomBar(
+                    selectedTab = selectedTab,
+                    activeTransferCount = rootState.activeTransferCount,
+                    failedTransferCount = rootState.failedTransferCount,
+                    onSelectTab = { selectedTab = it },
+                )
             },
         ) { innerPadding ->
             Box(
@@ -524,6 +464,82 @@ private fun DropitMainScaffold(
                 onSkipVersion = settingsViewModel::skipPromptedVersion,
                 onDismiss = settingsViewModel::dismissUpdateDialog,
             )
+        }
+    }
+}
+
+@Composable
+internal fun DropitBottomBar(
+    selectedTab: MainTab,
+    activeTransferCount: Int,
+    failedTransferCount: Int,
+    onSelectTab: (MainTab) -> Unit,
+) {
+    val colors = DropitTheme.colors
+    Column(modifier = Modifier.fillMaxWidth()) {
+        HorizontalDivider(thickness = 1.dp, color = colors.line1)
+        NavigationBar(
+            containerColor = colors.surface0,
+            contentColor = colors.fg,
+            tonalElevation = 0.dp,
+        ) {
+            MainTab.entries.forEach { tab ->
+                val selected = selectedTab == tab
+                NavigationBarItem(
+                    selected = selected,
+                    onClick = { onSelectTab(tab) },
+                    icon = {
+                        if (tab == MainTab.TRANSFERS &&
+                            (activeTransferCount > 0 || failedTransferCount > 0)
+                        ) {
+                            BadgedBox(
+                                badge = {
+                                    Badge(
+                                        containerColor = colors.brand,
+                                        contentColor = colors.brandFg,
+                                    ) {
+                                        val badgeText = when {
+                                            activeTransferCount > 99 -> "99+"
+                                            activeTransferCount > 0 -> activeTransferCount.toString()
+                                            else -> "!"
+                                        }
+                                        Text(
+                                            text = badgeText,
+                                            style = MaterialTheme.typography.labelSmall,
+                                        )
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    imageVector = tab.icon,
+                                    contentDescription = tab.label,
+                                )
+                            }
+                        } else {
+                            Icon(
+                                imageVector = tab.icon,
+                                contentDescription = tab.label,
+                            )
+                        }
+                    },
+                    label = {
+                        Text(
+                            text = tab.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = colors.brand,
+                        selectedTextColor = colors.fg,
+                        indicatorColor = colors.surface2,
+                        unselectedIconColor = colors.fg3,
+                        unselectedTextColor = colors.fg3,
+                    ),
+                )
+            }
         }
     }
 }
