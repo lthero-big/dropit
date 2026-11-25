@@ -30,20 +30,60 @@
 自 `0.4.0 (code 6)` 起，默认 Android 构建与发布流水线正式切换至原生工作流：
 
 - **默认构建与发布：`.github/workflows/android-native.yml`（`Android Native APK`）**
-  - 触发条件：`workflow_dispatch`、`push` 到 `main`（改动 `apps/android/**`、工作流本身或 `scripts/publish-android-apk.mjs`）以及对应路径的 `pull_request`。
-  - 自动化验证步骤：
-    1. 在 GitHub Actions Runner 本地构建并启动真实 `@dropit/server` 实例（`127.0.0.1:18787`，独立临时 `DATA_DIR`，不碰任何线上环境），通过 `scripts/publish-android-apk.mjs` 预发布测试更新包（`code 7 / 0.4.1`）。
-    2. 携带 `DROPIT_REQUIRE_LIVE_SERVER=1` 执行 `./gradlew testDebugUnitTest assembleDebug --no-daemon`，运行全量单元测试与真实服务端端到端协议回归套件（`RealServerProtocolRegressionTest`、`ProtocolContractRegressionTest` 等）。
-    3. 解码仓库 Secret `ANDROID_KEYSTORE_B64` / `ANDROID_KEYSTORE_PASSWORD` 写入临时 PKCS12 密钥库 `DROPIT_KEYSTORE` 并签名 APK（若为无 Secret 的 Fork PR，自动回退默认 debug 密钥，并在 Summary 明确标注 `default-debug-keystore`）。
-    4. 按规范输出 `dropit-android-<version>-<short>.apk` 与 `dropit-android-<version>-<short>.apk.sha256`，运行 `apksigner verify --print-certs` 校验签名并在 Job Summary 输出 APK SHA-256 与签名证书 SHA-256 指纹。
-    5. 使用真实构建出的 APK 对 `scripts/publish-android-apk.mjs` 执行兼容性烟雾校验（核对生成的 `latest.json` 中 `versionCode`、`versionName`、`size`、`sha256`、`file` 完全一致）。
-    6. 上传 artifact `dropit-android-apk`（保留 30 天）。
+  - 触发条件：
+    - `push` 到 `main`（改动 `apps/android/**`、`.github/workflows/android-native.yml` 或 `scripts/publish-android-apk.mjs`）以及对应路径的 `pull_request`（仅执行构建/测试并产出 Artifact，自动跳过 Release 发布）。
+    - `push` 匹配 `android-v*` 的版本 Tag（如 `android-v0.4.0`；GitHub Actions 对 Tag 推送不应用路径过滤，直接触发构建与自动发布 GitHub Release）。
+    - `workflow_dispatch` 手动触发：提供可选布尔输入 `publish_release`（默认 `false` 仅产出 Artifact；勾选为 `true` 时按当前分支 `versionName` 发布或更新对应 `android-v<versionName>` GitHub Release）。
+  - 最小权限双 Job 架构：
+    1. **`android-native` Job（`permissions: contents: read`）**：
+       - 解析 `apps/android/app/build.gradle.kts` 中的 `versionName` 与 `versionCode`；若为 `refs/tags/android-v*` 触发，立即校验 Tag 去掉 `android-v` 前缀后必须严格等于 `versionName`，不匹配直接报错退出。
+       - 解码仓库 Secret `ANDROID_KEYSTORE_B64` / `ANDROID_KEYSTORE_PASSWORD` 写入临时 PKCS12 密钥库 `DROPIT_KEYSTORE` 并签名 APK（普通 PR / 非发布构建缺少 Secret 时回退默认 debug 密钥并标注 `default-debug-keystore`；**触发正式发布时若缺少 `ANDROID_KEYSTORE_B64` 直接报错终止，拒绝使用临时 debug 密钥**）。
+       - 在 GitHub Actions Runner 本地构建并启动真实 `@dropit/server` 实例（`127.0.0.1:18787`，独立临时 `DATA_DIR`，不碰任何线上环境），通过 `scripts/publish-android-apk.mjs` 预发布测试更新包（`code 7 / 0.4.1`）。
+       - 携带 `DROPIT_REQUIRE_LIVE_SERVER=1` 执行 `./gradlew testDebugUnitTest assembleDebug --no-daemon`，运行全量单元测试与真实服务端端到端协议回归套件（`RealServerProtocolRegressionTest`、`ProtocolContractRegressionTest` 等）。
+       - 按规范输出 `dropit-android-<version>-<short>.apk` 与 `dropit-android-<version>-<short>.apk.sha256`，运行 `apksigner verify --print-certs` 校验签名并在 Job Summary 输出 APK SHA-256 与签名证书 SHA-256 指纹（发布构建强制要求产出合法 64 位 SHA-256 指纹）。
+       - 使用真实构建出的 APK 对 `scripts/publish-android-apk.mjs` 执行兼容性烟雾校验（核对生成的 `latest.json` 中 `versionCode`、`versionName`、`size`、`sha256`、`file` 完全一致）。
+       - 上传 artifact `dropit-android-apk`（保留 30 天）并将构建元数据通过 Job Outputs 传递至下游。
+    2. **`release` Job（`needs: android-native`，`permissions: contents: write`）**：
+       - 仅当 `startsWith(github.ref, 'refs/tags/android-v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true)` 且 `android-native` 全部通过时运行；普通 PR、日常 `main` 推送及 `publish_release=false` 时自动跳过。
+       - 独立复核固定签名门禁（`signing_mode == release-keystore` 且证书指纹合法）、下载 `dropit-android-apk` 产物并执行 `sha256sum -c` 与构建哈希二次比对，随后通过 `gh release` 幂等创建或更新 `android-v<versionName>` GitHub Release。
 - **旧版回滚专用：`.github/workflows/android.yml`（`Android Legacy APK (Capacitor Rollback)`）**
   - 仅用于 `mobile/**` 维护或紧急回滚构建旧版 Capacitor APK，产物名为 `dropit-android-legacy-debug-apk`，与原生 `dropit-android-apk` 严格隔离，不会在修改 `apps/android/**` 时重复触发。
 
-### 2.2 本地 / 发布前签名与完整性核对
+### 2.2 通过 `android-v*` Tag / `workflow_dispatch` 自动发布 GitHub Release
 
-下载 GitHub Actions 产物 `dropit-android-apk`（包含 `.apk` 与 `.apk.sha256`）后，在发布到服务端前执行以下校验：
+#### 方式一：推送 `android-v*` 版本 Tag（推荐，标准发版流程）
+
+1. 在 `main` 分支确认 `apps/android/app/build.gradle.kts` 中的 `versionCode`（严格递增）与 `versionName`（例如 `"0.4.0"`）已合入并通过 PR CI。
+2. 基于目标 `main` 提交创建并推送对应版本 Tag（Tag 去掉 `android-v` 前缀后必须与 `versionName` 完全一致）：
+   ```bash
+   git checkout main && git pull --ff-only origin main
+   git tag -a android-v0.4.0 -m "dropit Android v0.4.0 (code 6)"
+   git push origin android-v0.4.0
+   ```
+3. `.github/workflows/android-native.yml` 自动运行：
+   - 先校验 `android-v0.4.0` 与 `versionName = "0.4.0"` 一致且 `ANDROID_KEYSTORE_B64` 存在；
+   - 跑完单测、真实服务端协议回归与 APK 构建签名；
+   - 由 `release` Job 验证 `sha256sum -c` 后自动创建（或更新）Release `dropit Android v0.4.0 (code 6)`，挂载 `dropit-android-0.4.0-<short>.apk` 与 `.apk.sha256`。
+
+#### 方式二：通过 `workflow_dispatch` 手动开关发布
+
+适用于未提前推 Tag 或需要重新生成/更新同一版本 Release 的场景：
+
+1. 在 GitHub 仓库打开 **Actions → Android Native APK → Run workflow**，选择目标分支（通常为 `main`）。
+2. 将 **`publish_release`** 勾选为 `true` 并触发运行（也可通过 CLI：`gh workflow run android-native.yml --ref main -f publish_release=true`）。
+3. 工作流完成构建校验后，自动按该分支 `apps/android/app/build.gradle.kts` 中的 `versionName` 创建或更新 `android-v<versionName>` Release（若 Tag 尚不存在，GitHub 会自动在当前构建 Commit 上创建该 Tag）。
+4. 若保持 `publish_release` 默认值 `false`，则仅执行测试构建并上传 Actions Artifact，跳过 `release` Job。
+
+#### 签名安全门禁与幂等发布规则
+
+- **硬性签名门禁（双重校验）**：`android-native` 与 `release` 两个 Job 均独立校验发布构建必须使用 `ANDROID_KEYSTORE_B64` 固定发布密钥（`signing_mode = release-keystore`）且通过 `apksigner verify --print-certs` 获取合法的 64 位签名证书 SHA-256 指纹；任何回退到 `default-debug-keystore` 的构建均会被拒绝发布到 GitHub Releases，防止破坏已有用户的覆盖升级签名链。
+- **幂等更新与旧附件清理**：若同名 `android-v<versionName>` Release 已存在，工作流不会报错失败，而是以 `--clobber` 上传新 `.apk` 与 `.apk.sha256`、更新标题与 Release Notes，并自动删除该 Release 下来自旧 Commit 的历史 `dropit-android-*.apk` / `.sha256` 附件。
+- **Pre-release 自动识别**：当 `versionName` 包含连字符（如 `0.4.1-rc.1`）时，自动附带 `--prerelease` 标记，避免抢占正式版 Latest。
+- **防并发误取消**：发布触发（`refs/tags/android-v*` 或 `publish_release=true`）禁用 `cancel-in-progress`，且 `workflow_dispatch` 发布使用独立并发分组，避免被日常 `main` 推送打断。
+
+### 2.3 本地 / 发布前签名与完整性核对
+
+从 GitHub Release（推荐）或 GitHub Actions Artifact `dropit-android-apk` 下载 `.apk` 与 `.apk.sha256` 后，在发布到自托管服务端前执行以下校验：
 
 ```bash
 # 1. 校验 APK 文件 SHA-256 与 CI 输出完全一致
@@ -108,13 +148,29 @@ aapt2 dump badging dropit-android-0.4.0-<short>.apk | grep -E "package:|sdkVersi
 
 ---
 
-## 4. 服务端自托管发布命令示例
+## 4. 服务端自托管发布与 GitHub Release 协同流程
 
-服务端通过 `/api/app/android/latest` 与 `/api/app/android/download/<file>.apk` 向客户端分发更新（详见 `apps/server/src/app-release.ts` 与 `scripts/publish-android-apk.mjs`）。脚本会原子写入 `latest.json`（含 `versionCode`、`versionName`、`notes`、`file`、`sha256`、`size`、`publishedAt`）并自动清理同目录下的旧版 `.apk`。
+dropit Android 原生客户端提供两套互补的分发渠道，二者共用同一份由 CI 固定密钥（`ANDROID_KEYSTORE_B64`）签名的 APK：
+
+| 分发渠道 | 职责与适用场景 | 触发/维护方式 |
+| --- | --- | --- |
+| **GitHub Releases**（`android-v*`） | 公开下载入口、历史版本归档、附带完整校验信息与 `.apk.sha256` | 推送 `android-v<versionName>` Tag 或 `workflow_dispatch`（`publish_release=true`）自动发布 |
+| **服务端自托管应用内更新**（`/api/app/android/latest` 与 `/api/app/android/download/<file>.apk`） | 已安装客户端「设置 → 检查更新」直连拉取与 SHA-256 校验安装 | 管理员下载同一份 Release APK，执行 `scripts/publish-android-apk.mjs` 发布到服务端数据目录 |
+
+### 4.1 推荐协同发版步骤（GitHub Release → 自托管应用内更新）
+
+1. **自动发布 GitHub Release**：按第 2.2 节推送 `android-v<versionName>` Tag（或使用 `workflow_dispatch` 开启 `publish_release=true`），等待 `Android Native APK` 工作流中 `android-native` 与 `release` 两个 Job 全部通过。
+2. **下载并复核同一份签名产物**：
+   ```bash
+   gh release download android-v0.4.0 --pattern "dropit-android-*.apk*"
+   sha256sum -c dropit-android-0.4.0-<short>.apk.sha256
+   apksigner verify --verbose --print-certs dropit-android-0.4.0-<short>.apk
+   ```
+3. **同步发布至自托管服务端**：使用下方第 4.2 节或第 4.3 节命令将校验通过的同一份 `.apk` 交由 `scripts/publish-android-apk.mjs` 写入服务端（详见 `apps/server/src/app-release.ts`）。脚本会原子写入 `latest.json`（含 `versionCode`、`versionName`、`notes`、`file`、`sha256`、`size`、`publishedAt`）并自动清理同目录下的旧版 `.apk`，确保 GitHub Release 与应用内更新的 APK SHA-256 和签名证书逐字节一致。
 
 > **注意**：`scripts/publish-android-apk.mjs` 只接受单个发布目录；生产环境部署与发布由总任务负责人执行，发布前请先按运维规范备份数据卷。
 
-### 4.1 源码 / 宿主机直接部署
+### 4.2 源码 / 宿主机直接部署
 
 ```bash
 # 假设 DATA_DIR 为 /var/lib/dropit/data（默认不传 --dir 时读取 $DATA_DIR/app/android）
@@ -126,7 +182,7 @@ node scripts/publish-android-apk.mjs \
   --dir "$DATA_DIR/app/android"
 ```
 
-### 4.2 Docker 容器部署（卷挂载 `/data`）
+### 4.3 Docker 容器部署（卷挂载 `/data`）
 
 先在宿主机临时目录执行发布脚本生成标准化文件与 `latest.json`，再复制到运行中容器的数据卷：
 
