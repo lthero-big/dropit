@@ -28,8 +28,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -46,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -57,11 +61,15 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.dropit.app.core.network.ClipItem
+import dev.dropit.app.core.network.TargetScope
+import dev.dropit.app.core.repository.MediaRepository
 import dev.dropit.app.ui.board.ClipFormatting
 import dev.dropit.app.ui.theme.DropitMono
 import dev.dropit.app.ui.theme.DropitMonoTypography
 import dev.dropit.app.ui.theme.DropitTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @Composable
 fun TextMarkdownViewer(
@@ -72,15 +80,53 @@ fun TextMarkdownViewer(
     onOpenUrl: (String) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    scope: TargetScope? = null,
+    mediaRepository: MediaRepository? = null,
+    onDownloadFallback: (() -> Unit)? = null,
 ) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
-    val fullText = item.text.orEmpty()
+    val fontScale = LocalDensity.current.fontScale
+
+    var remoteText by remember(item.id, scope) { mutableStateOf<String?>(null) }
+    var isLoadingRemote by remember(item.id, scope) { mutableStateOf(item.isFile && scope != null && mediaRepository != null) }
+    var remoteError by remember(item.id, scope) { mutableStateOf<String?>(null) }
+    var reloadTick by remember(item.id, scope) { mutableStateOf(0) }
+
+    LaunchedEffect(item.id, scope, mediaRepository, reloadTick) {
+        if (item.isFile && scope != null && mediaRepository != null) {
+            isLoadingRemote = true
+            remoteError = null
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    mediaRepository.fetchTextContent(scope, item.id)
+                }
+            }.onSuccess { content ->
+                remoteText = content
+                isLoadingRemote = false
+            }.onFailure { err ->
+                remoteError = err.message?.takeIf { it.isNotBlank() } ?: "无法加载文件文本预览"
+                isLoadingRemote = false
+            }
+        }
+    }
+
+    val fullText = if (item.isFile) remoteText.orEmpty() else item.text.orEmpty()
+    val copyPayload = if (item.isFile) fullText else ClipFormatting.copyPayloadForItem(item)
     val blocks = remember(item.id, fullText) { MarkdownParser.parseBlocks(fullText) }
     val lineCount = remember(fullText) { if (fullText.isEmpty()) 0 else fullText.count { it == '\n' } + 1 }
     val charCount = remember(fullText) { fullText.length }
     val relativeTime = remember(item.createdAt, nowMs) { ClipFormatting.formatRelativeTime(item.createdAt, nowMs) }
     var copiedAll by remember(item.id) { mutableStateOf(false) }
+
+    val maxTitleChars = if (fontScale >= 1.3f) 16 else 24
+    val readerTitle = remember(item.isFile, item.filename, maxTitleChars) {
+        if (item.isFile) {
+            ClipFormatting.middleEllipsizeFilename(item.filename ?: "文本文件", maxTitleChars)
+        } else {
+            "全文阅读"
+        }
+    }
 
     LaunchedEffect(copiedAll) {
         if (copiedAll) {
@@ -127,7 +173,7 @@ fun TextMarkdownViewer(
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
                     Text(
-                        text = "全文阅读",
+                        text = readerTitle,
                         style = MaterialTheme.typography.titleMedium,
                         color = colors.fg,
                         maxLines = 1,
@@ -136,19 +182,24 @@ fun TextMarkdownViewer(
                     val meta = buildList {
                         item.device?.name?.takeIf { it.isNotBlank() }?.let { add(it) }
                         if (relativeTime.isNotEmpty()) add(relativeTime)
-                        add("$lineCount 行 · $charCount 字")
+                        if (!isLoadingRemote && remoteError == null) {
+                            add("$lineCount 行 · $charCount 字")
+                        }
                     }.joinToString(" · ")
-                    Text(
-                        text = meta,
-                        style = DropitMonoTypography.meta,
-                        color = colors.fg3,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    if (meta.isNotEmpty()) {
+                        Text(
+                            text = meta,
+                            style = DropitMonoTypography.meta,
+                            color = colors.fg3,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
 
                 IconButton(
-                    onClick = { onShareText(ClipFormatting.copyPayloadForItem(item)) },
+                    onClick = { onShareText(copyPayload) },
+                    enabled = !isLoadingRemote && remoteError == null && copyPayload.isNotEmpty(),
                     modifier = Modifier.size(48.dp),
                 ) {
                     Icon(
@@ -160,9 +211,10 @@ fun TextMarkdownViewer(
 
                 TextButton(
                     onClick = {
-                        onCopyText(ClipFormatting.copyPayloadForItem(item))
+                        onCopyText(copyPayload)
                         copiedAll = true
                     },
+                    enabled = !isLoadingRemote && remoteError == null && copyPayload.isNotEmpty(),
                     modifier = Modifier.defaultMinSize(minHeight = 48.dp),
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = if (copiedAll) colors.ok else colors.brand,
@@ -175,21 +227,96 @@ fun TextMarkdownViewer(
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = if (copiedAll) "已复制" else "复制全文",
+                        text = if (copiedAll) "已复制" else "复制",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
             }
         }
         HorizontalDivider(thickness = 1.dp, color = colors.line1)
 
-        // Selectable Markdown / Long Text Body
-        SelectionContainer(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-        ) {
+        if (isLoadingRemote) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    CircularProgressIndicator(
+                        color = colors.brand,
+                        strokeWidth = 2.5.dp,
+                        modifier = Modifier.size(28.dp),
+                    )
+                    Text(
+                        text = "正在加载文本预览…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.fg3,
+                    )
+                }
+            }
+        } else if (remoteError != null) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = remoteError.orEmpty(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.destructive,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = { reloadTick++ },
+                            modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                            colors = ButtonDefaults.textButtonColors(contentColor = colors.brand),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("重试", fontWeight = FontWeight.SemiBold)
+                        }
+                        if (onDownloadFallback != null) {
+                            TextButton(
+                                onClick = onDownloadFallback,
+                                modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                                colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Download,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("下载文件")
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Selectable Markdown / Long Text Body
+            SelectionContainer(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+            ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -341,7 +468,7 @@ fun TextMarkdownViewer(
                                             )
                                             TextButton(
                                                 onClick = { onCopyText(block.code) },
-                                                modifier = Modifier.defaultMinSize(minHeight = 40.dp),
+                                                modifier = Modifier.defaultMinSize(minHeight = 48.dp),
                                                 colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
                                             ) {
                                                 Text("复制代码", style = MaterialTheme.typography.labelSmall)
@@ -371,6 +498,7 @@ fun TextMarkdownViewer(
                     }
                 }
             }
+        }
         }
     }
 }

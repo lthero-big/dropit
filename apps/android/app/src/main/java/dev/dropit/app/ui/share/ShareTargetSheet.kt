@@ -45,6 +45,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -59,6 +63,10 @@ import dev.dropit.app.ui.theme.groupDotColor
 @Composable
 fun ShareTargetSheet(
     state: ShareTargetUiState,
+    maxTextBytes: Long = 0L,
+    isLoadingSpaces: Boolean = false,
+    spacesLoadError: String? = null,
+    onRetryLoadSpaces: () -> Unit = {},
     onSelectTarget: (ShareDestination) -> Unit,
     onSelectGroup: (String?) -> Unit,
     onTextChanged: (String) -> Unit,
@@ -70,6 +78,8 @@ fun ShareTargetSheet(
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val textByteCount = remember(state.editedText) { ClipFormatting.utf8ByteCount(state.editedText) }
+    val isTextOverLimit = maxTextBytes > 0L && textByteCount > maxTextBytes
 
     ModalBottomSheet(
         onDismissRequest = {
@@ -108,10 +118,10 @@ fun ShareTargetSheet(
 
             // Target Space / Room Picker
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Text(
                         text = "目标空间 / 临时房间",
@@ -122,24 +132,48 @@ fun ShareTargetSheet(
                         Text(
                             text = "已自动隐藏 ${state.excludedReadOnlyCount} 个只读空间",
                             style = MaterialTheme.typography.labelSmall,
-                            color = colors.fg4,
+                            color = colors.fg3,
                         )
                     }
                 }
 
                 if (state.availableTargets.isEmpty()) {
                     Surface(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { liveRegion = LiveRegionMode.Polite },
                         shape = shapes.md,
                         color = colors.warnSoft,
+                        border = BorderStroke(1.dp, colors.warn.copy(alpha = 0.35f)),
                         tonalElevation = 0.dp,
                     ) {
-                        Text(
-                            text = "正在加载可写入空间…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.warn,
-                            modifier = Modifier.padding(12.dp),
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = when {
+                                    isLoadingSpaces -> "正在加载可写入空间…"
+                                    !spacesLoadError.isNullOrBlank() -> "无法加载空间：$spacesLoadError"
+                                    else -> "暂无可写入的空间（仅只读空间不可接收分享）"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.fg,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (!isLoadingSpaces) {
+                                TextButton(
+                                    onClick = onRetryLoadSpaces,
+                                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                                    colors = ButtonDefaults.textButtonColors(contentColor = colors.warn),
+                                ) {
+                                    Text("重试", fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
                     }
                 } else {
                     FlowRow(
@@ -228,26 +262,41 @@ fun ShareTargetSheet(
 
             // Editable Shared Text (shown whenever share has text or no files remain)
             if (pending.text != null || state.editedText.isNotEmpty() || state.files.isEmpty()) {
-                OutlinedTextField(
-                    value = state.editedText,
-                    onValueChange = onTextChanged,
-                    enabled = !state.isSubmitting,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .defaultMinSize(minHeight = 96.dp),
-                    label = { Text("分享文本（可编辑）") },
-                    placeholder = { Text("输入要发送的文本…", color = colors.fg4) },
-                    maxLines = 6,
-                    shape = shapes.md,
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.fg),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = colors.surface0,
-                        unfocusedContainerColor = colors.surface0,
-                        focusedBorderColor = colors.line3,
-                        unfocusedBorderColor = colors.line2,
-                        cursorColor = colors.brand,
-                    ),
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    OutlinedTextField(
+                        value = state.editedText,
+                        onValueChange = onTextChanged,
+                        enabled = !state.isSubmitting,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 96.dp),
+                        label = { Text("分享文本（可编辑）") },
+                        placeholder = { Text("输入要发送的文本…", color = colors.fg4) },
+                        isError = isTextOverLimit,
+                        maxLines = 6,
+                        shape = shapes.md,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.fg),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = colors.surface0,
+                            unfocusedContainerColor = colors.surface0,
+                            focusedBorderColor = colors.line3,
+                            unfocusedBorderColor = colors.line2,
+                            errorBorderColor = colors.destructive,
+                            cursorColor = colors.brand,
+                        ),
+                    )
+                    if (maxTextBytes > 0L && state.editedText.isNotEmpty()) {
+                        Text(
+                            text = if (isTextOverLimit) {
+                                "文本超出限制（${ServerUrl.formatSize(textByteCount.toLong())} / ${ServerUrl.formatSize(maxTextBytes)}）"
+                            } else {
+                                "${ServerUrl.formatSize(textByteCount.toLong())} / ${ServerUrl.formatSize(maxTextBytes)}"
+                            },
+                            style = DropitMonoTypography.meta,
+                            color = if (isTextOverLimit) colors.destructive else colors.fg3,
+                        )
+                    }
+                }
             }
 
             // Staged Files List
@@ -302,7 +351,9 @@ fun ShareTargetSheet(
             // Error banner
             state.errorMessage?.let { err ->
                 Surface(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { liveRegion = LiveRegionMode.Polite },
                     shape = shapes.md,
                     color = colors.brandSoft,
                     border = BorderStroke(1.dp, colors.destructive.copy(alpha = 0.35f)),
@@ -334,7 +385,7 @@ fun ShareTargetSheet(
                 Spacer(modifier = Modifier.weight(1f))
                 Button(
                     onClick = onConfirmSend,
-                    enabled = state.canSubmit,
+                    enabled = state.canSubmit && !isTextOverLimit,
                     modifier = Modifier.defaultMinSize(minWidth = 120.dp, minHeight = 48.dp),
                     shape = shapes.md,
                     colors = ButtonDefaults.buttonColors(
@@ -370,11 +421,13 @@ private fun StagedFileRow(
 ) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
+    val fontScale = LocalDensity.current.fontScale
     val badge = remember(file.displayName, file.mimeType) {
         ClipFormatting.resolveFileTypeBadge(file.displayName, file.mimeType)
     }
-    val displayName = remember(file.displayName) {
-        ClipFormatting.middleEllipsizeFilename(file.displayName, maxChars = 32)
+    val maxNameChars = if (fontScale >= 1.3f) 18 else 24
+    val displayName = remember(file.displayName, maxNameChars) {
+        ClipFormatting.middleEllipsizeFilename(file.displayName, maxChars = maxNameChars)
     }
 
     Row(
@@ -438,33 +491,38 @@ private fun ShareGroupPill(
 ) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
-    Surface(
+    Box(
         modifier = Modifier
-            .defaultMinSize(minHeight = 40.dp)
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            .clip(shapes.pill)
             .clickable(enabled = enabled, onClick = onClick),
-        shape = shapes.pill,
-        color = if (selected) colors.fg else colors.surface0,
-        border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
-        tonalElevation = 0.dp,
+        contentAlignment = Alignment.Center,
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        Surface(
+            shape = shapes.pill,
+            color = if (selected) colors.fg else colors.surface0,
+            border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
+            tonalElevation = 0.dp,
         ) {
-            if (dotColor != null) {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(dotColor),
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (dotColor != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(dotColor),
+                    )
+                }
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (selected) colors.bg else colors.fg2,
                 )
             }
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                color = if (selected) colors.bg else colors.fg2,
-            )
         }
     }
 }

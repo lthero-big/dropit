@@ -194,6 +194,81 @@ class ShareTargetViewModelTest {
         assertNull(vm.uiState.value.pendingShare)
     }
 
+    @Test
+    fun submitShare_partialFailureWhenTextSucceedsAndFilesFail_retriesOnlyFilesWithoutDuplicateText() =
+        runTest(testDispatcher) {
+            val inbox = FakeShareInbox()
+            val boardRepo = FakeBoardRepository()
+            val transferManager = FakeTransferManager(failNextStagedEnqueue = true)
+            val vm = ShareTargetViewModel(
+                shareInbox = inbox,
+                boardRepository = boardRepo,
+                transferManager = transferManager,
+                ioDispatcher = testDispatcher,
+            )
+
+            inbox.setPending(
+                PendingShare(
+                    id = "share-partial",
+                    text = "附带说明文字",
+                    files = listOf(StagedShareFile("f1", "附件.pdf", "application/pdf", 2048L, "/tmp/f1.pdf")),
+                ),
+            )
+            vm.syncTargets(
+                spaces = listOf(personalSpace),
+                currentUserId = "user-1",
+                activeRoom = null,
+            )
+            advanceUntilIdle()
+
+            // First attempt: text succeeds, file enqueue fails
+            vm.submitShare()
+            advanceUntilIdle()
+
+            assertEquals(1, boardRepo.createdTexts.size)
+            assertEquals(0, inbox.consumeCount)
+            assertEquals("", vm.uiState.value.editedText) // already-sent text cleared so it won't duplicate
+            assertEquals(1, vm.uiState.value.files.size)
+            assertTrue(vm.uiState.value.errorMessage!!.contains("文本已发送"))
+            assertTrue(vm.uiState.value.canSubmit)
+
+            // Retry: submits only the remaining file without duplicating text
+            transferManager.failNextStagedEnqueue = false
+            var submittedHasFiles = false
+            vm.submitShare { _, hasFiles -> submittedHasFiles = hasFiles }
+            advanceUntilIdle()
+
+            assertEquals(1, boardRepo.createdTexts.size) // still 1, never duplicated!
+            assertEquals(1, transferManager.stagedEnqueues.size)
+            assertTrue(submittedHasFiles)
+            assertEquals(1, inbox.consumeCount)
+            assertNull(vm.uiState.value.pendingShare)
+        }
+
+    @Test
+    fun submitShare_overMaxTextBytes_blocksSubmissionWithoutConsumingShare() = runTest(testDispatcher) {
+        val inbox = FakeShareInbox()
+        val boardRepo = FakeBoardRepository()
+        val transferManager = FakeTransferManager()
+        val vm = ShareTargetViewModel(
+            shareInbox = inbox,
+            boardRepository = boardRepo,
+            transferManager = transferManager,
+            ioDispatcher = testDispatcher,
+        )
+
+        inbox.setPending(PendingShare(id = "share-oversize", text = "文".repeat(100)))
+        vm.syncTargets(spaces = listOf(personalSpace), currentUserId = "user-1", activeRoom = null)
+        advanceUntilIdle()
+
+        vm.submitShare(maxTextBytes = 64L)
+        advanceUntilIdle()
+
+        assertEquals(0, boardRepo.createdTexts.size)
+        assertEquals(0, inbox.consumeCount)
+        assertTrue(vm.uiState.value.errorMessage!!.contains("超出单条上限"))
+    }
+
     private class FakeShareInbox : ShareInbox {
         private val _pendingShare = MutableStateFlow<PendingShare?>(null)
         override val pendingShare: StateFlow<PendingShare?> = _pendingShare.asStateFlow()
@@ -256,7 +331,9 @@ class ShareTargetViewModelTest {
         override fun buildGroupInfos(groups: List<String>, items: List<ClipItem>): List<GroupInfo> = emptyList()
     }
 
-    private class FakeTransferManager : TransferManager {
+    private class FakeTransferManager(
+        var failNextStagedEnqueue: Boolean = false,
+    ) : TransferManager {
         override val tasks: StateFlow<List<TransferTask>> = MutableStateFlow(emptyList())
         override val activeCount: StateFlow<Int> = MutableStateFlow(0)
         val stagedEnqueues = mutableListOf<Triple<List<StagedShareFile>, TargetScope, String?>>()
@@ -267,6 +344,9 @@ class ShareTargetViewModelTest {
             targetScope: TargetScope,
             groupName: String?,
         ): List<String> {
+            if (failNextStagedEnqueue) {
+                throw IllegalStateException("磁盘暂存空间不足")
+            }
             stagedEnqueues.add(Triple(stagedFiles, targetScope, groupName))
             return stagedFiles.map { "task-${it.id}" }
         }

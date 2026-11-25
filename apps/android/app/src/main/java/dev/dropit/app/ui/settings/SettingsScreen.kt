@@ -13,6 +13,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
@@ -61,6 +63,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -74,6 +77,7 @@ import dev.dropit.app.ui.theme.DropitElevation
 import dev.dropit.app.ui.theme.DropitMonoTypography
 import dev.dropit.app.ui.theme.DropitTheme
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     serverOrigin: String,
@@ -89,6 +93,7 @@ fun SettingsScreen(
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
     val context = LocalContext.current
+    val stackThemeOptions = LocalDensity.current.fontScale >= 1.5f
     var confirmLogout by remember { mutableStateOf(false) }
 
     val user = me?.user
@@ -195,9 +200,10 @@ fun SettingsScreen(
                             else -> colors.brand
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                            Row(
+                            FlowRow(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
                                 Text(
                                     text = "空间配额",
@@ -285,38 +291,70 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.titleMedium,
                         color = colors.fg,
                     )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        val options = listOf(
-                            ThemeMode.SYSTEM to "跟随系统",
-                            ThemeMode.LIGHT to "浅色纸感",
-                            ThemeMode.DARK to "深色纸感",
-                        )
-                        options.forEach { (mode, label) ->
-                            val selected = themeMode == mode
-                            Surface(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .defaultMinSize(minHeight = 48.dp)
-                                    .clickable { onThemeModeChange(mode) },
-                                shape = shapes.md,
-                                color = if (selected) colors.fg else colors.surface0,
-                                border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
-                                tonalElevation = 0.dp,
-                            ) {
-                                Box(
-                                    contentAlignment = Alignment.Center,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 10.dp),
+                    val options = listOf(
+                        ThemeMode.SYSTEM to "跟随系统",
+                        ThemeMode.LIGHT to "浅色纸感",
+                        ThemeMode.DARK to "深色纸感",
+                    )
+                    if (stackThemeOptions) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            options.forEach { (mode, label) ->
+                                val selected = themeMode == mode
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .clickable { onThemeModeChange(mode) },
+                                    shape = shapes.md,
+                                    color = if (selected) colors.fg else colors.surface0,
+                                    border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
+                                    tonalElevation = 0.dp,
                                 ) {
-                                    Text(
-                                        text = label,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = if (selected) colors.bg else colors.fg2,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = if (selected) colors.bg else colors.fg2,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            options.forEach { (mode, label) ->
+                                val selected = themeMode == mode
+                                Surface(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .defaultMinSize(minHeight = 48.dp)
+                                        .clickable { onThemeModeChange(mode) },
+                                    shape = shapes.md,
+                                    color = if (selected) colors.fg else colors.surface0,
+                                    border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
+                                    tonalElevation = 0.dp,
+                                ) {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 10.dp),
+                                    ) {
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = if (selected) colors.bg else colors.fg2,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
                                 }
                             }
                         }

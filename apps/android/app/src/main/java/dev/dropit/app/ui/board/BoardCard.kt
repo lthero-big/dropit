@@ -58,6 +58,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -161,6 +162,11 @@ fun BoardCard(
                         item = item,
                         playableMedia = false,
                         onPlay = null,
+                        onPreviewText = if (ClipFormatting.isPreviewableTextFile(item)) {
+                            onOpenTextReader?.let { cb -> { cb(item) } }
+                        } else {
+                            null
+                        },
                     )
                 }
 
@@ -173,13 +179,13 @@ fun BoardCard(
 
             HorizontalDivider(thickness = 1.dp, color = colors.line1)
 
-            // Touch-first Quick Actions Row (>= 48.dp hit areas)
-            Row(
+            // Touch-first Quick Actions Row (>= 48.dp hit areas; FlowRow prevents clipping at 2.0x font scale)
+            FlowRow(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.Center,
             ) {
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -261,33 +267,37 @@ private fun LongTextBody(
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             urls.take(3).forEach { url ->
-                Surface(
+                Box(
                     modifier = Modifier
-                        .clickable { onOpenUrl(url) }
-                        .defaultMinSize(minHeight = 36.dp),
-                    shape = shapes.sm,
-                    color = colors.surface0,
-                    border = BorderStroke(1.dp, colors.line2),
-                    tonalElevation = 0.dp,
+                        .defaultMinSize(minHeight = 48.dp)
+                        .clickable { onOpenUrl(url) },
+                    contentAlignment = Alignment.CenterStart,
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    Surface(
+                        shape = shapes.sm,
+                        color = colors.surface0,
+                        border = BorderStroke(1.dp, colors.line2),
+                        tonalElevation = 0.dp,
                     ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                            contentDescription = "打开链接",
-                            tint = colors.brand,
-                            modifier = Modifier.size(13.dp),
-                        )
-                        Text(
-                            text = url.removePrefix("https://").removePrefix("http://"),
-                            style = DropitMonoTypography.meta,
-                            color = colors.fg2,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                contentDescription = "打开链接",
+                                tint = colors.brand,
+                                modifier = Modifier.size(13.dp),
+                            )
+                            Text(
+                                text = url.removePrefix("https://").removePrefix("http://"),
+                                style = DropitMonoTypography.meta,
+                                color = colors.fg2,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
             }
@@ -295,31 +305,41 @@ private fun LongTextBody(
     }
 
     if (isLong || onOpenReader != null) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             if (isLong) {
-                Text(
-                    text = if (expanded) "收起" else "展开预览",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colors.fg2,
+                Box(
                     modifier = Modifier
-                        .defaultMinSize(minHeight = 36.dp)
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .clip(shapes.sm)
                         .clickable { expanded = !expanded }
-                        .padding(vertical = 6.dp),
-                )
+                        .padding(horizontal = 4.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text = if (expanded) "收起" else "展开预览",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.fg2,
+                    )
+                }
             }
             if (onOpenReader != null) {
-                Text(
-                    text = "阅读全文 / Markdown",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colors.brand,
+                Box(
                     modifier = Modifier
-                        .defaultMinSize(minHeight = 36.dp)
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .clip(shapes.sm)
                         .clickable(onClick = onOpenReader)
-                        .padding(vertical = 6.dp),
-                )
+                        .padding(horizontal = 4.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text = "阅读全文 / Markdown",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.brand,
+                    )
+                }
             }
         }
     }
@@ -398,6 +418,7 @@ private fun LinkBody(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CodeBody(
     text: String,
@@ -466,28 +487,41 @@ private fun CodeBody(
         }
 
         if (lines.size > 5 || onOpenReader != null) {
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
                 if (lines.size > 5) {
-                    Text(
-                        text = if (expanded) "收起代码" else "展开全部 ${lines.size} 行",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colors.fg2,
+                    Box(
                         modifier = Modifier
-                            .defaultMinSize(minHeight = 36.dp)
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .clip(shapes.sm)
                             .clickable { expanded = !expanded }
-                            .padding(vertical = 6.dp),
-                    )
+                            .padding(horizontal = 4.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        Text(
+                            text = if (expanded) "收起代码" else "展开全部 ${lines.size} 行",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = colors.fg2,
+                        )
+                    }
                 }
                 if (onOpenReader != null) {
-                    Text(
-                        text = "全屏阅读",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colors.brand,
+                    Box(
                         modifier = Modifier
-                            .defaultMinSize(minHeight = 36.dp)
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .clip(shapes.sm)
                             .clickable(onClick = onOpenReader)
-                            .padding(vertical = 6.dp),
-                    )
+                            .padding(horizontal = 4.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        Text(
+                            text = "全屏阅读",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = colors.brand,
+                        )
+                    }
                 }
             }
         }
@@ -550,8 +584,10 @@ private fun ImageFileBody(
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
     val context = LocalContext.current
+    val fontScale = LocalDensity.current.fontScale
     val filename = item.filename?.takeIf { it.isNotBlank() } ?: "未命名图片"
-    val displayName = remember(filename) { ClipFormatting.middleEllipsizeFilename(filename) }
+    val maxNameChars = if (fontScale >= 1.3f) 18 else 26
+    val displayName = remember(filename, maxNameChars) { ClipFormatting.middleEllipsizeFilename(filename, maxNameChars) }
     val badge = remember(filename, item.mime) { ClipFormatting.resolveFileTypeBadge(filename, item.mime) }
 
     var thumbnailUrl by remember(item.id, activeScope) { mutableStateOf<String?>(null) }
@@ -655,22 +691,28 @@ private fun GenericFileBody(
     item: ClipItem,
     playableMedia: Boolean = false,
     onPlay: (() -> Unit)? = null,
+    onPreviewText: (() -> Unit)? = null,
 ) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
+    val fontScale = LocalDensity.current.fontScale
     val filename = item.filename?.takeIf { it.isNotBlank() } ?: "未命名文件"
-    val displayName = remember(filename) { ClipFormatting.middleEllipsizeFilename(filename) }
+    val maxNameChars = if (fontScale >= 1.3f) 24 else 34
+    val displayName = remember(filename, maxNameChars) { ClipFormatting.middleEllipsizeFilename(filename, maxNameChars) }
     val badge = remember(filename, item.mime) { ClipFormatting.resolveFileTypeBadge(filename, item.mime) }
+    val tapAction = if (playableMedia) onPlay else onPreviewText
+    val tapDescription = if (playableMedia) "在线播放 $filename" else "预览文本文件 $filename"
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .defaultMinSize(minHeight = 48.dp)
             .then(
-                if (playableMedia && onPlay != null) {
+                if (tapAction != null) {
                     Modifier
                         .clip(shapes.sm)
-                        .clickable(onClick = onPlay)
-                        .semantics { contentDescription = "在线播放 $filename" }
+                        .clickable(onClick = tapAction)
+                        .semantics { contentDescription = tapDescription }
                         .padding(vertical = 2.dp)
                 } else {
                     Modifier
@@ -723,10 +765,10 @@ private fun GenericFileBody(
                     )
                 }
                 Text(
-                    text = if (playableMedia) {
-                        "${badge.label} · ${ServerUrl.formatSize(item.size)} · 点按播放"
-                    } else {
-                        "${badge.label} · ${ServerUrl.formatSize(item.size)}"
+                    text = when {
+                        playableMedia -> "${badge.label} · ${ServerUrl.formatSize(item.size)} · 点按播放"
+                        onPreviewText != null -> "${badge.label} · ${ServerUrl.formatSize(item.size)} · 点按预览"
+                        else -> "${badge.label} · ${ServerUrl.formatSize(item.size)}"
                     },
                     style = DropitMonoTypography.meta,
                     color = colors.fg3,
@@ -814,7 +856,7 @@ private fun CardMetadataFooter(
             Text(
                 text = "已编辑",
                 style = MaterialTheme.typography.labelSmall,
-                color = colors.fg4,
+                color = colors.fg3,
                 modifier = Modifier.align(Alignment.CenterVertically),
             )
         }

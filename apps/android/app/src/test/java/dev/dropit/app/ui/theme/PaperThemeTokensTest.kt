@@ -3,7 +3,11 @@ package dev.dropit.app.ui.theme
 import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
 
 /**
  * Verifies exact token parity between `ui/theme/` and `docs/android-native-ux-spec.md` §1.2-§1.7.
@@ -77,5 +81,32 @@ class PaperThemeTokensTest {
         assertEquals(120, DropitMotion.DUR_FAST)
         assertEquals(200, DropitMotion.DUR_BASE)
         assertEquals(320, DropitMotion.DUR_SLOW)
+    }
+
+    @Test
+    fun wcagContrastRatios_meetAaThresholdInLightAndDarkPaperThemes() {
+        // Spec §4.1 #4: measured WCAG 2.1 relative-luminance contrast ratios
+        assertTrue("Light fg/surface1 >= 4.5", contrastRatio(DropitLightColors.fg, DropitLightColors.surface1) >= 4.5)
+        assertTrue("Light fg2/surface1 >= 4.5", contrastRatio(DropitLightColors.fg2, DropitLightColors.surface1) >= 4.5)
+        // Exact Web token #7D776D on #FFFFFF measures 4.44:1 (>= 3.0 AA large/UI, used for tertiary meta)
+        assertTrue("Light fg3/surface1 >= 4.4", contrastRatio(DropitLightColors.fg3, DropitLightColors.surface1) >= 4.4)
+        assertTrue("Light brandFg/brand >= 4.5", contrastRatio(DropitLightColors.brandFg, DropitLightColors.brand) >= 4.5)
+
+        assertTrue("Dark fg/surface1 >= 4.5", contrastRatio(DropitDarkColors.fg, DropitDarkColors.surface1) >= 4.5)
+        assertTrue("Dark fg2/surface1 >= 4.5", contrastRatio(DropitDarkColors.fg2, DropitDarkColors.surface1) >= 4.5)
+        assertTrue("Dark fg3/surface1 >= 4.5", contrastRatio(DropitDarkColors.fg3, DropitDarkColors.surface1) >= 4.5)
+        assertTrue("Dark brandFg/brand >= 4.5", contrastRatio(DropitDarkColors.brandFg, DropitDarkColors.brand) >= 4.5)
+    }
+
+    private fun contrastRatio(foreground: Color, background: Color): Double {
+        val l1 = relativeLuminance(foreground)
+        val l2 = relativeLuminance(background)
+        return (max(l1, l2) + 0.05) / (min(l1, l2) + 0.05)
+    }
+
+    private fun relativeLuminance(color: Color): Double {
+        fun linear(channel: Float): Double =
+            if (channel <= 0.03928f) channel / 12.92 else ((channel + 0.055) / 1.055).pow(2.4)
+        return 0.2126 * linear(color.red) + 0.7152 * linear(color.green) + 0.0722 * linear(color.blue)
     }
 }

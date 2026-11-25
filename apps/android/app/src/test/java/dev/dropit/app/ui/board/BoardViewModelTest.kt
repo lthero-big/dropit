@@ -2,6 +2,7 @@ package dev.dropit.app.ui.board
 
 import android.net.Uri
 import dev.dropit.app.core.network.ApiError
+import dev.dropit.app.core.network.ApiErrorCode
 import dev.dropit.app.core.network.ClipItem
 import dev.dropit.app.core.network.GroupInfo
 import dev.dropit.app.core.network.MeResponse
@@ -363,6 +364,52 @@ class BoardViewModelTest {
         assertNull(vm.uiState.value.activeRoom)
         assertEquals(TargetScope.SpaceScope(readOnlySpace.id), vm.uiState.value.activeScope)
         assertTrue(vm.uiState.value.isReadOnly)
+    }
+
+    @Test
+    fun prepareFileForShare_failureUsesLocalizedApiErrorWithoutStagePlaceholder() = runTest(testDispatcher) {
+        val fileItem = ClipItem(id = "f-err", spaceId = "sp-personal", kind = "file", filename = "测试.pdf", size = 1024)
+        val vm = createViewModel()
+        advanceUntilIdle()
+
+        transferManager.shareResult = Result.failure(
+            ApiError(
+                errorCode = ApiErrorCode.NETWORK_ERROR,
+                rawCode = "NETWORK_ERROR",
+                httpStatus = 0,
+                userMessage = "网络连接中断，请稍后重试",
+            ),
+        )
+        vm.prepareFileForShare(fileItem) {}
+        advanceUntilIdle()
+
+        val msg = vm.uiState.value.snackbar?.message.orEmpty()
+        assertTrue(msg.contains("网络连接中断"))
+        assertFalse(msg.contains("合入后就绪"))
+
+        // Generic failure with null message falls back cleanly
+        transferManager.shareResult = Result.failure(RuntimeException())
+        vm.prepareFileForShare(fileItem) {}
+        advanceUntilIdle()
+
+        val fallbackMsg = vm.uiState.value.snackbar?.message.orEmpty()
+        assertTrue(fallbackMsg.contains("请检查网络后重试"))
+        assertFalse(fallbackMsg.contains("合入后就绪"))
+    }
+
+    @Test
+    fun sendText_overMaxTextBytes_rejectsLocallyWithFormattedLimit() = runTest(testDispatcher) {
+        spaceRepo.me = spaceRepo.me.copy(maxTextBytes = 512L)
+        val vm = createViewModel()
+        advanceUntilIdle()
+
+        vm.sendText("中".repeat(200)) // 600 UTF-8 bytes > 512 B
+        advanceUntilIdle()
+
+        assertEquals(0, boardRepo.mutationCallCount)
+        val msg = vm.uiState.value.snackbar?.message.orEmpty()
+        assertTrue(msg.contains("1 KB"))
+        assertFalse(msg.contains("0 KB"))
     }
 
     @Test

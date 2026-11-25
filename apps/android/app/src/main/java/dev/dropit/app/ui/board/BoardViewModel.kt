@@ -11,6 +11,7 @@ import dev.dropit.app.core.network.GroupInfo
 import dev.dropit.app.core.network.MeResponse
 import dev.dropit.app.core.network.OptionalField
 import dev.dropit.app.core.network.RoomInfo
+import dev.dropit.app.core.network.ServerUrl
 import dev.dropit.app.core.network.SessionExpiredEvent
 import dev.dropit.app.core.network.Space
 import dev.dropit.app.core.network.TargetScope
@@ -538,7 +539,7 @@ class BoardViewModel(
         }
         val maxBytes = _uiState.value.me?.maxTextBytes ?: 0L
         if (maxBytes > 0L && ClipFormatting.utf8ByteCount(text) > maxBytes) {
-            showSnackbar("文本超出单条上限（${maxBytes / 1024} KB）")
+            showSnackbar("文本超出单条上限（${ServerUrl.formatSize(maxBytes)}）")
             return
         }
 
@@ -648,8 +649,10 @@ class BoardViewModel(
             }.onFailure { err ->
                 if (err is ApiError && err.isUnauthorized) {
                     handleSessionExpired()
+                } else if (err is ApiError) {
+                    showSnackbar("文件暂无法分享：${err.userMessage}")
                 } else {
-                    showSnackbar("文件暂无法分享：${err.message ?: "传输引擎将在合入后就绪"}")
+                    showSnackbar("文件暂无法分享：${err.message?.takeIf { it.isNotBlank() } ?: "请检查网络后重试"}")
                 }
             }
         }
@@ -665,7 +668,7 @@ class BoardViewModel(
         }
         val maxBytes = _uiState.value.me?.maxTextBytes ?: 0L
         if (maxBytes > 0L && ClipFormatting.utf8ByteCount(trimmed) > maxBytes) {
-            showSnackbar("文本超出单条上限（${maxBytes / 1024} KB）")
+            showSnackbar("文本超出单条上限（${ServerUrl.formatSize(maxBytes)}）")
             return
         }
 

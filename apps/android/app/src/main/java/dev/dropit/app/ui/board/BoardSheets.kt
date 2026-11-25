@@ -352,6 +352,7 @@ fun ItemMoreActionsSheet(
     onTogglePin: () -> Unit,
     onEditLabelsAndGroup: () -> Unit,
     onOpenItemShare: () -> Unit,
+    onCopyDownloadUrl: (() -> Unit)? = null,
     onOpenPreview: (() -> Unit)? = null,
     onRequestRetract: () -> Unit,
     onDismiss: () -> Unit,
@@ -374,6 +375,7 @@ fun ItemMoreActionsSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
+                .verticalScroll(rememberScrollState())
                 .padding(bottom = 16.dp),
         ) {
             // Item Summary Header
@@ -386,7 +388,7 @@ fun ItemMoreActionsSheet(
                 val summaryTitle = if (item.isText) {
                     item.text.orEmpty().trim().lineSequence().firstOrNull().orEmpty().ifBlank { "文本内容" }
                 } else {
-                    ClipFormatting.middleEllipsizeFilename(item.filename ?: "文件", 38)
+                    ClipFormatting.middleEllipsizeFilename(item.filename ?: "文件", 28)
                 }
                 Text(
                     text = summaryTitle,
@@ -430,12 +432,24 @@ fun ItemMoreActionsSheet(
                         onDownload()
                     },
                 )
+                if (onCopyDownloadUrl != null) {
+                    SheetActionRow(
+                        icon = Icons.Rounded.ContentCopy,
+                        label = "复制下载链接",
+                        subtitle = "需当前空间权限或已登录会话访问",
+                        tint = colors.fg,
+                        onClick = {
+                            onDismiss()
+                            onCopyDownloadUrl()
+                        },
+                    )
+                }
             }
 
             if (onOpenPreview != null) {
                 SheetActionRow(
                     icon = Icons.Rounded.Visibility,
-                    label = if (item.isText) "全文 / Markdown 阅读" else "在线预览 / 播放",
+                    label = if (item.isText || ClipFormatting.isPreviewableTextFile(item)) "全文 / Markdown 阅读" else "在线预览 / 播放",
                     tint = colors.fg,
                     onClick = {
                         onDismiss()
@@ -539,7 +553,7 @@ private fun SheetActionRow(
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.labelSmall,
-                    color = colors.fg4,
+                    color = colors.fg3,
                 )
             }
         }
@@ -567,11 +581,23 @@ fun ComposeOrEditTextSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var text by remember(draftKey) { mutableStateOf(initialText) }
     var selectedGroup by remember(draftKey) { mutableStateOf(initialGroup) }
+    var confirmDiscardEdit by remember(draftKey) { mutableStateOf(false) }
     val byteCount = remember(text) { ClipFormatting.utf8ByteCount(text) }
     val isOverLimit = maxTextBytes > 0L && byteCount > maxTextBytes
+    val hasUnsavedEdit = onDraftChanged == null && text != initialText
+
+    val requestClose: () -> Unit = {
+        if (!isSubmitting) {
+            if (hasUnsavedEdit) {
+                confirmDiscardEdit = true
+            } else {
+                onDismiss()
+            }
+        }
+    }
 
     ModalBottomSheet(
-        onDismissRequest = onDismiss,
+        onDismissRequest = requestClose,
         sheetState = sheetState,
         shape = shapes.sheet,
         containerColor = colors.surface1,
@@ -671,7 +697,7 @@ fun ComposeOrEditTextSheet(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 TextButton(
-                    onClick = onDismiss,
+                    onClick = requestClose,
                     modifier = Modifier.defaultMinSize(minHeight = 48.dp),
                     colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
                 ) {
@@ -702,6 +728,47 @@ fun ComposeOrEditTextSheet(
                 }
             }
         }
+    }
+
+    if (confirmDiscardEdit) {
+        AlertDialog(
+            onDismissRequest = { confirmDiscardEdit = false },
+            shape = shapes.lg,
+            containerColor = colors.surface1,
+            titleContentColor = colors.fg,
+            textContentColor = colors.fg2,
+            tonalElevation = 0.dp,
+            title = {
+                Text("放弃未保存的修改？", style = MaterialTheme.typography.titleMedium)
+            },
+            text = {
+                Text(
+                    text = "当前编辑内容尚未保存，关闭后修改将会丢失。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDiscardEdit = false
+                        onDismiss()
+                    },
+                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.destructive),
+                ) {
+                    Text("放弃修改", fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { confirmDiscardEdit = false },
+                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
+                ) {
+                    Text("继续编辑")
+                }
+            },
+        )
     }
 }
 
@@ -734,6 +801,7 @@ fun EditLabelsAndGroupSheet(
                 .fillMaxWidth()
                 .navigationBarsPadding()
                 .imePadding()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -834,33 +902,38 @@ private fun GroupChoicePill(
 ) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
-    Surface(
+    Box(
         modifier = Modifier
-            .defaultMinSize(minHeight = 40.dp)
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            .clip(shapes.pill)
             .clickable(onClick = onClick),
-        shape = shapes.pill,
-        color = if (selected) colors.fg else colors.surface0,
-        border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
-        tonalElevation = 0.dp,
+        contentAlignment = Alignment.Center,
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        Surface(
+            shape = shapes.pill,
+            color = if (selected) colors.fg else colors.surface0,
+            border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
+            tonalElevation = 0.dp,
         ) {
-            if (dotColor != null) {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .background(dotColor),
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (dotColor != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(dotColor),
+                    )
+                }
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (selected) colors.bg else colors.fg2,
                 )
             }
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                color = if (selected) colors.bg else colors.fg2,
-            )
         }
     }
 }

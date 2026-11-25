@@ -41,6 +41,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.dropit.app.BuildConfig
@@ -87,7 +90,9 @@ fun AppUpdateDialog(
         },
         text = {
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(
@@ -160,7 +165,9 @@ fun AppUpdateDialog(
 
                     UpdateInstallState.NeedsInstallPermission -> {
                         Surface(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics { liveRegion = LiveRegionMode.Polite },
                             shape = shapes.md,
                             color = colors.warnSoft,
                             border = BorderStroke(1.dp, colors.warn.copy(alpha = 0.4f)),
@@ -236,7 +243,9 @@ fun AppUpdateDialog(
 
                     is UpdateInstallState.Failed -> {
                         Surface(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .semantics { liveRegion = LiveRegionMode.Polite },
                             shape = shapes.md,
                             color = colors.brandSoft,
                             border = BorderStroke(1.dp, colors.destructive.copy(alpha = 0.4f)),
@@ -269,7 +278,7 @@ fun AppUpdateDialog(
                         onClick = onSkipVersion,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .defaultMinSize(minHeight = 44.dp),
+                            .defaultMinSize(minHeight = 48.dp),
                         colors = ButtonDefaults.textButtonColors(contentColor = colors.fg3),
                     ) {
                         Text("跳过这个版本", style = MaterialTheme.typography.labelMedium)

@@ -140,7 +140,12 @@ class SettingsViewModel(
      */
     fun triggerBackgroundUpdateCheck(sessionKey: String) {
         if (lastAutoCheckedSessionKey == sessionKey) return
+        val isNewSession = lastAutoCheckedSessionKey != null
         lastAutoCheckedSessionKey = sessionKey
+        if (isNewSession) {
+            appUpdater.resetInstallState()
+            _uiState.value = SettingsUiState()
+        }
 
         viewModelScope.launch {
             val result = runCatching {

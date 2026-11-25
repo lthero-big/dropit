@@ -57,7 +57,7 @@ data class ExpiryDisplay(
 object ClipFormatting {
     const val AGING_WINDOW_MS: Long = 20L * 60_000L
     const val MAX_GROUPS: Int = 24
-    const val MAX_GROUP_NAME_LENGTH: Int = 32
+    const val MAX_GROUP_NAME_LENGTH: Int = 24
     val RESERVED_GROUP_NAMES: Set<String> = setOf("全部", "未分组")
 
     private val COLOR_REGEX = Regex(
@@ -81,8 +81,22 @@ object ClipFormatting {
     private val VIDEO_REGEX = Regex("\\.(mp4|mov|webm|m4v|ogv)$", RegexOption.IGNORE_CASE)
     private val IMAGE_REGEX = Regex("\\.(png|jpe?g|gif|webp|heic|avif|bmp|svg)$", RegexOption.IGNORE_CASE)
     private val DESIGN_REGEX = Regex("\\.(fig|sketch|psd)$", RegexOption.IGNORE_CASE)
-    private val CODE_FILE_REGEX = Regex("\\.(ts|tsx|js|json|sh|py|go|rs|kt|kts|java|xml|yml|yaml)$", RegexOption.IGNORE_CASE)
-    private val DOC_REGEX = Regex("\\.(md|txt|docx?|rtf|csv|xlsx?|pptx?)$", RegexOption.IGNORE_CASE)
+    private val CODE_FILE_REGEX = Regex("\\.(ts|tsx|js|jsx|json|sh|py|go|rs|kt|kts|java|xml|yml|yaml|css|html|sql|ini|toml|log)$", RegexOption.IGNORE_CASE)
+    private val DOC_REGEX = Regex("\\.(md|markdown|txt|docx?|rtf|csv|xlsx?|pptx?)$", RegexOption.IGNORE_CASE)
+    private val PLAIN_TEXT_FILE_REGEX = Regex(
+        "\\.(md|markdown|txt|csv|json|xml|yml|yaml|sh|py|go|rs|kt|kts|java|ts|tsx|js|jsx|css|html|sql|log|ini|toml)$",
+        RegexOption.IGNORE_CASE,
+    )
+
+    fun isPreviewableTextFile(item: ClipItem): Boolean {
+        if (!item.isFile) return false
+        val name = item.filename.orEmpty()
+        val mime = item.mime.orEmpty().lowercase()
+        return PLAIN_TEXT_FILE_REGEX.containsMatchIn(name) ||
+            mime.startsWith("text/") ||
+            mime == "application/json" ||
+            mime == "application/xml"
+    }
 
     fun classifyClip(item: ClipItem): ClipVisualKind {
         if (item.isFile) {
@@ -282,8 +296,10 @@ object ClipFormatting {
         val hasExt = dotIndex > 0 && dotIndex >= clean.length - 10 && dotIndex < clean.length - 1
         val ext = if (hasExt) clean.substring(dotIndex) else ""
         val stem = if (hasExt) clean.substring(0, dotIndex) else clean
-        val tailBudget = minOf(6, max(2, stem.length / 4))
-        val headBudget = (maxChars - ext.length - tailBudget - 1).coerceAtLeast(4)
+        val availableForStem = (maxChars - ext.length - 1).coerceAtLeast(3)
+        if (availableForStem >= stem.length) return clean
+        val tailBudget = minOf(6, max(1, minOf(stem.length / 4, availableForStem / 3)))
+        val headBudget = (availableForStem - tailBudget).coerceAtLeast(2)
         if (headBudget + tailBudget + 1 >= stem.length) return clean
         return "${stem.take(headBudget)}…${stem.takeLast(tailBudget)}$ext"
     }
@@ -332,9 +348,10 @@ object ClipFormatting {
         existingGroups: List<String>,
         renamingFrom: String? = null,
     ): String? {
-        val trimmed = rawName.trim()
+        val trimmed = rawName.trim().replace(Regex("\\s+"), " ")
         if (trimmed.isEmpty()) return "请输入分组名称"
-        if (trimmed.length > MAX_GROUP_NAME_LENGTH) return "分组名称不能超过 $MAX_GROUP_NAME_LENGTH 个字符"
+        val codePoints = trimmed.codePointCount(0, trimmed.length)
+        if (codePoints > MAX_GROUP_NAME_LENGTH) return "分组名称不能超过 $MAX_GROUP_NAME_LENGTH 个字符"
         if (trimmed in RESERVED_GROUP_NAMES) return "「$trimmed」为系统保留名称，请换一个"
         if (trimmed.any { it.isISOControl() }) return "分组名称不能包含控制字符"
         val exists = existingGroups.any { it == trimmed && it != renamingFrom }

@@ -11,6 +11,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
@@ -58,6 +60,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -86,6 +92,7 @@ import java.util.Locale
 
 private val PLAYBACK_SPEEDS = listOf(1f, 1.5f, 2f)
 
+@kotlin.OptIn(ExperimentalLayoutApi::class)
 @OptIn(UnstableApi::class)
 @Composable
 fun MediaPlayerViewer(
@@ -100,6 +107,7 @@ fun MediaPlayerViewer(
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
+    val fontScale = LocalDensity.current.fontScale
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
 
@@ -109,14 +117,16 @@ fun MediaPlayerViewer(
     var errorMessage by remember(item.id) { mutableStateOf<String?>(null) }
     var positionMs by remember(item.id) { mutableLongStateOf(0L) }
     var durationMs by remember(item.id) { mutableLongStateOf(0L) }
+    var bufferedPercent by remember(item.id) { mutableStateOf(0) }
     var isMuted by remember(item.id) { mutableStateOf(false) }
     var speedIndex by remember(item.id) { mutableStateOf(0) }
     var isFullscreen by remember(item.id) { mutableStateOf(false) }
     var isScrubbing by remember(item.id) { mutableStateOf(false) }
     var scrubPosition by remember(item.id) { mutableFloatStateOf(0f) }
 
-    val displayName = remember(item.filename) {
-        ClipFormatting.middleEllipsizeFilename(item.filename ?: if (isVideo) "视频" else "音频", maxChars = 32)
+    val maxTitleChars = if (fontScale >= 1.3f) 18 else 26
+    val displayName = remember(item.filename, maxTitleChars) {
+        ClipFormatting.middleEllipsizeFilename(item.filename ?: if (isVideo) "视频" else "音频", maxChars = maxTitleChars)
     }
 
     val exoPlayer = remember(item.id, scope) {
@@ -168,13 +178,14 @@ fun MediaPlayerViewer(
         }
     }
 
-    // Poll playback position smoothly
+    // Poll playback position & buffered progress smoothly
     LaunchedEffect(exoPlayer) {
         while (true) {
             if (!isScrubbing) {
                 positionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
                 val dur = exoPlayer.duration
                 if (dur > 0L) durationMs = dur
+                bufferedPercent = exoPlayer.bufferedPercentage.coerceIn(0, 100)
             }
             delay(250L)
         }
@@ -290,7 +301,8 @@ fun MediaPlayerViewer(
             Surface(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .padding(horizontal = 24.dp),
+                    .padding(horizontal = 24.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite },
                 shape = shapes.lg,
                 color = Color(0xE61D1C1A),
                 border = BorderStroke(1.dp, colors.destructive.copy(alpha = 0.5f)),
@@ -312,7 +324,10 @@ fun MediaPlayerViewer(
                         style = MaterialTheme.typography.bodySmall,
                         color = DropitMediaColors.OverlayPrimary,
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         TextButton(
                             onClick = {
                                 errorMessage = null
@@ -484,10 +499,17 @@ fun MediaPlayerViewer(
                     } else {
                         positionMs
                     }
+                    val timeLabel = if (isBuffering && bufferedPercent in 1..99) {
+                        "${formatMediaTime(displayedPosMs)} / ${formatMediaTime(durationMs)} · 缓冲 $bufferedPercent%"
+                    } else {
+                        "${formatMediaTime(displayedPosMs)} / ${formatMediaTime(durationMs)}"
+                    }
                     Text(
-                        text = "${formatMediaTime(displayedPosMs)} / ${formatMediaTime(durationMs)}",
+                        text = timeLabel,
                         style = DropitMonoTypography.meta,
                         color = DropitMediaColors.OverlayPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
 

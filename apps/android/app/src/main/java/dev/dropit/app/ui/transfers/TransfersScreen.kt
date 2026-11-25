@@ -401,7 +401,8 @@ private fun TransferTaskCard(
 
                     if (task.status == TransferStatus.QUEUED ||
                         task.status == TransferStatus.RUNNING ||
-                        task.status == TransferStatus.PAUSED
+                        task.status == TransferStatus.PAUSED ||
+                        task.status == TransferStatus.FAILED
                     ) {
                         TextButton(
                             onClick = onCancel,
@@ -416,7 +417,7 @@ private fun TransferTaskCard(
                             )
                             Spacer(modifier = Modifier.width(5.dp))
                             Text(
-                                text = "取消",
+                                text = if (task.status == TransferStatus.FAILED) "移除" else "取消",
                                 style = MaterialTheme.typography.labelMedium,
                             )
                         }
