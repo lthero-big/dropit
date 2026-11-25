@@ -22,13 +22,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Label
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Folder
-import androidx.compose.material.icons.rounded.Label
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MeetingRoom
@@ -341,7 +341,7 @@ fun ItemMoreActionsSheet(
                 )
 
                 SheetActionRow(
-                    icon = Icons.Rounded.Label,
+                    icon = Icons.AutoMirrored.Rounded.Label,
                     label = "修改分组与标签",
                     tint = colors.fg,
                     onClick = {

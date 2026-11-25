@@ -339,6 +339,8 @@ class BoardViewModelTest {
         val mainDispatcher = mainExecutor.asCoroutineDispatcher()
         val ioDispatcher = ioExecutor.asCoroutineDispatcher()
         try {
+            val expectedMainThread = mainExecutor.submit<Thread> { Thread.currentThread() }.get()
+            val expectedIoThread = ioExecutor.submit<Thread> { Thread.currentThread() }.get()
             Dispatchers.setMain(mainDispatcher)
             val fileItem = ClipItem(id = "f-share", spaceId = "sp-personal", kind = "file", filename = "report.pdf", size = 1024)
             transferManager.shareResult = Result.success(Uri.EMPTY)
@@ -352,23 +354,25 @@ class BoardViewModelTest {
             }
             assertNotNull(vm.uiState.value.activeScope)
 
-            val sendThread = AtomicReference<String>()
+            val sendThread = AtomicReference<Thread>()
             val sendLatch = CountDownLatch(1)
             vm.sendText("hello thread check") {
-                sendThread.set(Thread.currentThread().name)
+                sendThread.set(Thread.currentThread())
                 sendLatch.countDown()
             }
             assertTrue(sendLatch.await(3, TimeUnit.SECONDS))
-            assertEquals("test-main-thread", sendThread.get())
+            assertEquals(expectedMainThread, sendThread.get())
+            assertFalse(sendThread.get() == expectedIoThread)
 
-            val shareThread = AtomicReference<String>()
+            val shareThread = AtomicReference<Thread>()
             val shareLatch = CountDownLatch(1)
             vm.prepareFileForShare(fileItem) { _ ->
-                shareThread.set(Thread.currentThread().name)
+                shareThread.set(Thread.currentThread())
                 shareLatch.countDown()
             }
             assertTrue(shareLatch.await(3, TimeUnit.SECONDS))
-            assertEquals("test-main-thread", shareThread.get())
+            assertEquals(expectedMainThread, shareThread.get())
+            assertFalse(shareThread.get() == expectedIoThread)
         } finally {
             Dispatchers.setMain(testDispatcher)
             mainExecutor.shutdownNow()

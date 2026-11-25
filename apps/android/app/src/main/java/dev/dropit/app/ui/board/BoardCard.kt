@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.Check
@@ -30,7 +31,6 @@ import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.FolderZip
 import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material.icons.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.LaptopMac
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.PushPin
@@ -795,5 +795,5 @@ private fun fileCategoryIcon(category: FileTypeCategory): ImageVector = when (ca
     FileTypeCategory.DESIGN,
     -> Icons.Rounded.Image
     FileTypeCategory.CODE -> Icons.Rounded.Code
-    FileTypeCategory.FILE -> Icons.Rounded.InsertDriveFile
+    FileTypeCategory.FILE -> Icons.AutoMirrored.Rounded.InsertDriveFile
 }
