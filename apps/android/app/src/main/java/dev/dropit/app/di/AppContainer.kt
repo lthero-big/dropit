@@ -21,13 +21,15 @@ import dev.dropit.app.core.repository.DefaultBoardRepository
 import dev.dropit.app.core.repository.DefaultSpaceRepository
 import dev.dropit.app.core.repository.ItemShareRepository
 import dev.dropit.app.core.repository.MediaRepository
-import dev.dropit.app.core.repository.PlaceholderItemShareRepository
-import dev.dropit.app.core.repository.PlaceholderMediaRepository
-import dev.dropit.app.core.repository.PlaceholderRoomRepository
 import dev.dropit.app.core.repository.RoomRepository
 import dev.dropit.app.core.repository.ShareInbox
 import dev.dropit.app.core.repository.SpaceRepository
 import dev.dropit.app.core.repository.TransferManager
+import dev.dropit.app.data.itemshare.DefaultItemShareRepository
+import dev.dropit.app.data.media.DefaultMediaRepository
+import dev.dropit.app.data.room.AndroidKeystoreRoomKeyStore
+import dev.dropit.app.data.room.DefaultRoomRepository
+import dev.dropit.app.data.room.RoomKeyStore
 import dev.dropit.app.data.share.AndroidShareIntentExtractor
 import dev.dropit.app.data.share.DefaultShareInbox
 import dev.dropit.app.data.transfer.AndroidDownloadSink
@@ -194,14 +196,42 @@ class DefaultAppContainer(context: Context) : AppContainer {
     override val shareInbox: ShareInbox get() = defaultShareInbox
     override val appUpdater: AppUpdater get() = defaultAppUpdater
 
-    // Default placeholders replaced in Stage 3A
-    override val roomRepository: RoomRepository = PlaceholderRoomRepository()
-    override val itemShareRepository: ItemShareRepository = PlaceholderItemShareRepository()
-    override val mediaRepository: MediaRepository = PlaceholderMediaRepository(
-        context = appContext,
-        okHttpClient = okHttpClient,
-        serverOriginProvider = { settingsStore.getServerOrigin() },
-    )
+    // Stage 3A concrete repositories: temporary rooms, per-item share links, authenticated media/preview
+    private val roomKeyStore: RoomKeyStore by lazy {
+        AndroidKeystoreRoomKeyStore(
+            context = appContext,
+            json = json,
+        )
+    }
+
+    private val imageCacheDir: File = File(appContext.cacheDir, DefaultMediaRepository.IMAGE_CACHE_DIR_NAME)
+
+    private val defaultRoomRepository: DefaultRoomRepository by lazy {
+        DefaultRoomRepository(
+            apiClient = apiClient,
+            roomKeyStore = roomKeyStore,
+            settingsStore = settingsStore,
+        )
+    }
+
+    private val defaultItemShareRepository: DefaultItemShareRepository by lazy {
+        DefaultItemShareRepository(apiClient = apiClient)
+    }
+
+    private val defaultMediaRepository: DefaultMediaRepository by lazy {
+        DefaultMediaRepository(
+            context = appContext,
+            baseOkHttpClient = okHttpClient,
+            apiClient = apiClient,
+            credentialsProvider = credentialsProvider,
+            imageCacheDir = imageCacheDir,
+            sessionStateFlow = authRepository.sessionState,
+        )
+    }
+
+    override val roomRepository: RoomRepository get() = defaultRoomRepository
+    override val itemShareRepository: ItemShareRepository get() = defaultItemShareRepository
+    override val mediaRepository: MediaRepository get() = defaultMediaRepository
 
     override suspend fun initialize(): MigrationResult {
         val result = legacyMigrator.migrateIfNeeded()
@@ -212,13 +242,41 @@ class DefaultAppContainer(context: Context) : AppContainer {
     }
 
     override suspend fun resetForServerSwitch() {
-        realtimeClient.disconnect(clearState = true)
-        roomRepository.clearRoomState()
-        transferManager.clearAllForScopeSwitch()
-        shareInbox.discardPendingShare()
-        defaultAppUpdater.resetInstallState()
-        defaultAppUpdater.clearCachedUpdates()
-        mediaRepository.clearCaches()
-        authRepository.logout(clearServer = true)
+        performServerSwitchReset(
+            realtimeClient = realtimeClient,
+            roomRepository = roomRepository,
+            transferManager = transferManager,
+            shareInbox = shareInbox,
+            resetAppUpdater = {
+                defaultAppUpdater.resetInstallState()
+                defaultAppUpdater.clearCachedUpdates()
+            },
+            mediaRepository = mediaRepository,
+            authRepository = authRepository,
+        )
     }
+}
+
+/**
+ * Atomic cleanup sequence executed when switching servers.
+ * Order matters: best-effort remote upload cancellations and `/api/auth/logout` happen
+ * before clearing local credentials, while room keys, transfer DB/staging, pending shares,
+ * cached updates, and media caches are all wiped before returning.
+ */
+internal suspend fun performServerSwitchReset(
+    realtimeClient: RealtimeClient,
+    roomRepository: RoomRepository,
+    transferManager: TransferManager,
+    shareInbox: ShareInbox,
+    resetAppUpdater: suspend () -> Unit,
+    mediaRepository: MediaRepository,
+    authRepository: AuthRepository,
+) {
+    realtimeClient.disconnect(clearState = true)
+    roomRepository.clearRoomState()
+    transferManager.clearAllForScopeSwitch()
+    shareInbox.discardPendingShare()
+    resetAppUpdater()
+    mediaRepository.clearCaches()
+    authRepository.logout(clearServer = true)
 }
