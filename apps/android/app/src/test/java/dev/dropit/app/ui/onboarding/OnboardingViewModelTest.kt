@@ -263,6 +263,52 @@ class OnboardingViewModelTest {
         assertEquals(1, fakeAuth.startDeviceAuthCallCount)
     }
 
+    @Test
+    fun syncEntry_afterApprovedOnSameServer_restartsDeviceAuthForAccountSwitchWithoutStaleExpiredNotice() =
+        runTest(testDispatcher) {
+            val firstAuth = sampleAuth("ACCT-0001", interval = 5)
+            val fakeAuth = FakeAuthRepository(
+                authResponse = firstAuth,
+                pollStates = listOf(
+                    DeviceAuthState.WaitingForApproval(firstAuth, pollIntervalSeconds = 5),
+                    DeviceAuthState.Approved(serverOrigin = "https://dropit.lthero.com", scope = "read write"),
+                ),
+            )
+            val vm = OnboardingViewModel(
+                authRepository = fakeAuth,
+                initialServerOrigin = "https://dropit.lthero.com",
+                initialSessionExpired = true,
+                ioDispatcher = testDispatcher,
+                pollDelayMillis = {},
+                autoStartDeviceAuth = true,
+            )
+
+            advanceUntilIdle()
+            assertEquals(1, fakeAuth.startDeviceAuthCallCount)
+            assertTrue(vm.uiState.value.deviceAuthState is DeviceAuthState.Approved)
+
+            // User clicks "切换账号" from Settings on the SAME server -> DropitApp calls syncEntry(origin, false)
+            val secondAuth = sampleAuth("ACCT-0002", interval = 5)
+            fakeAuth.authResponse = secondAuth
+            fakeAuth.pollStates = listOf(
+                DeviceAuthState.WaitingForApproval(secondAuth, pollIntervalSeconds = 5),
+            )
+
+            vm.syncEntry(serverOrigin = "https://dropit.lthero.com", sessionExpired = false)
+            advanceUntilIdle()
+
+            val state = vm.uiState.value
+            assertEquals(2, fakeAuth.startDeviceAuthCallCount)
+            assertEquals(OnboardingStep.DEVICE_AUTH, state.step)
+            assertEquals("https://dropit.lthero.com", state.configuredServerOrigin)
+            assertFalse(state.sessionExpiredNotice)
+            assertTrue(state.deviceAuthState is DeviceAuthState.WaitingForApproval)
+            assertEquals(
+                "ACCT-0002",
+                (state.deviceAuthState as DeviceAuthState.WaitingForApproval).authorization.userCode,
+            )
+        }
+
     private fun sampleAuth(code: String, interval: Int = 5) = DeviceAuthorizeResponse(
         deviceCode = "dev-$code",
         userCode = code,

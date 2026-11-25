@@ -298,6 +298,76 @@ class AppViewModelTest {
             )
         }
 
+    @Test
+    fun switchAccount_whenRemoteLogoutReturns401_doesNotTriggerSessionExpiredNoticeAndReenables401AfterReLogin() =
+        runTest(testDispatcher) {
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(401)
+                    .setBody("""{"error":{"code":"UNAUTHENTICATED"}}"""),
+            )
+            val container = TestAppContainer(
+                okHttpClient = okHttpClient,
+                initialServerOrigin = baseUrl,
+                initialToken = "tok_already_revoked_12345678901234567890",
+                useRealAuthRepository = true,
+            )
+            val vm = AppViewModel(
+                container = container,
+                ioDispatcher = testDispatcher,
+                autoInitialize = true,
+            )
+            advanceUntilIdle()
+            assertEquals(
+                AppRoute.Main(serverOrigin = baseUrl, sessionGeneration = 1L),
+                vm.uiState.value.route,
+            )
+
+            vm.switchAccount()
+            advanceUntilIdle()
+
+            val logoutReq = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull("Expected POST /api/auth/logout request", logoutReq)
+            assertEquals("POST", logoutReq!!.method)
+            assertEquals("/api/auth/logout", logoutReq.path)
+
+            withContext(Dispatchers.Default) {
+                withTimeout(5_000L) {
+                    while (vm.uiState.value.isLoggingOut) {
+                        testDispatcher.scheduler.advanceUntilIdle()
+                        delay(10)
+                    }
+                }
+            }
+            // Drain any async sessionExpiredEvents emitted by the 401 response to /api/auth/logout
+            advanceUntilIdle()
+
+            assertEquals(1, server.requestCount)
+            assertNull(container.tokenVault.getToken())
+            assertEquals(baseUrl, container.settingsStore.getServerOrigin())
+            assertFalse(vm.uiState.value.isLoggingOut)
+            assertEquals(
+                AppRoute.Onboarding(serverOrigin = baseUrl, sessionExpired = false),
+                vm.uiState.value.route,
+            )
+
+            // Re-login as Account B -> generation increments to 2 and passive 401 handling still works
+            container.authRepository.completeAuthorization(baseUrl, "tok_account_b_fresh_12345678901234567890")
+            advanceUntilIdle()
+            assertEquals(
+                AppRoute.Main(serverOrigin = baseUrl, sessionGeneration = 2L),
+                vm.uiState.value.route,
+            )
+
+            container.apiClient.emitSessionExpiredIf401(401, baseUrl, "/api/me")
+            advanceUntilIdle()
+            assertEquals(1, server.requestCount)
+            assertEquals(
+                AppRoute.Onboarding(serverOrigin = baseUrl, sessionExpired = true),
+                vm.uiState.value.route,
+            )
+        }
+
     private class TestAppContainer(
         override val okHttpClient: OkHttpClient,
         initialServerOrigin: String?,

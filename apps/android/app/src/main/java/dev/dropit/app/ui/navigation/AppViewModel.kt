@@ -160,8 +160,12 @@ class AppViewModel(
      * endpoint-specific 401 cannot revoke a still-valid device token.
      */
     fun markSessionExpired() {
+        if (_uiState.value.isLoggingOut) return
         viewModelScope.launch(ioDispatcher) {
             sessionExpiredMutex.withLock {
+                if (_uiState.value.isLoggingOut) {
+                    return@withLock
+                }
                 val currentGen = sessionGeneration
                 if (activeMainOrigin == null && handledGenerationFor401 == currentGen) {
                     return@withLock
@@ -196,7 +200,11 @@ class AppViewModel(
         _uiState.update { it.copy(isLoggingOut = true) }
         viewModelScope.launch(ioDispatcher) {
             try {
-                sessionExpiredNotice = false
+                sessionExpiredMutex.withLock {
+                    handledGenerationFor401 = sessionGeneration
+                    activeMainOrigin = null
+                    sessionExpiredNotice = false
+                }
                 container.realtimeClient.disconnect(clearState = true)
                 container.roomRepository.clearRoomState()
                 container.transferManager.clearAllForScopeSwitch()
@@ -204,7 +212,9 @@ class AppViewModel(
                 container.mediaRepository.clearCaches()
                 container.authRepository.logout(clearServer = false)
             } finally {
-                sessionExpiredNotice = false
+                sessionExpiredMutex.withLock {
+                    sessionExpiredNotice = false
+                }
                 _uiState.update { it.copy(isLoggingOut = false) }
                 val session = container.authRepository.sessionState.value
                 updateRouteFromSession(session.serverOrigin, session.isSignedIn)
@@ -217,10 +227,16 @@ class AppViewModel(
         _uiState.update { it.copy(isLoggingOut = true) }
         viewModelScope.launch(ioDispatcher) {
             try {
-                sessionExpiredNotice = false
+                sessionExpiredMutex.withLock {
+                    handledGenerationFor401 = sessionGeneration
+                    activeMainOrigin = null
+                    sessionExpiredNotice = false
+                }
                 container.resetForServerSwitch()
             } finally {
-                sessionExpiredNotice = false
+                sessionExpiredMutex.withLock {
+                    sessionExpiredNotice = false
+                }
                 _uiState.update { it.copy(isLoggingOut = false) }
                 val session = container.authRepository.sessionState.value
                 updateRouteFromSession(session.serverOrigin, session.isSignedIn)
