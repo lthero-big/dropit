@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    ApiError, ApiResult, App, RequestContext, browser_session, db, downloads, now, origin_for,
+    ApiError, ApiResult, App, RequestContext, account_session, db, downloads, now, origin_for,
     password, read_json, rooms,
 };
 
@@ -39,19 +39,19 @@ fn short_token() -> ApiResult<String> {
     rooms::random_chars(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 }
 fn public_limit(app: &App, context: &RequestContext, raw: &str) -> ApiResult<()> {
-    app.limit("share:ip", &context.ip, app.config.rate_auth)?;
+    app.limit("share:ip", &context.ip, app.config().rate_auth)?;
     app.limit(
         "share:link",
         &format!("{}:{}", password::hash(raw), context.ip),
-        app.config.rate_upload,
+        app.config().rate_upload,
     )
 }
 
 fn write_limit(app: &App, context: &RequestContext, room: bool) -> ApiResult<()> {
     let (ip, user, count) = if room {
-        ("room-write:ip", "room-write:user", app.config.rate_room)
+        ("room-write:ip", "room-write:user", app.config().rate_room)
     } else {
-        ("write:ip", "write:user", app.config.rate_upload)
+        ("write:ip", "write:user", app.config().rate_upload)
     };
     app.limit(ip, &context.ip, count)?;
     if let Some(auth) = &context.auth {
@@ -424,7 +424,7 @@ pub async fn managed_shares(
     Extension(context): Extension<RequestContext>,
     Query(query): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
-    let user = browser_session(&context)?.account.user.id.clone();
+    let user = account_session(&context)?.account.user.id.clone();
     let cursor = match query.get("cursor").filter(|value| !value.is_empty()) {
         None => None,
         Some(value) => {
@@ -469,7 +469,7 @@ pub async fn managed_link(
     Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<Json<Value>> {
-    let user = browser_session(&context)?.account.user.id.clone();
+    let user = account_session(&context)?.account.user.id.clone();
     let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
     manage_limit(&app, &context)?;
     let (view, token) = app
@@ -497,12 +497,12 @@ pub async fn managed_link(
     Ok(Json(result))
 }
 fn manage_limit(app: &App, context: &RequestContext) -> ApiResult<()> {
-    app.limit("share-manage:ip", &context.ip, app.config.rate_upload)?;
+    app.limit("share-manage:ip", &context.ip, app.config().rate_upload)?;
     if let Some(auth) = &context.auth {
         app.limit(
             "share-manage:user",
             &auth.account.user.id,
-            app.config.rate_upload,
+            app.config().rate_upload,
         )?;
     }
     Ok(())
@@ -513,7 +513,7 @@ pub async fn managed_revoke(
     path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<StatusCode> {
     manage_limit(&app, &context)?;
-    let user = browser_session(&context)?.account.user.id.clone();
+    let user = account_session(&context)?.account.user.id.clone();
     let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let changed=app.db.run(move |db| Ok(db.execute("UPDATE shares SET revoked=1,downloadTicketHash=NULL,downloadTicketExpiresAt=NULL WHERE id=? AND createdBy=?",rusqlite::params![id,user])?)).await?;
     if changed == 0 {
@@ -527,7 +527,7 @@ pub async fn managed_delete(
     path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<StatusCode> {
     manage_limit(&app, &context)?;
-    let user = browser_session(&context)?.account.user.id.clone();
+    let user = account_session(&context)?.account.user.id.clone();
     let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
     app.db
         .run(move |db| {
@@ -640,7 +640,7 @@ async fn public_file_response(
     };
     let range = downloads::range_header(request.headers());
     let head = request.method() == Method::HEAD;
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     let prepared = downloads::prepare_download(
         &directory,
         &key,
@@ -729,7 +729,7 @@ pub async fn thumbnail(
         return ApiError::NOT_FOUND.into_response();
     };
     let prepared =
-        downloads::prepare_thumbnail(&downloads::files_dir(&app.config.data), &key, false);
+        downloads::prepare_thumbnail(&downloads::files_dir(&app.config().data), &key, false);
     match prepared {
         Ok(value) => downloads::into_response(value, false),
         Err(error) => error.into_response(),
@@ -798,7 +798,7 @@ pub async fn media(
     let range = downloads::range_header(request.headers());
     let head = request.method() == Method::HEAD;
     match downloads::prepare_media(
-        &downloads::files_dir(&app.config.data),
+        &downloads::files_dir(&app.config().data),
         &key,
         shared.file.filename.as_deref().unwrap_or("media"),
         shared.file.size.max(0) as u64,
@@ -879,7 +879,7 @@ pub async fn share_presets(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
 ) -> ApiResult<Json<Value>> {
-    let user_id = browser_session(&context)?.account.user.id.clone();
+    let user_id = context.require_auth()?.account.user.id.clone();
     let saved = app
         .db
         .run(move |db| Ok(db::setting(db, &format!("sharePresets:{user_id}"))?))
@@ -892,7 +892,7 @@ pub async fn save_share_presets(
     Extension(context): Extension<RequestContext>,
     request: Request,
 ) -> ApiResult<Json<Value>> {
-    let auth = browser_session(&context)?;
+    let auth = account_session(&context)?;
     let user_id = auth.account.user.id.clone();
     manage_limit(&app, &context)?;
     let presets = normalized_presets(&read_json(request, 2048).await?)?;

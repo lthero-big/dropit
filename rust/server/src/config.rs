@@ -1,12 +1,13 @@
 use ipnet::IpNet;
 use rusqlite::{Connection, OptionalExtension};
-use std::{env, net::IpAddr, path::PathBuf};
+use std::{collections::HashMap, env, net::IpAddr, path::PathBuf};
 use url::Url;
 
 use crate::js_space;
 
 pub type StartupResult<T> = Result<T, Box<dyn std::error::Error>>;
 
+#[derive(Clone)]
 pub struct Config {
     pub host: String,
     pub port: u16,
@@ -14,6 +15,10 @@ pub struct Config {
     pub static_dir: PathBuf,
     pub production: bool,
     pub origin: Option<(String, &'static str)>,
+    pub env_origin: Option<String>,
+    pub admin_origin: Option<String>,
+    pub limit_defaults: HashMap<&'static str, i64>,
+    pub limit_overrides: HashMap<&'static str, i64>,
     pub trusted_proxies: Vec<IpNet>,
     pub max_file: i64,
     pub max_text: usize,
@@ -79,6 +84,7 @@ impl Config {
                 }),
             }
         }
+        let env_origin = origin.as_ref().map(|(value, _)| value.clone());
         Ok(Self {
             host: env::var("HOST").unwrap_or_else(|_| "127.0.0.1".into()),
             port: env_limit("PORT", 8787, 1, u16::MAX.into())? as u16,
@@ -90,6 +96,10 @@ impl Config {
                 .map_or_else(|| PathBuf::from("public"), PathBuf::from),
             production: env::var("NODE_ENV").is_ok_and(|v| v == "production"),
             origin,
+            env_origin,
+            admin_origin: None,
+            limit_defaults: HashMap::new(),
+            limit_overrides: HashMap::new(),
             trusted_proxies,
             max_file: 0,
             max_text: 0,
@@ -136,6 +146,7 @@ impl Config {
             .optional()?;
         if !reset && let Some(stored) = stored {
             if let Some(origin) = parse_origin(&stored) {
+                self.admin_origin = Some(origin.clone());
                 self.origin = Some((origin, "admin"));
             } else {
                 eprintln!("Ignoring an invalid site address saved in 管理 → 站点地址");
@@ -143,12 +154,18 @@ impl Config {
         }
 
         let mut query = db.prepare("SELECT value FROM runtime_limits WHERE key=?")?;
-        let mut limit = |key, env, default, scale, max| -> StartupResult<i64> {
+        let mut defaults = HashMap::new();
+        let mut overrides = HashMap::new();
+        let mut limit = |key: &'static str, env, default, scale, max| -> StartupResult<i64> {
             let from_env = env_limit(env, default, scale, max)?;
             let persisted: Option<i64> = query.query_row([key], |row| row.get(0)).optional()?;
             let value = persisted.unwrap_or(from_env);
             if !(1..=max).contains(&value) {
                 return Err(format!("Invalid persisted limit {key}").into());
+            }
+            defaults.insert(key, from_env);
+            if let Some(override_value) = persisted {
+                overrides.insert(key, override_value);
             }
             Ok(value)
         };
@@ -233,6 +250,8 @@ impl Config {
         self.pin_lock_failures =
             limit("pinLockFailures", "PIN_LOCK_FAILURES", 10, 1, 1000000)? as u32;
         self.pin_lock_ms = limit("pinLockMs", "PIN_LOCK_MINUTES", 15, 60000, 7 * 86400000)?;
+        self.limit_defaults = defaults;
+        self.limit_overrides = overrides;
         if self.rate_auth >= self.rate_general || self.rate_upload >= self.rate_general {
             return Err("Invalid rate limits".into());
         }

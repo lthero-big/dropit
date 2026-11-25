@@ -70,10 +70,14 @@ function shareCursor(value: string | undefined) {
   return { createdAt, id: match[2] };
 }
 const oauthBrowserErrors = new Set([
-  'OAUTH_STATE_INVALID', 'OAUTH_DENIED', 'OAUTH_PROVIDER_ERROR', 'INVITE_INVALID',
+  'OAUTH_STATE_INVALID', 'OAUTH_DENIED', 'OAUTH_PROVIDER_ERROR', 'INVITE_INVALID', 'INVITE_NEEDS_ACCOUNT',
   'INVITATION_REQUIRED', 'USER_DISABLED', 'VERIFIED_EMAIL_REQUIRED', 'RATE_LIMITED', 'INTERNAL_ERROR',
   'ACCOUNT_EXISTS', 'IDENTITY_IN_USE', 'PROVIDER_ALREADY_LINKED', 'UNAUTHENTICATED', 'REGISTRATION_CLOSED',
 ]);
+const APP_OAUTH_REDIRECT = 'dropit://auth/callback';
+const APP_STATE_PATTERN = /^[A-Za-z0-9._~-]{8,128}$/;
+const APP_TOKEN_MS = 365 * 86400000;
+const RAW_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 // RHEA-190 auth step 2: while a temporary password is in use, a browser session may only
 // read who it is, change the password or sign out.
 const openWhileChangingPassword = new Set(['/api/me', '/api/me/password', '/api/auth/logout', '/api/auth/providers', '/api/site', '/api/version', '/api/setup', '/api/app-session']);
@@ -101,6 +105,10 @@ function personName(value: unknown): string {
   name = name.trim();
   if (!name) throw new ApiError(400, 'INVALID_INPUT');
   return name;
+}
+function optionalDeviceName(value: unknown): string {
+  if (value === undefined || value === null || value === '') return 'dropit App';
+  return personName(value);
 }
 function tokenOptions(body: Record<string, unknown>, allowWeb = false) {
   const name = personName(body.name);
@@ -294,10 +302,10 @@ export function createBackend(options: BackendOptions = {}) {
     const safe = ['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
     const bearer = c.get('session')?.bearer;
     if (bearer && !bearer.scopes.includes(safe ? 'read' : 'write')) throw new ApiError(403, 'INSUFFICIENT_SCOPE');
-    const publicDevice = c.req.method === 'POST' && ['/api/auth/device/authorize', '/api/auth/device/token'].includes(c.req.path) &&
+    const publicDevice = c.req.method === 'POST' && ['/api/auth/device/authorize', '/api/auth/device/token', '/api/auth/app/password/login', '/api/auth/app/oauth/exchange'].includes(c.req.path) &&
       !rawSession && (!c.req.header('origin') || originAllowed(c, c.req.header('origin')));
     if (!safe && !bearer && !publicDevice && !originAllowed(c, c.req.header('origin'))) throw originRejected(c);
-    if (auth && !bearer && auth.mustChangePassword && !openWhileChangingPassword.has(c.req.path)) throw new ApiError(403, 'PASSWORD_CHANGE_REQUIRED');
+    if (auth && auth.mustChangePassword && !openWhileChangingPassword.has(c.req.path)) throw new ApiError(403, 'PASSWORD_CHANGE_REQUIRED');
     await next();
   });
   app.onError((error, c) => {
@@ -351,13 +359,13 @@ export function createBackend(options: BackendOptions = {}) {
   // Public: the login page compares this with the address bar to explain a mismatch
   // ("change APP_ORIGIN to X") before the user hits a 403. The address is in every link anyway.
   app.get('/api/site', c => c.json({ origin: siteOrigin() || null, source: originSource(), requestOrigin: requestOrigin(c) }));
-  const browserSession = (c: Ctx) => {
+  const accountSession = (c: Ctx) => {
     const auth = service.requireSession(c.get('session'));
-    if (auth.bearer) throw new ApiError(403, 'BROWSER_SESSION_REQUIRED');
+    if (auth.bearer && !auth.bearer.scopes.includes('account')) throw new ApiError(403, 'INSUFFICIENT_SCOPE');
     return auth;
   };
   app.post('/api/tokens', async c => {
-    const auth = browserSession(c);
+    const auth = accountSession(c);
     limit(c, 'token-create', config.rateAuth);
     const input = tokenOptions(await json(c, 2048));
     const raw = token();
@@ -367,31 +375,31 @@ export function createBackend(options: BackendOptions = {}) {
     return c.json({ ...record, token: raw }, 201);
   });
   app.get('/api/tokens', c => c.json({ tokens: repo.accessTokens(service.requireSession(c.get('session')).user.id) }));
-  app.get('/api/me/share-presets', c => c.json(service.sharePresets(browserSession(c))));
+  app.get('/api/me/share-presets', c => c.json(service.sharePresets(c.get('session'))));
   app.put('/api/me/share-presets', async c => {
-    const auth = browserSession(c);
+    const auth = accountSession(c);
     limit(c, 'share-manage', config.rateUpload);
     return c.json(service.saveSharePresets(auth, await json(c, 2048)));
   });
-  app.get('/api/shares', c => c.json(service.managedShares(browserSession(c), shareCursor(c.req.query('cursor')))));
+  app.get('/api/shares', c => c.json(service.managedShares(accountSession(c), shareCursor(c.req.query('cursor')))));
   app.get('/api/shares/:shareId/link', c => {
-    const auth = browserSession(c);
+    const auth = accountSession(c);
     limit(c, 'share-manage', config.rateUpload);
     c.header('Cache-Control', 'no-store');
     return c.json(service.managedShareLink(auth, c.req.param('shareId')!, originFor(c)));
   });
   app.post('/api/shares/:shareId/revoke', c => {
     limit(c, 'share-manage', config.rateUpload);
-    service.revokeManagedShare(browserSession(c), c.req.param('shareId')!);
+    service.revokeManagedShare(accountSession(c), c.req.param('shareId')!);
     return c.body(null, 204);
   });
   app.delete('/api/shares/:shareId', c => {
     limit(c, 'share-manage', config.rateUpload);
-    service.deleteManagedShare(browserSession(c), c.req.param('shareId')!);
+    service.deleteManagedShare(accountSession(c), c.req.param('shareId')!);
     return c.body(null, 204);
   });
   app.patch('/api/tokens/:id', async c => {
-    const auth = browserSession(c);
+    const auth = accountSession(c);
     const body = await json(c, 2048);
     repo.renameAccessToken(c.req.param('id'), auth.user.id, personName(body.name));
     return c.body(null, 204);
@@ -399,7 +407,7 @@ export function createBackend(options: BackendOptions = {}) {
   app.delete('/api/tokens/:id', c => {
     // RHEA-190 dl: ?purge=1 removes an already revoked or expired token from the list for good.
     if (c.req.query('purge') === '1') {
-      repo.deleteAccessToken(c.req.param('id'), browserSession(c).user.id, now());
+      repo.deleteAccessToken(c.req.param('id'), accountSession(c).user.id, now());
       return c.body(null, 204);
     }
     repo.revokeAccessToken(c.req.param('id'), service.requireSession(c.get('session')).user.id);
@@ -442,7 +450,7 @@ export function createBackend(options: BackendOptions = {}) {
       expires_in: result.token.expiresAt === null ? null : Math.floor((result.token.expiresAt - now()) / 1000), token: result.token });
   });
   const requestedDevice = (c: Ctx, body: Record<string, unknown>) => {
-    browserSession(c);
+    accountSession(c);
     limit(c, 'device-confirm', 5);
     const verificationId = body.verification_id === undefined ? undefined : string(body.verification_id, 64);
     const device = repo.deviceForUserCode(userCodeHash(body.user_code), verificationId, now());
@@ -459,22 +467,124 @@ export function createBackend(options: BackendOptions = {}) {
     repo.decideDevice(device.id, c.get('session')!.user.id, decision === 'approve', now());
     return c.body(null, 204);
   });
-  const oauthFailure = (c: Ctx, error: unknown) => {
+  const appOAuthFlows = new Map<string, { appState: string; deviceName: string; linkUserId: string | null; linkTokenId: string | null; expiresAt: number }>();
+  const appOAuthCodes = new Map<string, { userId: string; deviceName: string; expiresAt: number }>();
+  const appLinkTickets = new Map<string, { userId: string; provider: string; tokenId: string | null; expiresAt: number }>();
+  const pruneMap = <T extends { expiresAt: number }>(map: Map<string, T>) => {
+    const time = now();
+    for (const [key, entry] of map) if (entry.expiresAt <= time) map.delete(key);
+    if (map.size >= 10000) throw new ApiError(429, 'RATE_LIMITED');
+  };
+  const issueAppToken = (user: { id: string; email: string; name: string; role: 'admin' | 'user' }, deviceName: string, mustChangePassword: boolean) => {
+    const scopes: TokenScope[] = user.role === 'admin' ? ['read', 'write', 'account', 'admin'] : ['read', 'write', 'account'];
+    const raw = token();
+    const createdAt = now();
+    const expiresAt = createdAt + APP_TOKEN_MS;
+    const record: AccessToken = { id: randomUUID(), userId: user.id, name: deviceName, scopes,
+      createdAt, lastUsedAt: null, expiresAt, revoked: 0 };
+    repo.createAccessToken(record, hash(raw));
+    return { access_token: raw, token_type: 'Bearer' as const, scope: scopes.join(' '),
+      expires_in: Math.floor(APP_TOKEN_MS / 1000),
+      user: { id: user.id, email: user.email, name: user.name, role: user.role }, mustChangePassword };
+  };
+  const liveAccountToken = (userId: string, tokenId: string) =>
+    repo.accessTokens(userId).some(t => t.id === tokenId && !t.revoked && t.scopes.includes('account') && (t.expiresAt === null || t.expiresAt > now()));
+  const oauthFailure = (c: Ctx, error: unknown, appState?: string) => {
     const code = error instanceof ApiError && oauthBrowserErrors.has(error.code) ? error.code : 'INTERNAL_ERROR';
+    if (appState) return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ error: code, state: appState })}`);
     return c.redirect(`${originFor(c)}/login?error=${code}`);
   };
+  app.post('/api/auth/app/password/login', async c => {
+    limit(c, 'auth', config.rateAuth, false);
+    const body = await json(c, 4096);
+    const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const password = body.password;
+    if (!email || email.length > 200 || typeof password !== 'string' || !password || password.length > PASSWORD_MAX) throw new ApiError(400, 'INVALID_INPUT');
+    const deviceName = optionalDeviceName(body.deviceName);
+    consume(c, `auth:email:${hash(email)}`, config.rateAuth);
+    const inviteHash = optionalInvite(body.invite);
+    const account = repo.passwordAccount(email);
+    const ok = await verifyPassword(password, account?.passwordHash);
+    if (!account || !ok) throw new ApiError(401, 'INVALID_CREDENTIALS');
+    if (account.disabled) throw new ApiError(403, 'USER_DISABLED');
+    if (inviteHash) repo.acceptInvite(inviteHash, account.id, now());
+    if (account.pending) repo.activate(account.id);
+    return c.json(issueAppToken(account, deviceName, Boolean(account.mustChangePassword)));
+  });
+  app.post('/api/auth/app/oauth/exchange', async c => {
+    limit(c, 'auth', config.rateAuth, false);
+    const body = await json(c, 2048);
+    const rawCode = string(body.code, 128);
+    const overrideName = body.deviceName === undefined || body.deviceName === null || body.deviceName === '' ? undefined : personName(body.deviceName);
+    const key = RAW_TOKEN_PATTERN.test(rawCode) ? hash(rawCode) : null;
+    const entry = key ? appOAuthCodes.get(key) : undefined;
+    if (key) appOAuthCodes.delete(key);
+    if (!entry || entry.expiresAt <= now()) throw new ApiError(401, 'OAUTH_CODE_INVALID');
+    const user = repo.userById(entry.userId);
+    if (!user || user.pending) throw new ApiError(401, 'OAUTH_CODE_INVALID');
+    if (user.disabled) throw new ApiError(403, 'USER_DISABLED');
+    return c.json(issueAppToken(user, overrideName ?? entry.deviceName, Boolean(user.mustChangePassword)));
+  });
+  app.post('/api/me/identities/:provider/app-link', async c => {
+    const auth = accountSession(c);
+    limit(c, 'identity', config.rateAuth);
+    const providerName = c.req.param('provider');
+    const providers = activeProviders();
+    if (!Object.hasOwn(providers, providerName)) throw new ApiError(404, 'PROVIDER_UNAVAILABLE');
+    const body = c.req.header('content-type')?.startsWith('application/json') ? await json(c, 2048) : {};
+    const requestedState = body.appState ?? body.app_state;
+    let appState: string;
+    if (requestedState === undefined || requestedState === null || requestedState === '') {
+      appState = token();
+    } else if (typeof requestedState === 'string' && APP_STATE_PATTERN.test(requestedState)) {
+      appState = requestedState;
+    } else {
+      throw new ApiError(400, 'INVALID_INPUT');
+    }
+    pruneMap(appLinkTickets);
+    const raw = token();
+    appLinkTickets.set(hash(raw), { userId: auth.user.id, provider: providerName, tokenId: auth.bearer?.id ?? null, expiresAt: now() + 60000 });
+    const path = `/api/auth/${providerName}?${new URLSearchParams({ link_ticket: raw, app_redirect: APP_OAUTH_REDIRECT, app_state: appState })}`;
+    return c.json({ ticket: raw, state: appState, path, url: `${originFor(c)}${path}`, expires_in: 60 });
+  });
   app.get('/api/auth/:provider', c => {
     limit(c, 'auth', config.rateAuth, false);
     const providerName = c.req.param('provider');
     const providers = activeProviders();
     const provider = Object.hasOwn(providers, providerName) ? providers[providerName] : undefined;
     if (!provider) throw new ApiError(404, 'PROVIDER_UNAVAILABLE');
-    // ?link=1 binds this provider to the signed-in account instead of signing in.
-    // It needs a browser session; the callback re-checks that the same user is still signed in.
+    const appRedirect = c.req.query('app_redirect');
+    const appState = c.req.query('app_state');
+    const rawDeviceName = c.req.query('device_name');
+    const linkTicket = c.req.query('link_ticket');
+    let appMode: { appState: string; deviceName: string; linkTokenId: string | null } | null = null;
+    if (appRedirect !== undefined) {
+      if (appRedirect !== APP_OAUTH_REDIRECT) throw new ApiError(400, 'INVALID_APP_REDIRECT');
+      if (!appState || !APP_STATE_PATTERN.test(appState)) throw new ApiError(400, 'INVALID_INPUT');
+      appMode = { appState, deviceName: optionalDeviceName(rawDeviceName), linkTokenId: null };
+    } else if (appState !== undefined || rawDeviceName !== undefined || linkTicket !== undefined) {
+      throw new ApiError(400, 'INVALID_INPUT');
+    }
+    // ?link=1 binds this provider to the signed-in browser account; ?link_ticket=... binds in App mode.
     let linkUserId: string | null = null;
-    if (c.req.query('link') !== undefined) {
+    if (linkTicket !== undefined) {
+      if (c.req.query('link') !== undefined) throw new ApiError(400, 'INVALID_INPUT');
+      const ticketKey = RAW_TOKEN_PATTERN.test(linkTicket) ? hash(linkTicket) : null;
+      const entry = ticketKey ? appLinkTickets.get(ticketKey) : undefined;
+      if (ticketKey) appLinkTickets.delete(ticketKey);
+      const user = entry ? repo.userById(entry.userId) : undefined;
+      const tokenOk = !entry?.tokenId || liveAccountToken(entry.userId, entry.tokenId);
+      if (!entry || entry.expiresAt <= now() || entry.provider !== providerName || !user || user.disabled || user.pending || !tokenOk) {
+        return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ error: 'UNAUTHENTICATED', state: appMode!.appState })}`);
+      }
+      linkUserId = entry.userId;
+      appMode!.linkTokenId = entry.tokenId;
+    } else if (c.req.query('link') !== undefined) {
       const auth = c.get('session');
-      if (!auth || auth.bearer) return c.redirect(`${originFor(c)}/login?error=UNAUTHENTICATED`);
+      if (!auth || auth.bearer) {
+        if (appMode) return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ error: 'UNAUTHENTICATED', state: appMode.appState })}`);
+        return c.redirect(`${originFor(c)}/login?error=UNAUTHENTICATED`);
+      }
       linkUserId = auth.user.id;
     }
     const invite = linkUserId ? undefined : c.req.query('invite');
@@ -482,17 +592,26 @@ export function createBackend(options: BackendOptions = {}) {
     const liveInvite = inviteHash ? repo.invite(inviteHash, now()) : undefined;
     // Invite-first applies after the installation has an account. An unknown
     // token must not stop the first sign-up while the users table is empty.
-    if (inviteHash && !liveInvite && repo.users().length > 0) return c.redirect(`${originFor(c)}/login?error=INVITE_INVALID`);
+    if (inviteHash && !liveInvite && repo.users().length > 0) {
+      if (appMode) return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ error: 'INVITE_INVALID', state: appMode.appState })}`);
+      return c.redirect(`${originFor(c)}/login?error=INVITE_INVALID`);
+    }
     const state = token();
     const browser = token();
     const verifier = token();
-    repo.saveFlow({ stateHash: hash(state), browserHash: hash(browser), provider: providerName, verifier,
+    const stateHash = hash(state);
+    if (appMode) {
+      pruneMap(appOAuthFlows);
+      appOAuthFlows.set(stateHash, { appState: appMode.appState, deviceName: appMode.deviceName, linkUserId, linkTokenId: appMode.linkTokenId, expiresAt: now() + 600000 });
+    }
+    repo.saveFlow({ stateHash, browserHash: hash(browser), provider: providerName, verifier,
       inviteHash: liveInvite ? inviteHash : null, expiresAt: now() + 600000, linkUserId });
     setCookie(c, flowCookieName(c), browser, { ...cookieFor(c), path: '/api/auth', maxAge: 600 });
     return c.redirect(provider.authorizationUrl(state, hash(verifier), callbackUrl(c, providerName)));
   });
   app.get('/api/auth/:provider/callback', async c => {
     let linking = false;
+    let appFlow: { appState: string; deviceName: string; linkUserId: string | null; linkTokenId: string | null; expiresAt: number } | undefined;
     try {
       limit(c, 'auth', config.rateAuth, false);
       const providerName = c.req.param('provider');
@@ -501,8 +620,11 @@ export function createBackend(options: BackendOptions = {}) {
       const state = c.req.query('state');
       const browser = getCookie(c, flowCookieName(c));
       if (!provider || !state || !browser) throw new ApiError(400, 'OAUTH_STATE_INVALID');
-      const flow = repo.consumeFlow(hash(state), hash(browser), providerName, now());
+      const stateHash = hash(state);
+      const flow = repo.consumeFlow(stateHash, hash(browser), providerName, now());
       if (!flow) throw new ApiError(400, 'OAUTH_STATE_INVALID');
+      appFlow = appOAuthFlows.get(stateHash);
+      appOAuthFlows.delete(stateHash);
       deleteCookie(c, flowCookieName(c), { ...cookieFor(c), path: '/api/auth' });
       linking = Boolean(flow.linkUserId);
       const code = c.req.query('code');
@@ -515,11 +637,24 @@ export function createBackend(options: BackendOptions = {}) {
       // A completed exchange proves id, secret and the registered callback URL.
       if (!options.providers && repo.oauthApps().some(app => app.provider === providerName)) repo.recordOAuthCheck(providerName, true, 'LOGIN_OK', now());
       if (flow.linkUserId) {
+        if (appFlow) {
+          if (appFlow.linkUserId !== flow.linkUserId) throw new ApiError(401, 'UNAUTHENTICATED');
+          if (appFlow.linkTokenId && !liveAccountToken(flow.linkUserId, appFlow.linkTokenId)) throw new ApiError(401, 'UNAUTHENTICATED');
+          const added = repo.linkIdentity(flow.linkUserId, identity, now());
+          return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ linked: providerName, state: appFlow.appState, ...(added ? {} : { already: '1' }) })}`);
+        }
         const auth = c.get('session');
         // The browser that started the bind must still be signed in as the same user.
         if (!auth || auth.bearer || auth.user.id !== flow.linkUserId) throw new ApiError(401, 'UNAUTHENTICATED');
         const added = repo.linkIdentity(auth.user.id, identity, now());
         return c.redirect(`${originFor(c)}/settings?${new URLSearchParams({ linked: providerName, ...(added ? {} : { already: '1' }) })}#login-methods`);
+      }
+      if (appFlow) {
+        const user = repo.oauthUser(identity, flow.inviteHash, config.adminEmails, now(), registrationPolicy());
+        pruneMap(appOAuthCodes);
+        const exchangeCode = token();
+        appOAuthCodes.set(hash(exchangeCode), { userId: user.id, deviceName: appFlow.deviceName, expiresAt: now() + 60000 });
+        return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ code: exchangeCode, state: appFlow.appState })}`);
       }
       const session = token();
       repo.login(identity, flow.inviteHash, config.adminEmails, hash(session), now() + config.sessionMs, now(),
@@ -527,6 +662,7 @@ export function createBackend(options: BackendOptions = {}) {
       setCookie(c, sessionCookieName(c), session, { ...cookieFor(c), maxAge: Math.floor(config.sessionMs / 1000) });
       return c.redirect(`${originFor(c)}/`);
     } catch (error) {
+      if (appFlow) return oauthFailure(c, error, appFlow.appState);
       if (linking) {
         const code = error instanceof ApiError && oauthBrowserErrors.has(error.code) ? error.code : 'INTERNAL_ERROR';
         return c.redirect(`${originFor(c)}/settings?link_error=${code}#login-methods`);
@@ -626,7 +762,7 @@ export function createBackend(options: BackendOptions = {}) {
     return c.json({ user, mustChangePassword: false }, 201);
   });
   app.put('/api/me/password', async c => {
-    const auth = browserSession(c);
+    const auth = accountSession(c);
     limit(c, 'password', config.rateAuth);
     const body = await json(c, 4096);
     const next = checkPassword(body.newPassword);
@@ -646,11 +782,11 @@ export function createBackend(options: BackendOptions = {}) {
   });
   // RHEA-190 m11: 登录方式 — several providers on one account.
   app.get('/api/me/identities', c => {
-    const auth = browserSession(c);
+    const auth = accountSession(c);
     return c.json({ identities: repo.identities(auth.user.id), available: Object.keys(activeProviders()) });
   });
   app.delete('/api/me/identities/:provider', c => {
-    const auth = browserSession(c);
+    const auth = accountSession(c);
     limit(c, 'identity', config.rateAuth);
     repo.unlinkIdentity(auth.user.id, c.req.param('provider'));
     return c.body(null, 204);
@@ -672,11 +808,7 @@ export function createBackend(options: BackendOptions = {}) {
     if (!isSupportedProvider(provider)) throw new ApiError(404, 'PROVIDER_UNSUPPORTED');
     return provider;
   };
-  const adminBrowser = (c: Ctx) => {
-    const auth = service.admin(c.get('session'));
-    if (auth.bearer) throw new ApiError(403, 'BROWSER_SESSION_REQUIRED');
-    return auth;
-  };
+  const adminBrowser = (c: Ctx) => service.admin(c.get('session'));
   app.get('/api/admin/oauth', c => { adminBrowser(c); return c.json(oauthView(c)); });
   app.put('/api/admin/oauth/:provider', async c => {
     const auth = adminBrowser(c);
@@ -780,11 +912,11 @@ export function createBackend(options: BackendOptions = {}) {
     return repo.browserSessions(userId, now()).map(row => sessionView(row, auth.sessionId, onlineIds.has(row.id)));
   };
   app.get('/api/sessions', c => {
-    const auth = browserSession(c);
+    const auth = accountSession(c);
     return c.json({ sessions: listSessions(auth.user.id, auth) });
   });
   app.delete('/api/sessions/:id', c => {
-    const auth = browserSession(c);
+    const auth = accountSession(c);
     limit(c, 'session-revoke', config.rateAuth);
     const removed = repo.revokeSession(c.req.param('id'), auth.user.id);
     events.revalidate();
@@ -792,7 +924,7 @@ export function createBackend(options: BackendOptions = {}) {
     return c.body(null, 204);
   });
   app.post('/api/sessions/revoke-others', c => {
-    const auth = browserSession(c);
+    const auth = accountSession(c);
     limit(c, 'session-revoke', config.rateAuth);
     const revoked = repo.revokeOtherSessions(auth.user.id, auth.sessionHash);
     events.revalidate();

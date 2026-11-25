@@ -674,7 +674,8 @@ pub fn delete_room_item(
 pub fn insert_file(
     db: &mut Connection,
     config: &Config,
-    session_hash: &str,
+    session_hash: Option<&str>,
+    bearer_id: Option<&str>,
     space_id: &str,
     input: FileInput,
 ) -> ApiResult<Item> {
@@ -682,14 +683,14 @@ pub fn insert_file(
     // Named groups are created before the capacity check, matching insert_text.
     if let Some(group) = &input.group {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let account = writable_account(&tx, Some(session_hash), None)?;
+        let account = writable_account(&tx, session_hash, bearer_id)?;
         space(&tx, space_id, &account.user.id, true)?;
         ensure_group(&tx, space_id, group, time)?;
         tx.commit()?;
     }
 
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let account = writable_account(&tx, Some(session_hash), None)?;
+    let account = writable_account(&tx, session_hash, bearer_id)?;
     let space = space(&tx, space_id, &account.user.id, true)?;
     if space.expires_at.is_some_and(|expiry| expiry <= time) {
         return Err(ApiError::NOT_FOUND);
@@ -746,13 +747,14 @@ pub fn insert_file(
 
 pub fn delete_item(
     db: &mut Connection,
-    session_hash: &str,
+    session_hash: Option<&str>,
+    bearer_id: Option<&str>,
     space_id: &str,
     item_id: &str,
 ) -> ApiResult<Vec<String>> {
     let time = now();
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let account = writable_account(&tx, Some(session_hash), None)?;
+    let account = writable_account(&tx, session_hash, bearer_id)?;
     let space = space(&tx, space_id, &account.user.id, true)?;
     let (author, file_key, thumbnail_key): (Option<String>, Option<String>, Option<String>) = tx
         .query_row(
@@ -1195,7 +1197,8 @@ pub fn expire_uploads(db: &mut Connection, time: i64) -> ApiResult<Vec<String>> 
 pub fn complete_upload(
     db: &mut Connection,
     config: &Config,
-    session_hash: &str,
+    session_hash: Option<&str>,
+    bearer_id: Option<&str>,
     space_id: &str,
     upload_id: &str,
     input: FileInput,
@@ -1203,14 +1206,14 @@ pub fn complete_upload(
     let time = now();
     if let Some(group) = &input.group {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let account = writable_account(&tx, Some(session_hash), None)?;
+        let account = writable_account(&tx, session_hash, bearer_id)?;
         space(&tx, space_id, &account.user.id, true)?;
         ensure_group(&tx, space_id, group, time)?;
         tx.commit()?;
     }
 
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let account = writable_account(&tx, Some(session_hash), None)?;
+    let account = writable_account(&tx, session_hash, bearer_id)?;
     let space = space(&tx, space_id, &account.user.id, true)?;
     if space.expires_at.is_some_and(|expiry| expiry <= time) {
         return Err(ApiError::NOT_FOUND);

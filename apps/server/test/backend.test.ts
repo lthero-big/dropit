@@ -1614,7 +1614,11 @@ test('RHEA-222: personal share presets persist, normalize and stay isolated from
   ]) assert.equal((await f.json(endpoint, invalid, admin.cookie, 'PUT')).status, 400, JSON.stringify(invalid));
   assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), expected);
   const pat = await (await f.json('/api/tokens', { name: 'presets', scopes: ['read', 'write'], expiresInDays: 1 }, admin.cookie)).json();
-  assert.equal((await f.request(endpoint, { headers: { authorization: `Bearer ${pat.token}` } })).status, 403);
+  // RHEA-270: read-scoped Bearer tokens may read personal share presets, while writes still require account scope or a browser session.
+  assert.deepEqual(await (await f.request(endpoint, { headers: { authorization: `Bearer ${pat.token}` } })).json(), expected);
+  const putDenied = await f.request(endpoint, { method: 'PUT', headers: { authorization: `Bearer ${pat.token}`, 'content-type': 'application/json' }, body: JSON.stringify(empty) });
+  assert.equal(putDenied.status, 403);
+  assert.equal((await putDenied.json()).error.code, 'INSUFFICIENT_SCOPE');
   assert.equal((await f.json(endpoint, { days: [], views: [] }, admin.cookie, 'PUT')).status, 200);
   assert.deepEqual(await (await f.request(endpoint, {}, admin.cookie)).json(), empty);
 });

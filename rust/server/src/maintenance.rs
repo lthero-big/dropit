@@ -23,7 +23,7 @@ pub async fn run_once(app: &App) -> ApiResult<()> {
             json!({ "type": "item.deleted", "id": item.id }),
         );
     }
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     flush_garbage(app, &directory).await;
 
     let referenced = app.db.run(|db| db::referenced_file_keys(&*db)).await?;
@@ -37,7 +37,9 @@ pub async fn run_loop(app: App, mut shutdown: watch::Receiver<bool>) {
     if let Err(error) = run_once(&app).await {
         log_error("initial maintenance", &error);
     }
-    let mut ticks = interval(Duration::from_millis(app.config.cleanup_interval_ms as u64));
+    let mut ticks = interval(Duration::from_millis(
+        app.config().cleanup_interval_ms as u64,
+    ));
     ticks.tick().await;
     loop {
         tokio::select! {

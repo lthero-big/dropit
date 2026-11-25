@@ -688,8 +688,8 @@ pub async fn android_latest(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
 ) -> ApiResult<impl IntoResponse> {
-    app.limit("app-update", &context.ip, app.config.rate_general)?;
-    let Some(release) = read_android_release(&app.config.data).await else {
+    app.limit("app-update", &context.ip, app.config().rate_general)?;
+    let Some(release) = read_android_release(&app.config().data).await else {
         return Err(ApiError::new(404, "NO_RELEASE"));
     };
     let mut body = json!({
@@ -718,14 +718,14 @@ pub async fn android_download(
     Extension(context): Extension<RequestContext>,
     AxumPath(file): AxumPath<String>,
 ) -> ApiResult<Response> {
-    app.limit("app-download", &context.ip, app.config.rate_upload)?;
-    let Some(release) = read_android_release(&app.config.data).await else {
+    app.limit("app-download", &context.ip, app.config().rate_upload)?;
+    let Some(release) = read_android_release(&app.config().data).await else {
         return Err(ApiError::new(404, "NO_RELEASE"));
     };
     if file != release.file {
         return Err(ApiError::new(404, "NO_RELEASE"));
     }
-    let path = android_dir(&app.config.data).join(&release.file);
+    let path = android_dir(&app.config().data).join(&release.file);
     let input = tokio::fs::File::open(path)
         .await
         .map_err(|_| ApiError::new(404, "NO_RELEASE"))?;
@@ -760,7 +760,7 @@ pub async fn admin_check(
     Extension(context): Extension<RequestContext>,
 ) -> ApiResult<impl IntoResponse> {
     crate::admin_session(&context)?;
-    app.limit("update-check", &context.ip, app.config.rate_auth)?;
+    app.limit("update-check", &context.ip, app.config().rate_auth)?;
     app.update.check_now().await;
     Ok(Json(app.update.report()))
 }

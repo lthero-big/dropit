@@ -116,11 +116,12 @@ test('AC-O3: admin role, CSRF and Bearer scopes protect writes and audit reads',
   assert.equal((await f.request('/api/admin/limits', 'PATCH', { maxItems: 10 }, f.admin.cookie, { origin: 'http://evil.example' })).status, 403);
   const read = await ok(await f.request('/api/tokens', 'POST', { name: 'Read only', scopes: ['read'] }), 201);
   const headers = { authorization: `Bearer ${read.token}` };
-  assert.equal((await f.request('/api/admin/limits', 'GET', undefined, '', headers)).status, 200);
-  assert.equal((await f.request('/api/admin/limits/audit', 'GET', undefined, '', headers)).status, 200);
+  assert.equal((await (await f.request('/api/admin/limits', 'GET', undefined, '', headers)).json()).error.code, 'INSUFFICIENT_SCOPE');
+  assert.equal((await (await f.request('/api/admin/limits/audit', 'GET', undefined, '', headers)).json()).error.code, 'INSUFFICIENT_SCOPE');
   assert.equal((await f.request('/api/admin/limits', 'PATCH', { maxItems: 10 }, f.admin.cookie, headers)).status, 403);
   const writer = await ok(await f.request('/api/tokens', 'POST', { name: 'Writer' }), 201);
-  await ok(await f.request('/api/admin/limits', 'PATCH', { maxItems: 10 }, '', { authorization: `Bearer ${writer.token}` }));
+  assert.equal((await (await f.request('/api/admin/limits', 'PATCH', { maxItems: 10 }, '', { authorization: `Bearer ${writer.token}` })).json()).error.code, 'INSUFFICIENT_SCOPE');
+  await ok(await f.patch({ maxItems: 10 }));
   f.backend.repo.updateUser(f.member.user.id, { role: 'admin' });
   f.backend.repo.updateUser(f.admin.user.id, { role: 'user' });
   assert.equal((await f.patch({ maxItems: 11 })).status, 403);

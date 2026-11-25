@@ -66,9 +66,10 @@ pub async fn site(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
 ) -> Json<Value> {
+    let config = app.config();
     Json(
-        json!({ "origin": app.config.origin.as_ref().map(|(origin, _)| origin),
-        "source": app.config.origin.as_ref().map(|(_, source)| *source).unwrap_or("request"),
+        json!({ "origin": config.origin.as_ref().map(|(origin, _)| origin),
+        "source": config.origin.as_ref().map(|(_, source)| *source).unwrap_or("request"),
         "requestOrigin": context.request_origin }),
     )
 }

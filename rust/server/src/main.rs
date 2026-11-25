@@ -7,6 +7,7 @@ mod downloads;
 mod images;
 mod items;
 mod js;
+mod limits;
 mod machine;
 mod maintenance;
 mod migrations;
@@ -21,7 +22,7 @@ mod uploads;
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex, atomic::AtomicU32},
+    sync::{Arc, Mutex, RwLock, atomic::AtomicU32},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -105,7 +106,7 @@ impl IntoResponse for ApiError {
 }
 
 struct StateData {
-    config: Arc<Config>,
+    runtime_config: RwLock<Arc<Config>>,
     db: Database,
     build: BuildInfo,
     update: update::UpdateService,
@@ -115,6 +116,9 @@ struct StateData {
     upload_slots: AtomicU32,
     preview_slots: AtomicU32,
     app_tickets: Mutex<HashMap<String, AppTicket>>,
+    app_oauth_flows: Mutex<HashMap<String, auth::AppOAuthFlow>>,
+    app_oauth_codes: Mutex<HashMap<String, auth::AppOAuthCode>>,
+    app_link_tickets: Mutex<HashMap<String, auth::AppLinkTicket>>,
     chunk_work: uploads::ChunkWork,
     pin_lockouts: Mutex<HashMap<String, (u32, i64, i64)>>,
     setup_code: Mutex<Option<String>>,
@@ -134,12 +138,25 @@ struct AppTicket {
 }
 
 impl StateData {
+    pub(crate) fn config(&self) -> Arc<Config> {
+        self.runtime_config
+            .read()
+            .expect("config lock poisoned")
+            .clone()
+    }
+
+    pub(crate) fn replace_config(&self, config: Config) -> ApiResult<()> {
+        let mut guard = self.runtime_config.write().map_err(ApiError::internal)?;
+        *guard = Arc::new(config);
+        Ok(())
+    }
+
     fn limit(&self, group: &'static str, key: &str, limit: u32) -> ApiResult<()> {
         let time = now();
         let mut buckets = self.limiter.lock().map_err(ApiError::internal)?;
         buckets.retain(|_, bucket| bucket.reset > time);
         let key = (group, key.to_owned());
-        let reset = time + self.config.rate_window;
+        let reset = time + self.config().rate_window;
         let retry_at = if buckets.len() >= 10000 && !buckets.contains_key(&key) {
             Some(reset)
         } else {
@@ -237,12 +254,15 @@ async fn main() -> StartupResult<()> {
         build,
         update,
         realtime: Realtime::new(),
-        config: Arc::new(config),
+        runtime_config: RwLock::new(Arc::new(config)),
         limiter: Mutex::new(HashMap::new()),
         password_slots: Arc::new(Semaphore::new(4)),
         upload_slots: AtomicU32::new(0),
         preview_slots: AtomicU32::new(0),
         app_tickets: Mutex::new(HashMap::new()),
+        app_oauth_flows: Mutex::new(HashMap::new()),
+        app_oauth_codes: Mutex::new(HashMap::new()),
+        app_link_tickets: Mutex::new(HashMap::new()),
         chunk_work: uploads::ChunkWork::default(),
         pin_lockouts: Mutex::new(HashMap::new()),
         setup_code: Mutex::new(setup_code),
@@ -251,6 +271,14 @@ async fn main() -> StartupResult<()> {
         .route("/healthz", get(healthz))
         .route("/api/auth/password/login", post(login))
         .route("/api/auth/password/register", post(auth::register))
+        .route(
+            "/api/auth/app/password/login",
+            post(auth::app_password_login),
+        )
+        .route(
+            "/api/auth/app/oauth/exchange",
+            post(auth::app_oauth_exchange),
+        )
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/{provider}", get(auth::oauth_start))
         .route("/api/auth/{provider}/callback", get(auth::oauth_callback))
@@ -393,6 +421,10 @@ async fn main() -> StartupResult<()> {
             "/api/me/identities/{provider}",
             delete(auth::unlink_identity),
         )
+        .route(
+            "/api/me/identities/{provider}/app-link",
+            post(auth::app_oauth_link),
+        )
         .route("/api/admin/oauth", get(auth::admin_oauth))
         .route(
             "/api/admin/oauth/{provider}",
@@ -402,6 +434,15 @@ async fn main() -> StartupResult<()> {
             "/api/admin/oauth/{provider}/verify",
             post(auth::verify_oauth),
         )
+        .route(
+            "/api/admin/site",
+            get(auth::admin_site).put(auth::save_admin_site),
+        )
+        .route(
+            "/api/admin/limits",
+            get(limits::get_limits).patch(limits::patch_limits),
+        )
+        .route("/api/admin/limits/audit", get(limits::audit_limits))
         .route("/api/sessions", get(auth::sessions))
         .route("/api/sessions/{id}", delete(auth::revoke_session))
         .route(
@@ -577,11 +618,11 @@ async fn static_or_not_found(State(app): State<App>, request: Request) -> Respon
     } else {
         requested.as_ref()
     };
-    let candidate = app.config.static_dir.join(requested);
+    let candidate = app.config().static_dir.join(requested);
     let (bytes, content_path) = match tokio::fs::read(&candidate).await {
         Ok(bytes) => (bytes, candidate),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && !requested.contains('.') => {
-            let index = app.config.static_dir.join("index.html");
+            let index = app.config().static_dir.join("index.html");
             match tokio::fs::read(&index).await {
                 Ok(bytes) => (bytes, index),
                 Err(_) => return ApiError::NOT_FOUND.into_response(),
@@ -622,18 +663,18 @@ async fn request_context(
 ) -> Response {
     let short_download = request.uri().path().starts_with("/d/");
     let is_api = request.uri().path().starts_with("/api/") || short_download;
-    let own = request_origin(&app.config, &request, peer.ip());
-    let origin = app
-        .config
+    let config = app.config();
+    let own = request_origin(&config, &request, peer.ip());
+    let origin = config
         .origin
         .as_ref()
         .map(|(origin, _)| origin.as_str())
         .or(own.as_deref());
-    let secure = app.config.production && origin.is_some_and(|origin| origin.starts_with("https:"));
+    let secure = config.production && origin.is_some_and(|origin| origin.starts_with("https:"));
     let mut response = if short_download {
         let (mut parts, body) = request.into_parts();
-        let ip = client_ip(&app.config, &parts.headers, peer.ip()).to_canonical();
-        match app.limit("general:ip", &ip.to_string(), app.config.rate_general) {
+        let ip = client_ip(&app.config(), &parts.headers, peer.ip()).to_canonical();
+        match app.limit("general:ip", &ip.to_string(), app.config().rate_general) {
             Err(error) => error.into_response(),
             Ok(()) => {
                 parts.extensions.insert(RequestContext {
@@ -709,16 +750,16 @@ async fn api_context(
     secure_cookie: bool,
 ) -> ApiResult<RequestContext> {
     let headers = &request.headers;
-    let ip = client_ip(&app.config, headers, peer).to_canonical();
+    let ip = client_ip(&app.config(), headers, peer).to_canonical();
     let ip_summary = summarize_ip(ip);
     let ip = ip.to_string();
     // Chunk PUT uses only the chunk bucket. It must not consume general, token,
     // room-access, or room-write, matching the TypeScript middleware.
     let chunk_request = request.method == Method::PUT && chunk_upload_path(request.uri.path());
     if chunk_request {
-        app.limit("chunk:ip", &ip, app.config.rate_chunk)?;
+        app.limit("chunk:ip", &ip, app.config().rate_chunk)?;
     } else {
-        app.limit("general:ip", &ip, app.config.rate_general)?;
+        app.limit("general:ip", &ip, app.config().rate_general)?;
     }
     let raw_session = read_cookie(headers, cookie_name(secure_cookie));
     let auth = if let Some(authorization) = header_value(headers, "authorization") {
@@ -742,9 +783,9 @@ async fn api_context(
             return Err(error);
         };
         if chunk_request {
-            app.limit("chunk-token", &bearer.id, app.config.rate_chunk)?;
+            app.limit("chunk-token", &bearer.id, app.config().rate_chunk)?;
         } else {
-            app.limit("token", &bearer.id, app.config.rate_token)?;
+            app.limit("token", &bearer.id, app.config().rate_token)?;
         }
         Some(Auth {
             account: Arc::new(account),
@@ -768,12 +809,12 @@ async fn api_context(
     };
     if let Some(auth) = &auth {
         if chunk_request {
-            app.limit("chunk:user", &auth.account.user.id, app.config.rate_chunk)?;
+            app.limit("chunk:user", &auth.account.user.id, app.config().rate_chunk)?;
         } else {
             app.limit(
                 "general:user",
                 &auth.account.user.id,
-                app.config.rate_general,
+                app.config().rate_general,
             )?;
         }
     }
@@ -791,15 +832,18 @@ async fn api_context(
     let public_device = request.method == Method::POST
         && matches!(
             request.uri.path(),
-            "/api/auth/device/authorize" | "/api/auth/device/token"
+            "/api/auth/device/authorize"
+                | "/api/auth/device/token"
+                | "/api/auth/app/password/login"
+                | "/api/auth/app/oauth/exchange"
         )
         && raw_session.is_none()
         && header_value(headers, "origin")
             .is_none_or(|received| origin_matches(app, own, received));
     if !safe && auth.as_ref().is_none_or(|auth| auth.bearer.is_none()) && !public_device {
         let received = header_value(headers, "origin").unwrap_or_default();
-        let (expected, source) = app
-            .config
+        let config = app.config();
+        let (expected, source) = config
             .origin
             .as_ref()
             .map(|(origin, source)| (origin.as_str(), *source))
@@ -822,7 +866,7 @@ async fn api_context(
     }
     if auth
         .as_ref()
-        .is_some_and(|auth| auth.bearer.is_none() && auth.account.must_change_password)
+        .is_some_and(|auth| auth.account.must_change_password)
         && !matches!(
             request.uri.path(),
             "/api/me"
@@ -855,8 +899,8 @@ fn is_bearer(value: &str) -> bool {
 }
 
 fn origin_matches(app: &StateData, own: Option<&str>, received: &str) -> bool {
-    let (expected, source) = app
-        .config
+    let config = app.config();
+    let (expected, source) = config
         .origin
         .as_ref()
         .map(|(origin, source)| (origin.as_str(), *source))
@@ -966,7 +1010,7 @@ async fn login(
     Extension(context): Extension<RequestContext>,
     request: Request,
 ) -> ApiResult<impl IntoResponse> {
-    app.limit("auth", &context.ip, app.config.rate_auth)?;
+    app.limit("auth", &context.ip, app.config().rate_auth)?;
     let user_agent = header_value(request.headers(), "user-agent").map(|agent| {
         let truncated: Vec<_> = agent.encode_utf16().take(400).collect();
         String::from_utf16_lossy(&truncated)
@@ -982,7 +1026,11 @@ async fn login(
     if email.is_empty() || email.encode_utf16().count() > 200 {
         return Err(ApiError::INVALID_INPUT);
     }
-    app.limit("auth:email", &password::hash(&email), app.config.rate_auth)?;
+    app.limit(
+        "auth:email",
+        &password::hash(&email),
+        app.config().rate_auth,
+    )?;
     let invite = match body.get("invite") {
         None | Some(crate::js::Value::Null) => None,
         Some(crate::js::Value::String(value)) if value.is_empty() => None,
@@ -1013,7 +1061,7 @@ async fn login(
 
     let token = password::session_token()?;
     let session_hash = password::hash(&token);
-    let session_ms = app.config.session;
+    let session_ms = app.config().session;
     let account = app.db.run(move |db| {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = db::password_account(&tx, &email)?
@@ -1081,16 +1129,23 @@ async fn logout(
     ))
 }
 
-pub(crate) fn browser_session(context: &RequestContext) -> ApiResult<&Auth> {
+pub(crate) fn account_session(context: &RequestContext) -> ApiResult<&Auth> {
     let auth = context.require_auth()?;
-    if auth.bearer.is_some() {
-        return Err(ApiError::new(403, "BROWSER_SESSION_REQUIRED"));
+    if let Some(bearer) = &auth.bearer
+        && !bearer.scopes.iter().any(|scope| scope == "account")
+    {
+        return Err(ApiError::new(403, "INSUFFICIENT_SCOPE"));
     }
     Ok(auth)
 }
 
 pub(crate) fn admin_session(context: &RequestContext) -> ApiResult<&Auth> {
-    let auth = browser_session(context)?;
+    let auth = context.require_auth()?;
+    if let Some(bearer) = &auth.bearer
+        && !bearer.scopes.iter().any(|scope| scope == "admin")
+    {
+        return Err(ApiError::new(403, "INSUFFICIENT_SCOPE"));
+    }
     if !machine::is_admin(&auth.account) {
         return Err(ApiError::new(403, "FORBIDDEN"));
     }
@@ -1102,8 +1157,8 @@ async fn create_token(
     Extension(context): Extension<RequestContext>,
     request: Request,
 ) -> ApiResult<impl IntoResponse> {
-    let auth = browser_session(&context)?;
-    app.limit("token-create", &context.ip, app.config.rate_auth)?;
+    let auth = account_session(&context)?;
+    app.limit("token-create", &context.ip, app.config().rate_auth)?;
     let input = machine::token_options(&read_json(request, 2048).await?, false)?;
     let raw = machine::raw_token()?;
     let record = machine::AccessToken {
@@ -1152,7 +1207,7 @@ async fn rename_token(
     path: Result<Path<String>, PathRejection>,
     request: Request,
 ) -> ApiResult<impl IntoResponse> {
-    let auth = browser_session(&context)?;
+    let auth = account_session(&context)?;
     let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let body = read_json(request, 2048).await?;
     let name = machine::person_name(body.get("name"))?;
@@ -1173,8 +1228,8 @@ async fn delete_token(
     let auth = context.require_auth()?.clone();
     let user_id = auth.account.user.id.clone();
     if query.get("purge").is_some_and(|value| value == "1") {
-        let browser = browser_session(&context)?;
-        let owner = browser.account.user.id.clone();
+        let account = account_session(&context)?;
+        let owner = account.account.user.id.clone();
         app.db
             .run(move |db| machine::delete_token(db, &id, &owner, now()))
             .await?;
@@ -1218,7 +1273,7 @@ async fn admin_delete_token(
 }
 
 pub(crate) fn origin_for(app: &StateData, context: &RequestContext) -> String {
-    app.config
+    app.config()
         .origin
         .as_ref()
         .map(|(origin, _)| origin.clone())
@@ -1231,7 +1286,7 @@ async fn device_authorize(
     Extension(context): Extension<RequestContext>,
     request: Request,
 ) -> ApiResult<Json<Value>> {
-    app.limit("device-authorize", &context.ip, app.config.rate_auth)?;
+    app.limit("device-authorize", &context.ip, app.config().rate_auth)?;
     let input = machine::token_options(&read_json(request, 2048).await?, true)?;
     let device_code = machine::raw_token()?;
     let user_code = machine::user_code()?;
@@ -1273,7 +1328,7 @@ async fn device_token(
     Extension(context): Extension<RequestContext>,
     request: Request,
 ) -> ApiResult<impl IntoResponse> {
-    app.limit("device-poll", &context.ip, app.config.rate_general)?;
+    app.limit("device-poll", &context.ip, app.config().rate_general)?;
     let body = read_json(request, 2048).await?;
     let device_code = body
         .get("device_code")
@@ -1318,7 +1373,7 @@ async fn requested_device(
     user_code: Option<&str>,
     verification_id: Option<&str>,
 ) -> ApiResult<machine::DeviceAuthorization> {
-    browser_session(context)?;
+    account_session(context)?;
     app.limit("device-confirm", &context.ip, 5)?;
     let code = user_code
         .filter(|value| !value.is_empty())
@@ -1367,7 +1422,7 @@ async fn decide_device(
         .get("verification_id")
         .and_then(crate::js::Value::as_str);
     let device = requested_device(&app, &context, user_code, verification_id).await?;
-    let user_id = browser_session(&context)?.account.user.id.clone();
+    let user_id = account_session(&context)?.account.user.id.clone();
     app.db
         .run(move |db| machine::decide_device(db, &device.id, &user_id, approve, now()))
         .await?;
@@ -1402,7 +1457,7 @@ async fn app_session_ticket(
     if !bearer.scopes.iter().any(|scope| scope == "web") {
         return Err(ApiError::new(403, "INSUFFICIENT_SCOPE"));
     }
-    app.limit("app-session", &context.ip, app.config.rate_auth)?;
+    app.limit("app-session", &context.ip, app.config().rate_auth)?;
     let time = now();
     let mut tickets = app.app_tickets.lock().map_err(ApiError::internal)?;
     tickets.retain(|_, entry| entry.expires_at > time);
@@ -1429,7 +1484,7 @@ async fn app_session(
     Query(query): Query<HashMap<String, String>>,
     request: Request,
 ) -> ApiResult<Response> {
-    app.limit("auth", &context.ip, app.config.rate_auth)?;
+    app.limit("auth", &context.ip, app.config().rate_auth)?;
     let raw = query.get("ticket").cloned().unwrap_or_default();
     let key = is_bearer(&raw).then(|| password::hash(&raw));
     let entry = if let Some(key) = key {
@@ -1475,7 +1530,7 @@ async fn app_session(
         let hash = password::hash(&raw_session);
         let user_agent = header_value(request.headers(), "user-agent").map(str::to_owned);
         let ip_summary = context.ip_summary.clone();
-        let expires = now() + app.config.session;
+        let expires = now() + app.config().session;
         let user_id = entry.user_id;
         app.db
             .run(move |db| {
@@ -1493,7 +1548,7 @@ async fn app_session(
         if let Some(value) = set_cookie(
             context.secure_cookie,
             &raw_session,
-            app.config.session / 1000,
+            app.config().session / 1000,
         )
         .get(header::SET_COOKIE)
         {
@@ -1517,8 +1572,8 @@ async fn me(
         "hasPassword": account.password_hash.as_ref().is_some_and(|hash| !hash.is_empty()),
         "mustChangePassword": account.must_change_password,
         "usedBytes": used, "reservedBytes": reserved,
-        "quotaBytes": account.quota.unwrap_or(app.config.quota), "maxFileBytes": app.config.max_file,
-        "maxTextBytes": app.config.max_text, "retentionMs": app.config.retention,
+        "quotaBytes": account.quota.unwrap_or(app.config().quota), "maxFileBytes": app.config().max_file,
+        "maxTextBytes": app.config().max_text, "retentionMs": app.config().retention,
     })))
 }
 
@@ -1546,13 +1601,13 @@ async fn space(
 ) -> ApiResult<Json<Value>> {
     let account = context.require_auth()?.account.clone();
     let Path(space_id) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    let quota = account.quota.unwrap_or(app.config.quota);
+    let quota = account.quota.unwrap_or(app.config().quota);
     let space = app
         .db
         .run(move |db| db::space(db, &space_id, &account.user.id, false))
         .await?;
     Ok(Json(json!({
-        "id": space.id, "name": space.name, "expiresAt": space.expires_at, "maxFileBytes": app.config.max_file, "quotaBytes": quota,
+        "id": space.id, "name": space.name, "expiresAt": space.expires_at, "maxFileBytes": app.config().max_file, "quotaBytes": quota,
     })))
 }
 
@@ -1587,10 +1642,14 @@ async fn text(
     app.db
         .run(move |db| db::space(db, &scope, &id, true))
         .await?;
-    app.limit("write:ip", &context.ip, app.config.rate_upload)?;
-    app.limit("write:user", &auth.account.user.id, app.config.rate_upload)?;
+    app.limit("write:ip", &context.ip, app.config().rate_upload)?;
+    app.limit(
+        "write:user",
+        &auth.account.user.id,
+        app.config().rate_upload,
+    )?;
     let headers = request.headers().clone();
-    let body = read_json(request, app.config.max_text * 6 + 1024).await?;
+    let body = read_json(request, app.config().max_text * 6 + 1024).await?;
     let text = body.text("text")?;
     let header_group = match header_value(&headers, "x-dropit-group").filter(|v| !v.is_empty()) {
         Some(raw) => Some(decode_uri_component(raw).ok_or(ApiError::new(400, "INVALID_GROUP"))?),
@@ -1599,7 +1658,7 @@ async fn text(
     if text.is_blank() {
         return Err(ApiError::new(400, "EMPTY_TEXT"));
     }
-    if text.len() > app.config.max_text {
+    if text.len() > app.config().max_text {
         return Err(ApiError::new(413, "TEXT_TOO_LARGE"));
     }
     let group = match body.get("group") {
@@ -1620,7 +1679,7 @@ async fn text(
         group,
         device: parse_device(&headers),
     };
-    let config = app.config.clone();
+    let config = app.config();
     let session_hash = (!auth.session_hash.is_empty()).then(|| auth.session_hash.clone());
     let bearer_id = auth.bearer.as_ref().map(|bearer| bearer.id.clone());
     let _gate = app.realtime.gate.lock().await;
@@ -1707,7 +1766,7 @@ async fn read_existing(
     };
     let range = downloads::range_header(request.headers()).map(str::to_owned);
     let head = method == Method::HEAD;
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     let loaded = app
         .db
         .run(move |db| db::readable_file(db, &space, &user_id, &id))

@@ -196,14 +196,15 @@ test('AC-O3: a bad field rejects the whole patch, and non-admins plus read-only 
 
   const read = await bodyOf(await f.request('/api/tokens', 'POST', { name: 'Read only', scopes: ['read'] })) as { token: string };
   const readHeaders = { authorization: `Bearer ${read.token}`, cookie: '' };
-  assert.equal((await f.request('/api/admin/limits', 'GET', undefined, '', readHeaders)).status, 200);
-  assert.equal((await f.request('/api/admin/limits/audit', 'GET', undefined, '', readHeaders)).status, 200);
+  assert.equal(await codeOf(await f.request('/api/admin/limits', 'GET', undefined, '', readHeaders)), 'INSUFFICIENT_SCOPE');
+  assert.equal(await codeOf(await f.request('/api/admin/limits/audit', 'GET', undefined, '', readHeaders)), 'INSUFFICIENT_SCOPE');
   const denied = await f.request('/api/admin/limits', 'PATCH', { maxItems: 10 }, f.admin.cookie, readHeaders);
   assert.equal(denied.status, 403);
   assert.equal(await codeOf(denied), 'INSUFFICIENT_SCOPE');
 
   const writer = await bodyOf(await f.request('/api/tokens', 'POST', { name: 'Writer', scopes: ['write'] })) as { token: string };
-  const written = await f.request('/api/admin/limits', 'PATCH', { maxItems: 10 }, '', { authorization: `Bearer ${writer.token}`, cookie: '' });
+  assert.equal(await codeOf(await f.request('/api/admin/limits', 'PATCH', { maxItems: 10 }, '', { authorization: `Bearer ${writer.token}`, cookie: '' })), 'INSUFFICIENT_SCOPE');
+  const written = await f.request('/api/admin/limits', 'PATCH', { maxItems: 10 });
   assert.equal(written.status, 200);
   assert.equal((await bodyOf(written) as Limits).maxItems.value, 10);
   const current = await bodyOf(await f.request('/api/admin/limits')) as Limits;

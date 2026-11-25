@@ -31,8 +31,34 @@ use crate::{
 const PASSWORD_MIN: usize = 8;
 const PASSWORD_MAX: usize = 256;
 const FLOW_MAX_AGE: i64 = 600;
+const APP_OAUTH_REDIRECT: &str = "dropit://auth/callback";
+const APP_TOKEN_MS: i64 = 365 * 86_400_000;
 const SETUP_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const TEMP_ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+
+#[derive(Clone)]
+pub(crate) struct AppOAuthFlow {
+    app_state: String,
+    device_name: crate::js::JsString,
+    link_user_id: Option<String>,
+    link_token_id: Option<String>,
+    expires_at: i64,
+}
+
+#[derive(Clone)]
+pub(crate) struct AppOAuthCode {
+    user_id: String,
+    device_name: crate::js::JsString,
+    expires_at: i64,
+}
+
+#[derive(Clone)]
+pub(crate) struct AppLinkTicket {
+    user_id: String,
+    provider: String,
+    token_id: Option<String>,
+    expires_at: i64,
+}
 
 #[derive(Clone)]
 struct OAuthApp {
@@ -160,12 +186,81 @@ fn browser(context: &RequestContext) -> ApiResult<Auth> {
     Ok(auth)
 }
 
+fn account(context: &RequestContext) -> ApiResult<Auth> {
+    Ok(crate::account_session(context)?.clone())
+}
+
 fn admin(context: &RequestContext) -> ApiResult<Auth> {
-    let auth = browser(context)?;
-    if auth.account.user.role != "admin" || auth.account.user.disabled != 0 {
-        return Err(ApiError::new(403, "FORBIDDEN"));
+    Ok(crate::admin_session(context)?.clone())
+}
+
+fn valid_app_state(value: &str) -> bool {
+    (8..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-'))
+}
+
+fn optional_device_name(value: Option<&crate::js::Value>) -> ApiResult<crate::js::JsString> {
+    match value {
+        None | Some(crate::js::Value::Null) => Ok("dropit App".to_owned().into()),
+        Some(crate::js::Value::String(text)) if text.is_empty() => {
+            Ok("dropit App".to_owned().into())
+        }
+        _ => person_name(value),
     }
-    Ok(auth)
+}
+
+fn optional_device_name_str(value: Option<&str>) -> ApiResult<crate::js::JsString> {
+    match value {
+        None | Some("") => Ok("dropit App".to_owned().into()),
+        Some(raw) => crate::js::JsString::from(raw.to_owned()).clean_name(),
+    }
+}
+
+fn app_redirect_url(pairs: &[(&str, &str)]) -> String {
+    let mut url = Url::parse(APP_OAUTH_REDIRECT).expect("valid app redirect");
+    {
+        let mut query = url.query_pairs_mut();
+        for (key, value) in pairs {
+            query.append_pair(key, value);
+        }
+    }
+    url.into()
+}
+
+fn app_scopes(role: &str) -> Vec<String> {
+    if role == "admin" {
+        vec![
+            "read".into(),
+            "write".into(),
+            "account".into(),
+            "admin".into(),
+        ]
+    } else {
+        vec!["read".into(), "write".into(), "account".into()]
+    }
+}
+
+fn app_token_response(
+    raw: String,
+    scopes: &[String],
+    user: &db::User,
+    must_change_password: bool,
+) -> Value {
+    json!({
+        "access_token": raw,
+        "token_type": "Bearer",
+        "scope": scopes.join(" "),
+        "expires_in": APP_TOKEN_MS / 1000,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+        },
+        "mustChangePassword": must_change_password,
+    })
 }
 
 fn origin(app: &crate::StateData, context: &RequestContext) -> String {
@@ -220,11 +315,14 @@ fn oauth_failure(
     app: &crate::StateData,
     context: &RequestContext,
     linking: bool,
+    app_state: Option<&str>,
     code: &str,
     clear_flow: bool,
     retry_after: Option<&HeaderValue>,
 ) -> Response {
-    let mut response = if linking {
+    let mut response = if let Some(state) = app_state {
+        redirect(app_redirect_url(&[("error", code), ("state", state)]))
+    } else if linking {
         redirect(format!(
             "{}/settings?link_error={code}#login-methods",
             origin(app, context)
@@ -523,23 +621,345 @@ fn flow_cookie_from_request(context: &RequestContext, headers: &HeaderMap) -> Op
     read_cookie(headers, flow_cookie_name(context.secure_cookie))
 }
 
-pub async fn oauth_start(
+pub async fn app_password_login(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    request: axum::extract::Request,
+) -> ApiResult<Json<Value>> {
+    app.limit("auth", &context.ip, app.config().rate_auth)?;
+    let body = read_json(request, 4096).await?;
+    let email = body
+        .get("email")
+        .and_then(crate::js::Value::as_str)
+        .unwrap_or_default()
+        .trim_matches(crate::js_space)
+        .to_lowercase();
+    let password = crate::input_js_string(body.get("password"), PASSWORD_MAX)?.utf8();
+    if email.is_empty() || email.encode_utf16().count() > 200 {
+        return Err(ApiError::INVALID_INPUT);
+    }
+    let device_name = optional_device_name(body.get("deviceName"))?;
+    app.limit(
+        "auth:email",
+        &password::hash(&email),
+        app.config().rate_auth,
+    )?;
+    let invite = optional_invite(body.get("invite"))?;
+    let email_to_find = email.clone();
+    let account = app
+        .db
+        .run(move |db| db::password_account(db, &email_to_find))
+        .await?;
+    let stored = account
+        .as_ref()
+        .and_then(|account| account.password_hash.clone());
+    let slot = app
+        .password_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(ApiError::internal)?;
+    let verified = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        password::verify(&password, stored.as_deref())
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    let bad_credentials = || ApiError::new(401, "INVALID_CREDENTIALS");
+    let account = account.filter(|_| verified).ok_or_else(bad_credentials)?;
+
+    let raw_token = crate::machine::raw_token()?;
+    let raw_for_db = raw_token.clone();
+    let token_id = Uuid::new_v4().to_string();
+    let (current, scopes) = app
+        .db
+        .run(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current = db::password_account(&tx, &email)?
+                .filter(|current| {
+                    current.user.id == account.user.id
+                        && current.password_hash == account.password_hash
+                })
+                .ok_or_else(bad_credentials)?;
+            if current.user.disabled != 0 {
+                return Err(ApiError::new(403, "USER_DISABLED"));
+            }
+            let time = now();
+            if let Some(invite) = invite {
+                db::accept_invite(&tx, &invite, &current.user.id, time)?;
+            }
+            if current.user.pending != 0 {
+                tx.execute("UPDATE users SET pending=0 WHERE id=?", [&current.user.id])?;
+            }
+            let scopes = app_scopes(&current.user.role);
+            let record = crate::machine::AccessToken {
+                id: token_id,
+                user_id: current.user.id.clone(),
+                name: device_name,
+                scopes: scopes.clone(),
+                created_at: time,
+                last_used_at: None,
+                expires_at: Some(time + APP_TOKEN_MS),
+                revoked: 0,
+            };
+            crate::machine::create_token(&tx, &record, &raw_for_db)?;
+            tx.commit()?;
+            Ok((current, scopes))
+        })
+        .await?;
+    Ok(Json(app_token_response(
+        raw_token,
+        &scopes,
+        &current.user,
+        current.must_change_password,
+    )))
+}
+
+pub async fn app_oauth_exchange(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    request: axum::extract::Request,
+) -> ApiResult<Json<Value>> {
+    app.limit("auth", &context.ip, app.config().rate_auth)?;
+    let body = read_json(request, 2048).await?;
+    let raw_code = input_string(body.get("code"), 128)?;
+    let override_name = match body.get("deviceName") {
+        None | Some(crate::js::Value::Null) => None,
+        Some(crate::js::Value::String(text)) if text.is_empty() => None,
+        other => Some(person_name(other)?),
+    };
+    let entry = if crate::is_bearer(raw_code) {
+        let key = password::hash(raw_code);
+        app.app_oauth_codes
+            .lock()
+            .map_err(ApiError::internal)?
+            .remove(&key)
+    } else {
+        None
+    };
+    let Some(entry) = entry.filter(|entry| entry.expires_at > now()) else {
+        return Err(ApiError::new(401, "OAUTH_CODE_INVALID"));
+    };
+    let device_name = override_name.unwrap_or(entry.device_name);
+    let raw_token = crate::machine::raw_token()?;
+    let raw_for_db = raw_token.clone();
+    let token_id = Uuid::new_v4().to_string();
+    let user_id = entry.user_id;
+    let (account, scopes) = app
+        .db
+        .run(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let account = tx
+                .query_row("SELECT * FROM users WHERE id=?", [&user_id], db::account)
+                .optional()?
+                .ok_or(ApiError::new(401, "OAUTH_CODE_INVALID"))?;
+            if account.user.pending != 0 {
+                return Err(ApiError::new(401, "OAUTH_CODE_INVALID"));
+            }
+            if account.user.disabled != 0 {
+                return Err(ApiError::new(403, "USER_DISABLED"));
+            }
+            let time = now();
+            let scopes = app_scopes(&account.user.role);
+            let record = crate::machine::AccessToken {
+                id: token_id,
+                user_id: account.user.id.clone(),
+                name: device_name,
+                scopes: scopes.clone(),
+                created_at: time,
+                last_used_at: None,
+                expires_at: Some(time + APP_TOKEN_MS),
+                revoked: 0,
+            };
+            crate::machine::create_token(&tx, &record, &raw_for_db)?;
+            tx.commit()?;
+            Ok((account, scopes))
+        })
+        .await?;
+    Ok(Json(app_token_response(
+        raw_token,
+        &scopes,
+        &account.user,
+        account.must_change_password,
+    )))
+}
+
+pub async fn app_oauth_link(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
     Path(provider): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
-) -> ApiResult<Response> {
-    app.limit("auth", &context.ip, app.config.rate_auth)?;
+    request: axum::extract::Request,
+) -> ApiResult<Json<Value>> {
+    let auth = account(&context)?;
+    app.limit("identity", &context.ip, app.config().rate_auth)?;
     let Some(oauth) = oauth_app(&app, &provider).await? else {
         return Err(ApiError::new(404, "PROVIDER_UNAVAILABLE"));
     };
     if !oauth.enabled {
         return Err(ApiError::new(404, "PROVIDER_UNAVAILABLE"));
     }
-    let link_user_id = if query.contains_key("link") {
+    let body = if header_value(request.headers(), "content-type")
+        .is_some_and(|value| value.starts_with("application/json"))
+    {
+        read_json(request, 2048).await?
+    } else {
+        crate::js::Object::new()
+    };
+    let requested_state = body.get("appState").or_else(|| body.get("app_state"));
+    let app_state = match requested_state {
+        None | Some(crate::js::Value::Null) => random_token()?,
+        Some(crate::js::Value::String(text)) if text.is_empty() => random_token()?,
+        Some(value) => {
+            let text = value.as_str().ok_or(ApiError::INVALID_INPUT)?;
+            if !valid_app_state(text) {
+                return Err(ApiError::INVALID_INPUT);
+            }
+            text.to_owned()
+        }
+    };
+    let raw = random_token()?;
+    let time = now();
+    {
+        let mut tickets = app.app_link_tickets.lock().map_err(ApiError::internal)?;
+        tickets.retain(|_, entry| entry.expires_at > time);
+        if tickets.len() >= 10_000 {
+            return Err(ApiError::new(429, "RATE_LIMITED"));
+        }
+        tickets.insert(
+            password::hash(&raw),
+            AppLinkTicket {
+                user_id: auth.account.user.id.clone(),
+                provider: provider.clone(),
+                token_id: auth.bearer.as_ref().map(|bearer| bearer.id.clone()),
+                expires_at: time + 60_000,
+            },
+        );
+    }
+    let mut path_url =
+        Url::parse(&format!("http://local/api/auth/{provider}")).map_err(ApiError::internal)?;
+    path_url.query_pairs_mut().extend_pairs([
+        ("link_ticket", raw.as_str()),
+        ("app_redirect", APP_OAUTH_REDIRECT),
+        ("app_state", app_state.as_str()),
+    ]);
+    let path = format!(
+        "{}?{}",
+        path_url.path(),
+        path_url.query().unwrap_or_default()
+    );
+    let url = format!("{}{path}", origin(&app, &context));
+    Ok(Json(json!({
+        "ticket": raw,
+        "state": app_state,
+        "path": path,
+        "url": url,
+        "expires_in": 60,
+    })))
+}
+
+pub async fn oauth_start(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    Path(provider): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    app.limit("auth", &context.ip, app.config().rate_auth)?;
+    let Some(oauth) = oauth_app(&app, &provider).await? else {
+        return Err(ApiError::new(404, "PROVIDER_UNAVAILABLE"));
+    };
+    if !oauth.enabled {
+        return Err(ApiError::new(404, "PROVIDER_UNAVAILABLE"));
+    }
+    let app_redirect = query.get("app_redirect").map(String::as_str);
+    let app_state = query.get("app_state").map(String::as_str);
+    let raw_device_name = query.get("device_name").map(String::as_str);
+    let link_ticket = query.get("link_ticket").map(String::as_str);
+    let mut app_mode: Option<(String, crate::js::JsString, Option<String>)> = None;
+    if let Some(target) = app_redirect {
+        if target != APP_OAUTH_REDIRECT {
+            return Err(ApiError::new(400, "INVALID_APP_REDIRECT"));
+        }
+        let Some(state) = app_state.filter(|value| valid_app_state(value)) else {
+            return Err(ApiError::INVALID_INPUT);
+        };
+        app_mode = Some((
+            state.to_owned(),
+            optional_device_name_str(raw_device_name)?,
+            None,
+        ));
+    } else if app_state.is_some() || raw_device_name.is_some() || link_ticket.is_some() {
+        return Err(ApiError::INVALID_INPUT);
+    }
+
+    let link_user_id = if let Some(raw_ticket) = link_ticket {
+        if query.contains_key("link") {
+            return Err(ApiError::INVALID_INPUT);
+        }
+        let entry = if crate::is_bearer(raw_ticket) {
+            let key = password::hash(raw_ticket);
+            app.app_link_tickets
+                .lock()
+                .map_err(ApiError::internal)?
+                .remove(&key)
+        } else {
+            None
+        };
+        let state_ref = app_mode.as_ref().expect("app mode set").0.clone();
+        let Some(entry) =
+            entry.filter(|entry| entry.expires_at > now() && entry.provider == provider)
+        else {
+            return Ok(redirect(app_redirect_url(&[
+                ("error", "UNAUTHENTICATED"),
+                ("state", &state_ref),
+            ])));
+        };
+        let check_user_id = entry.user_id.clone();
+        let check_token_id = entry.token_id.clone();
+        let valid = app
+            .db
+            .run(move |db| {
+                let user_ok: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM users WHERE id=? AND disabled=0 AND pending=0)",
+                    [&check_user_id],
+                    |row| row.get(0),
+                )?;
+                if !user_ok {
+                    return Ok(false);
+                }
+                if let Some(token_id) = check_token_id.as_deref() {
+                    return crate::machine::token_live(
+                        db,
+                        token_id,
+                        &check_user_id,
+                        now(),
+                        "account",
+                    );
+                }
+                Ok(true)
+            })
+            .await?;
+        if !valid {
+            return Ok(redirect(app_redirect_url(&[
+                ("error", "UNAUTHENTICATED"),
+                ("state", &state_ref),
+            ])));
+        }
+        if let Some((_, _, ref mut link_token)) = app_mode {
+            *link_token = entry.token_id;
+        }
+        Some(entry.user_id)
+    } else if query.contains_key("link") {
         match browser(&context) {
             Ok(auth) => Some(auth.account.user.id.clone()),
-            Err(_) => return Ok(oauth_error(&app, &context, "UNAUTHENTICATED")),
+            Err(_) => {
+                if let Some((ref state, _, _)) = app_mode {
+                    return Ok(redirect(app_redirect_url(&[
+                        ("error", "UNAUTHENTICATED"),
+                        ("state", state),
+                    ])));
+                }
+                return Ok(oauth_error(&app, &context, "UNAUTHENTICATED"));
+            }
         }
     } else {
         None
@@ -562,6 +982,12 @@ pub async fn oauth_start(
             .await?;
         let count = app.db.run(|db| Ok(db::user_count(&*db)?)).await?;
         if !valid && count > 0 {
+            if let Some((ref state, _, _)) = app_mode {
+                return Ok(redirect(app_redirect_url(&[
+                    ("error", "INVITE_INVALID"),
+                    ("state", state),
+                ])));
+            }
             return Ok(oauth_error(&app, &context, "INVITE_INVALID"));
         }
         valid.then_some(hash)
@@ -573,6 +999,24 @@ pub async fn oauth_start(
     let verifier = random_token()?;
     let state_hash = password::hash(&state);
     let browser_hash = password::hash(&browser_token);
+    if let Some((app_state, device_name, link_token_id)) = app_mode {
+        let time = now();
+        let mut flows = app.app_oauth_flows.lock().map_err(ApiError::internal)?;
+        flows.retain(|_, entry| entry.expires_at > time);
+        if flows.len() >= 10_000 {
+            return Err(ApiError::new(429, "RATE_LIMITED"));
+        }
+        flows.insert(
+            state_hash.clone(),
+            AppOAuthFlow {
+                app_state,
+                device_name,
+                link_user_id: link_user_id.clone(),
+                link_token_id,
+                expires_at: time + FLOW_MAX_AGE * 1000,
+            },
+        );
+    }
     let provider_name = provider.clone();
     let invite_hash_for_db = invite_hash.clone();
     let link_for_db = link_user_id.clone();
@@ -599,11 +1043,12 @@ pub async fn oauth_callback(
     Query(query): Query<HashMap<String, String>>,
     request: axum::extract::Request,
 ) -> ApiResult<Response> {
-    if let Err(error) = app.limit("auth", &context.ip, app.config.rate_auth) {
+    if let Err(error) = app.limit("auth", &context.ip, app.config().rate_auth) {
         return Ok(oauth_failure(
             &app,
             &context,
             false,
+            None,
             oauth_error_code(&error),
             false,
             retry_after_header(&error),
@@ -621,6 +1066,7 @@ pub async fn oauth_callback(
                 &app,
                 &context,
                 false,
+                None,
                 "OAUTH_STATE_INVALID",
                 false,
                 None,
@@ -631,6 +1077,7 @@ pub async fn oauth_callback(
                 &app,
                 &context,
                 false,
+                None,
                 oauth_error_code(&error),
                 false,
                 retry_after_header(&error),
@@ -642,12 +1089,14 @@ pub async fn oauth_callback(
             &app,
             &context,
             false,
+            None,
             "OAUTH_STATE_INVALID",
             false,
             None,
         ));
     };
     let state_hash = password::hash(&state);
+    let state_hash_for_app = state_hash.clone();
     let browser_hash = password::hash(&browser_raw);
     let provider_for_db = provider.clone();
     let flow = match app.db.run(move |db| {
@@ -664,6 +1113,7 @@ pub async fn oauth_callback(
                 &app,
                 &context,
                 false,
+                None,
                 oauth_error_code(&error),
                 false,
                 retry_after_header(&error),
@@ -675,11 +1125,18 @@ pub async fn oauth_callback(
             &app,
             &context,
             false,
+            None,
             "OAUTH_STATE_INVALID",
             false,
             None,
         ));
     };
+    let app_flow = app
+        .app_oauth_flows
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&state_hash_for_app));
+    let app_state = app_flow.as_ref().map(|flow| flow.app_state.as_str());
     let linking = link_user_id.is_some();
     let has_error = query.get("error").is_some_and(|value| !value.is_empty());
     let Some(code) = query
@@ -691,6 +1148,7 @@ pub async fn oauth_callback(
             &app,
             &context,
             linking,
+            app_state,
             "OAUTH_DENIED",
             true,
             None,
@@ -710,6 +1168,7 @@ pub async fn oauth_callback(
                 &app,
                 &context,
                 linking,
+                app_state,
                 oauth_error_code(&error),
                 true,
                 retry_after_header(&error),
@@ -721,17 +1180,19 @@ pub async fn oauth_callback(
             &app,
             &context,
             linking,
+            app_state,
             "OAUTH_PROVIDER_ERROR",
             true,
             None,
         ));
     }
     let identity_key = password::hash(&format!("{provider}:{}", identity.subject));
-    if let Err(error) = app.limit("auth:identity", &identity_key, app.config.rate_auth) {
+    if let Err(error) = app.limit("auth:identity", &identity_key, app.config().rate_auth) {
         return Ok(oauth_failure(
             &app,
             &context,
             linking,
+            app_state,
             oauth_error_code(&error),
             true,
             retry_after_header(&error),
@@ -754,6 +1215,7 @@ pub async fn oauth_callback(
                 &app,
                 &context,
                 linking,
+                app_state,
                 oauth_error_code(&error),
                 true,
                 retry_after_header(&error),
@@ -761,6 +1223,71 @@ pub async fn oauth_callback(
         }
     }
     if let Some(user_id) = link_user_id {
+        if let Some(ref flow_meta) = app_flow {
+            if flow_meta.link_user_id.as_deref() != Some(user_id.as_str()) {
+                return Ok(oauth_failure(
+                    &app,
+                    &context,
+                    true,
+                    Some(&flow_meta.app_state),
+                    "UNAUTHENTICATED",
+                    true,
+                    None,
+                ));
+            }
+            if let Some(token_id) = flow_meta.link_token_id.clone() {
+                let check_user = user_id.clone();
+                let live = app
+                    .db
+                    .run(move |db| {
+                        crate::machine::token_live(db, &token_id, &check_user, now(), "account")
+                    })
+                    .await
+                    .unwrap_or(false);
+                if !live {
+                    return Ok(oauth_failure(
+                        &app,
+                        &context,
+                        true,
+                        Some(&flow_meta.app_state),
+                        "UNAUTHENTICATED",
+                        true,
+                        None,
+                    ));
+                }
+            }
+            let identity_for_db = identity.clone();
+            let added = match app
+                .db
+                .run(move |db| link_identity(db, &user_id, &identity_for_db, now()))
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    return Ok(oauth_failure(
+                        &app,
+                        &context,
+                        true,
+                        Some(&flow_meta.app_state),
+                        oauth_error_code(&error),
+                        true,
+                        retry_after_header(&error),
+                    ));
+                }
+            };
+            let mut pairs = vec![
+                ("linked", provider.as_str()),
+                ("state", flow_meta.app_state.as_str()),
+            ];
+            if !added {
+                pairs.push(("already", "1"));
+            }
+            let mut result = redirect(app_redirect_url(&pairs));
+            result
+                .headers_mut()
+                .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
+            return Ok(result);
+        }
         let current = match browser(&context) {
             Ok(current) => current,
             Err(_) => {
@@ -768,6 +1295,7 @@ pub async fn oauth_callback(
                     &app,
                     &context,
                     true,
+                    None,
                     "UNAUTHENTICATED",
                     true,
                     None,
@@ -779,6 +1307,7 @@ pub async fn oauth_callback(
                 &app,
                 &context,
                 true,
+                None,
                 "UNAUTHENTICATED",
                 true,
                 None,
@@ -796,6 +1325,7 @@ pub async fn oauth_callback(
                     &app,
                     &context,
                     true,
+                    None,
                     oauth_error_code(&error),
                     true,
                     retry_after_header(&error),
@@ -818,6 +1348,97 @@ pub async fn oauth_callback(
             .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
         return Ok(result);
     }
+    let admin_emails = env::var("ADMIN_EMAILS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|v| v.trim().to_lowercase())
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<_>>();
+    if let Some(flow_meta) = app_flow {
+        let identity_for_db = identity.clone();
+        let account = match app
+            .db
+            .run(move |db| {
+                oauth_resolve_user(
+                    db,
+                    &identity_for_db,
+                    invite_hash.as_deref(),
+                    &admin_emails,
+                    now(),
+                )
+            })
+            .await
+        {
+            Ok(account) => account,
+            Err(error) => {
+                return Ok(oauth_failure(
+                    &app,
+                    &context,
+                    false,
+                    Some(&flow_meta.app_state),
+                    oauth_error_code(&error),
+                    true,
+                    retry_after_header(&error),
+                ));
+            }
+        };
+        let exchange_code = match random_token() {
+            Ok(code) => code,
+            Err(error) => {
+                return Ok(oauth_failure(
+                    &app,
+                    &context,
+                    false,
+                    Some(&flow_meta.app_state),
+                    oauth_error_code(&error),
+                    true,
+                    retry_after_header(&error),
+                ));
+            }
+        };
+        let time = now();
+        {
+            let Ok(mut codes) = app.app_oauth_codes.lock() else {
+                return Ok(oauth_failure(
+                    &app,
+                    &context,
+                    false,
+                    Some(&flow_meta.app_state),
+                    "INTERNAL_ERROR",
+                    true,
+                    None,
+                ));
+            };
+            codes.retain(|_, entry| entry.expires_at > time);
+            if codes.len() >= 10_000 {
+                return Ok(oauth_failure(
+                    &app,
+                    &context,
+                    false,
+                    Some(&flow_meta.app_state),
+                    "RATE_LIMITED",
+                    true,
+                    None,
+                ));
+            }
+            codes.insert(
+                password::hash(&exchange_code),
+                AppOAuthCode {
+                    user_id: account.user.id,
+                    device_name: flow_meta.device_name,
+                    expires_at: time + 60_000,
+                },
+            );
+        }
+        let mut response = redirect(app_redirect_url(&[
+            ("code", &exchange_code),
+            ("state", &flow_meta.app_state),
+        ]));
+        response
+            .headers_mut()
+            .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
+        return Ok(response);
+    }
     let token = match random_token() {
         Ok(token) => token,
         Err(error) => {
@@ -825,6 +1446,7 @@ pub async fn oauth_callback(
                 &app,
                 &context,
                 false,
+                None,
                 oauth_error_code(&error),
                 true,
                 retry_after_header(&error),
@@ -834,14 +1456,8 @@ pub async fn oauth_callback(
     let hash = password::hash(&token);
     let user_agent = header_value(request.headers(), "user-agent").map(str::to_owned);
     let ip = context.ip_summary.clone();
-    let admin_emails = env::var("ADMIN_EMAILS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|v| v.trim().to_lowercase())
-        .filter(|v| !v.is_empty())
-        .collect::<Vec<_>>();
     let identity_for_db = identity.clone();
-    let session_ms = app.config.session;
+    let session_ms = app.config().session;
     let _account = match app
         .db
         .run(move |db| {
@@ -865,6 +1481,7 @@ pub async fn oauth_callback(
                 &app,
                 &context,
                 false,
+                None,
                 oauth_error_code(&error),
                 true,
                 retry_after_header(&error),
@@ -875,7 +1492,7 @@ pub async fn oauth_callback(
     response
         .headers_mut()
         .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
-    let session_cookie = set_cookie(context.secure_cookie, &token, app.config.session / 1000);
+    let session_cookie = set_cookie(context.secure_cookie, &token, session_ms / 1000);
     response.headers_mut().append(
         header::SET_COOKIE,
         session_cookie.get(header::SET_COOKIE).unwrap().clone(),
@@ -888,7 +1505,7 @@ pub async fn setup(
     Extension(context): Extension<RequestContext>,
     request: axum::extract::Request,
 ) -> ApiResult<impl IntoResponse> {
-    app.limit("setup", &context.ip, app.config.rate_auth)?;
+    app.limit("setup", &context.ip, app.config().rate_auth)?;
     let body = read_json(request, 4096).await?;
     let code = input_string(body.get("code"), 32)?
         .to_uppercase()
@@ -908,7 +1525,7 @@ pub async fn setup(
     let hash = hash_password(password).await?;
     let token = random_token()?;
     let session_hash = password::hash(&token);
-    let session_expires = now() + app.config.session;
+    let session_expires = now() + app.config().session;
     let account = app
         .db
         .run(move |db| {
@@ -928,7 +1545,7 @@ pub async fn setup(
     *app.setup_code.lock().map_err(ApiError::internal)? = None;
     Ok((
         StatusCode::CREATED,
-        set_cookie(context.secure_cookie, &token, app.config.session / 1000),
+        set_cookie(context.secure_cookie, &token, app.config().session / 1000),
         Json(user_response(&account.user, response_name)?),
     ))
 }
@@ -938,7 +1555,7 @@ pub async fn register(
     Extension(context): Extension<RequestContext>,
     request: axum::extract::Request,
 ) -> ApiResult<impl IntoResponse> {
-    app.limit("auth", &context.ip, app.config.rate_auth)?;
+    app.limit("auth", &context.ip, app.config().rate_auth)?;
     let body = read_json(request, 4096).await?;
     if app.db.run(|db| Ok(db::user_count(&*db)?)).await? == 0 {
         return Err(ApiError::new(409, "SETUP_REQUIRED"));
@@ -958,7 +1575,7 @@ pub async fn register(
     let hash = hash_password(password).await?;
     let token = random_token()?;
     let session_hash = password::hash(&token);
-    let session_expires = now() + app.config.session;
+    let session_expires = now() + app.config().session;
     let account = app
         .db
         .run(move |db| {
@@ -977,7 +1594,7 @@ pub async fn register(
         .await?;
     Ok((
         StatusCode::CREATED,
-        set_cookie(context.secure_cookie, &token, app.config.session / 1000),
+        set_cookie(context.secure_cookie, &token, app.config().session / 1000),
         Json(user_response(&account.user, response_name)?),
     ))
 }
@@ -1142,19 +1759,13 @@ fn create_password_user(
     Ok(account)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn oauth_login(
-    db: &mut Connection,
+fn resolve_oauth_user_in_tx(
+    tx: &rusqlite::Transaction<'_>,
     identity: &Identity,
     invite_hash: Option<&str>,
     admins: &[String],
-    session_hash: &str,
-    expires: i64,
     time: i64,
-    user_agent: Option<&str>,
-    ip: &str,
 ) -> ApiResult<db::Account> {
-    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut user_id: Option<String> = tx
         .query_row(
             "SELECT userId FROM identities WHERE provider=? AND subject=?",
@@ -1193,7 +1804,7 @@ fn oauth_login(
     }
     let first = tx.query_row("SELECT count(*) FROM users", [], |row| row.get::<_, i64>(0))? == 0;
     let invite_row = invite_hash
-        .map(|hash| invite(&tx, hash, time))
+        .map(|hash| invite(tx, hash, time))
         .transpose()?
         .flatten();
     if invite_hash.is_some() && invite_row.is_none() && !first {
@@ -1209,7 +1820,7 @@ fn oauth_login(
             });
         }
         let listed = admins.iter().any(|email| email == &identity.email);
-        let policy = db::setting(&tx, "registration")?.unwrap_or_else(|| "invite".into());
+        let policy = db::setting(tx, "registration")?.unwrap_or_else(|| "invite".into());
         if !first && !listed && policy == "closed" {
             return Err(ApiError::new(403, "REGISTRATION_CLOSED"));
         }
@@ -1237,21 +1848,50 @@ fn oauth_login(
                 time
             ],
         )?;
-        create_private_space(&tx, &id)?;
+        create_private_space(tx, &id)?;
         user_id = Some(id);
         created = true;
     }
     if let Some(hash) = invite_hash
         && invite_row.is_some()
     {
-        spend_invite(&tx, hash, user_id.as_deref().unwrap(), time, created)?;
+        spend_invite(tx, hash, user_id.as_deref().unwrap(), time, created)?;
     }
-    tx.execute("INSERT INTO sessions (sessionHash,userId,expiresAt,id,createdAt,lastSeenAt,userAgent,ipSummary) VALUES (?,?,?, ?,?,?,?,?)", params![session_hash, user_id.as_deref().unwrap(), expires, Uuid::new_v4().to_string(), time, time, user_agent, ip])?;
-    let account = tx.query_row(
+    Ok(tx.query_row(
         "SELECT * FROM users WHERE id=?",
         [user_id.as_deref().unwrap()],
         db::account,
-    )?;
+    )?)
+}
+
+fn oauth_resolve_user(
+    db: &mut Connection,
+    identity: &Identity,
+    invite_hash: Option<&str>,
+    admins: &[String],
+    time: i64,
+) -> ApiResult<db::Account> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let account = resolve_oauth_user_in_tx(&tx, identity, invite_hash, admins, time)?;
+    tx.commit()?;
+    Ok(account)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn oauth_login(
+    db: &mut Connection,
+    identity: &Identity,
+    invite_hash: Option<&str>,
+    admins: &[String],
+    session_hash: &str,
+    expires: i64,
+    time: i64,
+    user_agent: Option<&str>,
+    ip: &str,
+) -> ApiResult<db::Account> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let account = resolve_oauth_user_in_tx(&tx, identity, invite_hash, admins, time)?;
+    tx.execute("INSERT INTO sessions (sessionHash,userId,expiresAt,id,createdAt,lastSeenAt,userAgent,ipSummary) VALUES (?,?,?, ?,?,?,?,?)", params![session_hash, account.user.id, expires, Uuid::new_v4().to_string(), time, time, user_agent, ip])?;
     tx.commit()?;
     Ok(account)
 }
@@ -1321,8 +1961,8 @@ pub async fn change_password(
     Extension(context): Extension<RequestContext>,
     request: axum::extract::Request,
 ) -> ApiResult<Json<Value>> {
-    let auth = browser(&context)?;
-    app.limit("password", &context.ip, app.config.rate_auth)?;
+    let auth = account(&context)?;
+    app.limit("password", &context.ip, app.config().rate_auth)?;
     let body = read_json(request, 4096).await?;
     let next = check_password(body.get("newPassword"))?;
     let id = auth.account.user.id.clone();
@@ -1365,7 +2005,7 @@ pub async fn identities(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
 ) -> ApiResult<Json<Value>> {
-    let auth = browser(&context)?;
+    let auth = account(&context)?;
     let id = auth.account.user.id.clone();
     let values = app.db.run(move |db| linked_identities(db, &id)).await?;
     let mut available = Vec::new();
@@ -1385,8 +2025,8 @@ pub async fn unlink_identity(
     Extension(context): Extension<RequestContext>,
     Path(provider): Path<String>,
 ) -> ApiResult<impl IntoResponse> {
-    let auth = browser(&context)?;
-    app.limit("identity", &context.ip, app.config.rate_auth)?;
+    let auth = account(&context)?;
+    app.limit("identity", &context.ip, app.config().rate_auth)?;
     let id = auth.account.user.id.clone();
     app.db
         .run(move |db| {
@@ -1676,7 +2316,7 @@ pub async fn sessions(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
 ) -> ApiResult<Json<Value>> {
-    let auth = browser(&context)?;
+    let auth = account(&context)?;
     Ok(Json(
         json!({"sessions": list_sessions(&app, auth.account.user.id.clone(), auth_session_id(&app, &auth).await?).await?}),
     ))
@@ -1705,7 +2345,7 @@ pub async fn revoke_session(
     Extension(context): Extension<RequestContext>,
     path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<impl IntoResponse> {
-    let auth = browser(&context)?;
+    let auth = account(&context)?;
     let Path(id) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let user_id = auth.account.user.id.clone();
     let removed = app
@@ -1723,7 +2363,7 @@ pub async fn revoke_session(
             Ok(hash)
         })
         .await?;
-    if removed == auth.session_hash {
+    if !auth.session_hash.is_empty() && removed == auth.session_hash {
         Ok((
             StatusCode::NO_CONTENT,
             set_cookie(context.secure_cookie, "", 0),
@@ -1737,7 +2377,7 @@ pub async fn revoke_other_sessions(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
 ) -> ApiResult<Json<Value>> {
-    let auth = browser(&context)?;
+    let auth = account(&context)?;
     let id = auth.account.user.id.clone();
     let keep = auth.session_hash.clone();
     let revoked = app
@@ -1816,7 +2456,7 @@ pub async fn admin_users(
     Extension(context): Extension<RequestContext>,
 ) -> ApiResult<Json<Value>> {
     admin(&context)?;
-    let quota = app.config.quota;
+    let quota = app.config().quota;
     let users = app.db.run(move |db| {
         let mut stmt = db.prepare("SELECT u.id,u.email,u.name,u.role,u.disabled,u.pending,u.createdAt,u.quotaBytes,u.inviteLimit,coalesce((SELECT sum(storedBytes) FROM items WHERE userId=u.id),0) AS usedBytes,(u.passwordHash IS NOT NULL) AS hasPassword,u.mustChangePassword,(SELECT group_concat(provider) FROM identities WHERE userId=u.id) AS providers FROM users u ORDER BY createdAt")?;
         Ok(stmt.query_map([], |row| user_view(row, quota))?.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1830,7 +2470,7 @@ pub async fn reset_password(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let auth = admin(&context)?;
-    app.limit("password-reset", &context.ip, app.config.rate_auth)?;
+    app.limit("password-reset", &context.ip, app.config().rate_auth)?;
     let temporary = temporary_password()?;
     let hash = hash_password(temporary.clone()).await?;
     let self_reset = id == auth.account.user.id;
@@ -1940,7 +2580,7 @@ pub async fn create_user(
         let row = tx.query_row("SELECT * FROM users WHERE id=?", [&id], db::account)?;
         tx.commit()?; Ok(row)
     }).await?;
-    let mut response = json!({"id":row.user.id,"email":row.user.email,"name":row.user.name,"role":row.user.role,"disabled":0,"pending":1,"createdAt":row.user.created_at,"usedBytes":0,"quotaBytes":row.quota.unwrap_or(app.config.quota),"quotaOverride":row.quota,"hasPassword":tmp.is_some(),"mustChangePassword":tmp.is_some(),"providers":[]});
+    let mut response = json!({"id":row.user.id,"email":row.user.email,"name":row.user.name,"role":row.user.role,"disabled":0,"pending":1,"createdAt":row.user.created_at,"usedBytes":0,"quotaBytes":row.quota.unwrap_or(app.config().quota),"quotaOverride":row.quota,"hasPassword":tmp.is_some(),"mustChangePassword":tmp.is_some(),"providers":[]});
     if let Some(temporary) = tmp {
         response
             .as_object_mut()
@@ -2312,4 +2952,115 @@ pub async fn revoke_admin_invite(
         })
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn site_view(app: &App, context: &RequestContext) -> ApiResult<Value> {
+    let row: Option<(i64, Option<String>)> = app
+        .db
+        .run(|db| {
+            db.query_row(
+                "SELECT updatedAt,updatedBy FROM app_settings WHERE key='appOrigin'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(ApiError::from)
+        })
+        .await?;
+    let config = app.config();
+    let effective = origin(app, context);
+    let source = config
+        .origin
+        .as_ref()
+        .map(|(_, source)| *source)
+        .unwrap_or("request");
+    let secure_cookies = config.production && effective.starts_with("https:");
+    Ok(json!({
+        "origin": config.origin.as_ref().map(|(value, _)| value),
+        "source": source,
+        "adminOrigin": config.admin_origin,
+        "envOrigin": config.env_origin,
+        "requestOrigin": context.request_origin,
+        "effectiveOrigin": effective,
+        "production": config.production,
+        "secureCookies": secure_cookies,
+        "trustProxy": !config.trusted_proxies.is_empty(),
+        "updatedAt": row.as_ref().map(|(at, _)| *at),
+        "updatedBy": row.and_then(|(_, by)| by),
+        "callbacks": [
+            { "provider": "github", "label": "GitHub", "url": format!("{effective}/api/auth/github/callback") },
+            { "provider": "google", "label": "Google", "url": format!("{effective}/api/auth/google/callback") },
+        ],
+    }))
+}
+
+pub async fn admin_site(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+) -> ApiResult<Json<Value>> {
+    admin(&context)?;
+    Ok(Json(site_view(&app, &context).await?))
+}
+
+pub async fn save_admin_site(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    request: axum::extract::Request,
+) -> ApiResult<Json<Value>> {
+    let auth = admin(&context)?;
+    app.limit("site-config", &context.ip, app.config().rate_auth)?;
+    let body = read_json(request, 2048).await?;
+    let confirm = match body.get("confirm") {
+        None => false,
+        Some(crate::js::Value::Bool(value)) => *value,
+        Some(_) => return Err(ApiError::INVALID_INPUT),
+    };
+    let next: Option<String> = match body.get("origin") {
+        None => return Err(ApiError::INVALID_INPUT),
+        Some(crate::js::Value::Null) => None,
+        Some(crate::js::Value::String(text)) if text.is_empty() => None,
+        Some(value) => {
+            let raw = value.as_str().ok_or(ApiError::INVALID_INPUT)?;
+            let parsed =
+                crate::config::parse_origin(raw).ok_or(ApiError::new(400, "INVALID_ORIGIN"))?;
+            Some(parsed)
+        }
+    };
+    let config = app.config();
+    let effective = next.clone().or_else(|| config.env_origin.clone());
+    let current = context.received_origin.as_deref().unwrap_or_default();
+    if let Some(ref eff) = effective
+        && eff != current
+        && !confirm
+    {
+        let mut error = ApiError::new(409, "ORIGIN_CONFIRM_REQUIRED");
+        error.details = Some(Box::new(serde_json::Map::from_iter([
+            ("origin".into(), eff.clone().into()),
+            ("current".into(), current.into()),
+        ])));
+        return Err(error);
+    }
+    let actor = auth.account.user.email.clone();
+    let next_for_db = next.clone();
+    app.db
+        .run(move |db| {
+            if let Some(value) = next_for_db {
+                db.execute(
+                    "INSERT INTO app_settings (key,value,updatedAt,updatedBy) VALUES ('appOrigin',?,?,?)
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value,updatedAt=excluded.updatedAt,updatedBy=excluded.updatedBy",
+                    params![value, now(), actor],
+                )?;
+            } else {
+                db.execute("DELETE FROM app_settings WHERE key='appOrigin'", [])?;
+            }
+            Ok(())
+        })
+        .await?;
+    let mut updated = (*app.config()).clone();
+    updated.admin_origin = next.clone();
+    updated.origin = next
+        .map(|value| (value, "admin"))
+        .or_else(|| updated.env_origin.clone().map(|value| (value, "env")));
+    app.replace_config(updated)?;
+    Ok(Json(site_view(&app, &context).await?))
 }

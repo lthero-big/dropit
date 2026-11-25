@@ -109,13 +109,17 @@ pub async fn upload_file(
     app.db
         .run(move |db| db::space(db, &scope, &user_id, true))
         .await?;
-    app.limit("upload:ip", &context.ip, app.config.rate_upload)?;
-    app.limit("upload:user", &auth.account.user.id, app.config.rate_upload)?;
+    app.limit("upload:ip", &context.ip, app.config().rate_upload)?;
+    app.limit(
+        "upload:user",
+        &auth.account.user.id,
+        app.config().rate_upload,
+    )?;
 
     let headers = request.headers().clone();
     let expected = expected_length(
         header_value(&headers, "content-length"),
-        app.config.max_file,
+        app.config().max_file,
     )?;
     let filename = decoded_filename(header_value(&headers, "x-file-name"))?;
     let mime = declared_mime(header_value(&headers, "content-type"))?;
@@ -123,8 +127,8 @@ pub async fn upload_file(
     let device = parse_device(&headers);
 
     let slot = acquire(&app, false, UPLOAD_SLOTS, "UPLOAD_BUSY")?;
-    let directory = downloads::files_dir(&app.config.data);
-    let limit = u64::try_from(app.config.max_file).unwrap_or(0);
+    let directory = downloads::files_dir(&app.config().data);
+    let limit = u64::try_from(app.config().max_file).unwrap_or(0);
     let stored = write_body(&directory, request.into_body(), limit).await?;
     if stored.sha256.len() != 64 {
         return Err(ApiError::internal("sha256"));
@@ -164,8 +168,9 @@ pub async fn upload_file(
         group,
         device,
     };
-    let config = app.config.clone();
-    let hash = auth.session_hash.clone();
+    let config = app.config();
+    let session_hash = (!auth.session_hash.is_empty()).then(|| auth.session_hash.clone());
+    let bearer_id = auth.bearer.as_ref().map(|bearer| bearer.id.clone());
     let channel = space_id.clone();
     // Hold the snapshot gate across the commit and publish, matching text.
     let _gate = app.realtime.gate.lock().await;
@@ -173,7 +178,14 @@ pub async fn upload_file(
         .db
         .run(move |db| {
             let before = db::groups(db, &space_id)?;
-            let item = db::insert_file(db, &config, &hash, &space_id, input);
+            let item = db::insert_file(
+                db,
+                &config,
+                session_hash.as_deref(),
+                bearer_id.as_deref(),
+                &space_id,
+                input,
+            );
             let after = db::groups(db, &space_id)?;
             Ok((item, (before != after).then_some(after)))
         })
@@ -203,22 +215,22 @@ pub async fn upload_room(
 ) -> ApiResult<impl IntoResponse> {
     let UrlPath(room_token) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let room = crate::rooms::load_room(&app, &room_token).await?;
-    app.limit("room-write:ip", &context.ip, app.config.rate_room)?;
+    app.limit("room-write:ip", &context.ip, app.config().rate_room)?;
     let headers = request.headers().clone();
     let expected = expected_length(
         header_value(&headers, "content-length"),
-        app.config.room_max_file,
+        app.config().room_max_file,
     )?;
     let filename = decoded_filename(header_value(&headers, "x-file-name"))?;
     let mime = declared_mime(header_value(&headers, "content-type"))?;
     let group = decoded_group(header_value(&headers, "x-dropit-group"))?;
     let device = parse_device(&headers);
     let slot = acquire(&app, false, UPLOAD_SLOTS, "UPLOAD_BUSY")?;
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     let stored = write_body(
         &directory,
         request.into_body(),
-        app.config.room_max_file as u64,
+        app.config().room_max_file as u64,
     )
     .await?;
     if stored.size == 0 {
@@ -258,7 +270,7 @@ pub async fn upload_room(
         device,
     };
     let channel = room.id.clone();
-    let config = app.config.clone();
+    let config = app.config();
     let _gate = app.realtime.gate.lock().await;
     let (item, groups) = app
         .db
@@ -304,20 +316,33 @@ pub async fn retract(
     app.db
         .run(move |db| db::space(db, &scope, &user_id, true))
         .await?;
-    app.limit("write:ip", &context.ip, app.config.rate_upload)?;
-    app.limit("write:user", &auth.account.user.id, app.config.rate_upload)?;
-    let hash = auth.session_hash.clone();
+    app.limit("write:ip", &context.ip, app.config().rate_upload)?;
+    app.limit(
+        "write:user",
+        &auth.account.user.id,
+        app.config().rate_upload,
+    )?;
+    let session_hash = (!auth.session_hash.is_empty()).then(|| auth.session_hash.clone());
+    let bearer_id = auth.bearer.as_ref().map(|bearer| bearer.id.clone());
     let channel = space_id.clone();
     let deleted = item_id.clone();
     let _gate = app.realtime.gate.lock().await;
     let keys = app
         .db
-        .run(move |db| db::delete_item(db, &hash, &space_id, &item_id))
+        .run(move |db| {
+            db::delete_item(
+                db,
+                session_hash.as_deref(),
+                bearer_id.as_deref(),
+                &space_id,
+                &item_id,
+            )
+        })
         .await?;
     app.realtime
         .publish(&channel, json!({ "type": "item.deleted", "id": deleted }));
     drop(_gate);
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     for key in keys {
         remove_stored(&directory, &key).await?;
         app.db.run(move |db| db::forget_garbage(db, &key)).await?;
@@ -353,7 +378,7 @@ pub async fn preview_item(app: App, source: db::PreviewSource, shared: bool) -> 
         Ok(slot) => slot,
         Err(error) => return error.into_response(),
     };
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     let key = source.file_key.clone();
     let hold = preview_hold_ms();
     let derived = tokio::task::spawn_blocking(move || {
@@ -667,9 +692,9 @@ fn acquire_chunk(app: &App, session: &str, principal: &str) -> ApiResult<ChunkPe
     }
     let own_session = state.sessions.get(session).copied().unwrap_or(0);
     let own_principal = state.principals.get(principal).copied().unwrap_or(0);
-    if own_session >= app.config.upload_chunks_per_session
-        || own_principal >= app.config.upload_chunks_per_user
-        || state.active >= app.config.upload_chunks_global
+    if own_session >= app.config().upload_chunks_per_session
+        || own_principal >= app.config().upload_chunks_per_user
+        || state.active >= app.config().upload_chunks_global
     {
         return Err(chunk_busy());
     }
@@ -703,11 +728,15 @@ pub async fn create_upload(
     app.db
         .run(move |db| db::space(db, &scope, &user_id, true))
         .await?;
-    app.limit("upload:ip", &context.ip, app.config.rate_upload)?;
-    app.limit("upload:user", &auth.account.user.id, app.config.rate_upload)?;
+    app.limit("upload:ip", &context.ip, app.config().rate_upload)?;
+    app.limit(
+        "upload:user",
+        &auth.account.user.id,
+        app.config().rate_upload,
+    )?;
     let body = crate::read_json(request, 8192).await?;
     let filename = crate::input_js_string(body.get("filename"), 4096)?.clean_filename();
-    let size = json_size(body.get("size"), app.config.max_file)?;
+    let size = json_size(body.get("size"), app.config().max_file)?;
     let mime = session_mime(body.get("mime"))?;
     let created_at = now();
     let mut upload = db::NewUpload {
@@ -718,13 +747,13 @@ pub async fn create_upload(
         filename,
         mime,
         size,
-        chunk_size: app.config.upload_chunk_bytes,
+        chunk_size: app.config().upload_chunk_bytes,
         created_at,
         expires_at: created_at.saturating_add(86_400_000),
-        quota: auth.account.quota.unwrap_or(app.config.quota),
-        max_items: app.config.max_items,
-        sessions_per_user: app.config.upload_sessions_per_user,
-        sessions_global: app.config.upload_sessions_global,
+        quota: auth.account.quota.unwrap_or(app.config().quota),
+        max_items: app.config().max_items,
+        sessions_per_user: app.config().upload_sessions_per_user,
+        sessions_global: app.config().upload_sessions_global,
     };
     let response_id = upload.id.clone();
     app.db
@@ -754,7 +783,7 @@ pub async fn get_upload(
     let auth = context.require_auth()?;
     let UrlPath((space_id, upload_id)) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let user_id = auth.account.user.id.clone();
-    app.limit("general:user", &user_id, app.config.rate_general)?;
+    app.limit("general:user", &user_id, app.config().rate_general)?;
     let (upload, chunks) = app
         .db
         .run(move |db| {
@@ -798,8 +827,8 @@ pub async fn put_chunk(
     }
     let principal = format!("user:{}", auth.account.user.id);
     let permit = acquire_chunk(&app, &upload_id, &principal)?;
-    let directory = downloads::files_dir(&app.config.data);
-    let timeout_ms = app.config.upload_chunk_timeout_ms as u64;
+    let directory = downloads::files_dir(&app.config().data);
+    let timeout_ms = app.config().upload_chunk_timeout_ms as u64;
     let index = chunk_index(&raw_index)?;
     let user_id = auth.account.user.id.clone();
     let scope = space_id.clone();
@@ -869,8 +898,12 @@ pub async fn complete_upload(
             authorized_upload(db, &scope, &user_id, &id)
         })
         .await?;
-    app.limit("upload:ip", &context.ip, app.config.rate_upload)?;
-    app.limit("upload:user", &auth.account.user.id, app.config.rate_upload)?;
+    app.limit("upload:ip", &context.ip, app.config().rate_upload)?;
+    app.limit(
+        "upload:user",
+        &auth.account.user.id,
+        app.config().rate_upload,
+    )?;
     let headers = request.headers().clone();
     let group = decoded_group(header_value(&headers, "x-dropit-group"))?;
     let device = parse_device(&headers);
@@ -885,7 +918,7 @@ pub async fn complete_upload(
         &complete_notify,
     )
     .await;
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     // A successful commit already deleted the session. Failure must delete it too.
     // Cancel may have deleted it first; deleting again is a no-op.
     if result.is_err() {
@@ -944,7 +977,7 @@ async fn finish_complete(
     if was_cancelled(cancel) {
         return Err(ApiError::NOT_FOUND);
     }
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     let keys: Vec<String> = chunks.iter().map(|chunk| chunk.key.clone()).collect();
     let assembled = assemble_chunks(&directory, &keys, upload.size as u64, cancel).await?;
     let prefix = read_prefix(&assembled.staged.path, 4096).await?;
@@ -980,11 +1013,12 @@ async fn finish_complete(
         group,
         device,
     };
-    let hash = auth.session_hash.clone();
+    let session_hash = (!auth.session_hash.is_empty()).then(|| auth.session_hash.clone());
+    let bearer_id = auth.bearer.as_ref().map(|bearer| bearer.id.clone());
     let channel = space_id.to_owned();
     let space_id = space_id.to_owned();
     let upload_id = upload.id.clone();
-    let config = app.config.clone();
+    let config = app.config();
     let _gate = app.realtime.gate.lock().await;
     let committed = app
         .db
@@ -993,7 +1027,15 @@ async fn finish_complete(
                 return Err(ApiError::NOT_FOUND);
             }
             let before = db::groups(db, &space_id)?;
-            let item = db::complete_upload(db, &config, &hash, &space_id, &upload_id, input);
+            let item = db::complete_upload(
+                db,
+                &config,
+                session_hash.as_deref(),
+                bearer_id.as_deref(),
+                &space_id,
+                &upload_id,
+                input,
+            );
             let after = db::groups(db, &space_id)?;
             Ok((item, (before != after).then_some(after)))
         })
@@ -1044,7 +1086,7 @@ async fn finish_room_complete(
     if was_cancelled(cancel) {
         return Err(ApiError::NOT_FOUND);
     }
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     let keys: Vec<String> = chunks.iter().map(|chunk| chunk.key.clone()).collect();
     let assembled = assemble_chunks(&directory, &keys, upload.size as u64, cancel).await?;
     let prefix = read_prefix(&assembled.staged.path, 4096).await?;
@@ -1086,7 +1128,7 @@ async fn finish_room_complete(
     let channel = space_id.to_owned();
     let space_id = space_id.to_owned();
     let upload_id = upload.id.clone();
-    let config = app.config.clone();
+    let config = app.config();
     // Gate then DB, matching room text, retract, and the room snapshot. A retract
     // cannot commit between this write and item.created. The gate drops before
     // the caller flushes garbage.
@@ -1143,27 +1185,27 @@ pub async fn cancel_upload(
             Ok(())
         })
         .await?;
-    app.limit("general:ip", &context.ip, app.config.rate_general)?;
+    app.limit("general:ip", &context.ip, app.config().rate_general)?;
     app.limit(
         "general:user",
         &auth.account.user.id,
-        app.config.rate_general,
+        app.config().rate_general,
     )?;
     let id = upload_id.clone();
     app.db.run(move |db| db::delete_upload(db, &id)).await?;
     abort_session(&app, &upload_id).await;
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     flush_garbage(&app, &directory).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
 fn room_write_limit(app: &App, context: &RequestContext) -> ApiResult<()> {
-    app.limit("room-write:ip", &context.ip, app.config.rate_room)?;
+    app.limit("room-write:ip", &context.ip, app.config().rate_room)?;
     if let Some(auth) = &context.auth {
         app.limit(
             "room-write:user",
             &auth.account.user.id,
-            app.config.rate_room,
+            app.config().rate_room,
         )?;
     }
     Ok(())
@@ -1201,7 +1243,7 @@ pub async fn create_room_upload(
     room_write_limit(&app, &context)?;
     let body = crate::read_json(request, 8192).await?;
     let filename = crate::input_js_string(body.get("filename"), 4096)?.clean_filename();
-    let size = json_size(body.get("size"), app.config.room_max_file)?;
+    let size = json_size(body.get("size"), app.config().room_max_file)?;
     let mime = session_mime(body.get("mime"))?;
     let created_at = now();
     let mut upload = db::NewUpload {
@@ -1212,13 +1254,13 @@ pub async fn create_room_upload(
         filename,
         mime,
         size,
-        chunk_size: app.config.upload_chunk_bytes,
+        chunk_size: app.config().upload_chunk_bytes,
         created_at,
         expires_at: created_at.saturating_add(86_400_000),
-        quota: app.config.room_quota,
-        max_items: app.config.max_items.min(100),
-        sessions_per_user: app.config.upload_sessions_per_user,
-        sessions_global: app.config.upload_sessions_global,
+        quota: app.config().room_quota,
+        max_items: app.config().max_items.min(100),
+        sessions_per_user: app.config().upload_sessions_per_user,
+        sessions_global: app.config().upload_sessions_global,
     };
     let response_id = upload.id.clone();
     app.db
@@ -1285,8 +1327,8 @@ pub async fn put_room_chunk(
     }
     let principal = room_principal(&context, &room.id);
     let permit = acquire_chunk(&app, &upload_id, &principal)?;
-    let directory = downloads::files_dir(&app.config.data);
-    let timeout_ms = app.config.upload_chunk_timeout_ms as u64;
+    let directory = downloads::files_dir(&app.config().data);
+    let timeout_ms = app.config().upload_chunk_timeout_ms as u64;
     let index = chunk_index(&raw_index)?;
     let space_id = room.id.clone();
     let id = upload_id.clone();
@@ -1364,14 +1406,14 @@ pub async fn complete_room(
             let id = upload_id.clone();
             let _ = app.db.run(move |db| db::delete_upload(db, &id)).await;
             end_complete(&app, &upload_id);
-            let directory = downloads::files_dir(&app.config.data);
+            let directory = downloads::files_dir(&app.config().data);
             let _ = flush_garbage(&app, &directory).await;
             return Err(error);
         }
     };
     let result =
         finish_room_complete(&app, &room.id, &upload, group, device, &complete_notify).await;
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     // Release the in-progress mark before deleting a failed session. A racing
     // complete then observes UPLOAD_IN_PROGRESS while the session still exists,
     // matching the TypeScript 409, and does not delete that session.
@@ -1407,7 +1449,7 @@ pub async fn cancel_room_upload(
     let id = upload_id.clone();
     app.db.run(move |db| db::delete_upload(db, &id)).await?;
     abort_session(&app, &upload_id).await;
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     flush_garbage(&app, &directory).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1470,7 +1512,7 @@ pub async fn abort_sessions(app: &App, ids: &[String]) {
     for id in ids {
         abort_session(app, id).await;
     }
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     flush_garbage(app, &directory).await;
 }
 
@@ -1735,7 +1777,7 @@ pub async fn sweep_expired(app: &App, older_than: i64) -> ApiResult<()> {
     let time = now();
     let ids = app.db.run(move |db| db::expire_uploads(db, time)).await?;
     abort_sessions(app, &ids).await;
-    let directory = downloads::files_dir(&app.config.data);
+    let directory = downloads::files_dir(&app.config().data);
     let referenced = app.db.run(|db| db::referenced_file_keys(db)).await?;
     let referenced: std::collections::HashSet<String> = referenced.into_iter().collect();
     let entries = match tokio::fs::read_dir(&directory).await {
