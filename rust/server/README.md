@@ -1,5 +1,7 @@
 # Rust password, machine-access, text and browser service
 
+Current integrated status (2026-11-25): final acceptance on `e3921c111e14fa55fcfc49ea51446026aea49227` passed all 15 groups on one standard Rust image. See [the final report](../../docs/rust-migration/rhea-226-final-acceptance.md) and `../MAP.md`. Older slice sections below retain their dated implementation scope; their pending-stage notes are historical. The explicit codec/metadata limits remain applicable. Main merge and production cutover are separate release actions.
+
 RHEA-227 adds the first runnable Rust slice of the migration. The HTTP reference is
 the TS server at commit 37ce06ebfab2cd98b81e49ce54fb24ec5daeec68. Source contracts are
 in ../CONTRACT.md, ../DECISIONS.md and ../MAP.md.
