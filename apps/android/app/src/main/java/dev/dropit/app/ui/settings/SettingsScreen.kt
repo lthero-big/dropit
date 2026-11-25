@@ -3,10 +3,7 @@ package dev.dropit.app.ui.settings
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.widget.Toast
-import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,20 +26,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Logout
-import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Link
-import androidx.compose.material.icons.rounded.Lock
-import androidx.compose.material.icons.rounded.Password
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.SwitchAccount
 import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -71,6 +66,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.dropit.app.BuildConfig
+import dev.dropit.app.core.auth.AccountCapabilityState
 import dev.dropit.app.core.auth.ThemeMode
 import dev.dropit.app.core.network.MeResponse
 import dev.dropit.app.core.network.ServerUrl
@@ -87,6 +83,10 @@ fun SettingsScreen(
     themeMode: ThemeMode,
     isLoggingOut: Boolean,
     settingsState: SettingsUiState,
+    hasAdminScope: Boolean,
+    accountCapability: AccountCapabilityState,
+    onOpenSubPage: (SettingsSubPage) -> Unit,
+    onReauthenticateForUpgrade: () -> Unit,
     onThemeModeChange: (ThemeMode) -> Unit,
     onCheckUpdate: () -> Unit,
     onSwitchAccount: () -> Unit,
@@ -102,7 +102,9 @@ fun SettingsScreen(
 
     val user = me?.user
     val isAdmin = user?.isAdmin == true
-    val browserEntries = remember(isAdmin) { SettingsBrowserLinks.entriesForUser(isAdmin) }
+    val nativeEntries = remember(isAdmin, hasAdminScope) {
+        NativeSettingsMenu.entriesForUser(isAdmin = isAdmin, hasAdminScope = hasAdminScope)
+    }
     val versionLabel = remember {
         ServerUrl.versionLabel(
             version = BuildConfig.VERSION_NAME,
@@ -275,6 +277,14 @@ fun SettingsScreen(
                 }
             }
 
+            // Legacy device-code upgrade banner when token lacks `account` scope
+            if (accountCapability is AccountCapabilityState.InsufficientScopeForAccountSettings) {
+                InsufficientScopeUpgradeCard(
+                    message = accountCapability.message,
+                    onReauthenticate = onReauthenticateForUpgrade,
+                )
+            }
+
             // 2. Theme Appearance Card
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -366,7 +376,7 @@ fun SettingsScreen(
                 }
             }
 
-            // 3. Account & Advanced Management (System Browser Entries - spec §2.8 & §3.2)
+            // 3. Native Account & Admin Settings Menu (Real-time global sync)
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = shapes.lg,
@@ -375,56 +385,32 @@ fun SettingsScreen(
                 shadowElevation = DropitElevation.card(colors.isDark),
                 tonalElevation = 0.dp,
             ) {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp),
                     ) {
                         Text(
-                            text = "账户与高级管理",
+                            text = "账户与全局设置",
                             style = MaterialTheme.typography.titleMedium,
                             color = colors.fg,
                         )
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = shapes.sm,
-                            color = colors.surface0,
-                            border = BorderStroke(1.dp, colors.line1),
-                            tonalElevation = 0.dp,
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Lock,
-                                    contentDescription = null,
-                                    tint = colors.fg3,
-                                    modifier = Modifier.size(15.dp),
-                                )
-                                Text(
-                                    text = SettingsBrowserLinks.SECURITY_NOTICE,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.fg3,
-                                )
-                            }
-                        }
+                        Text(
+                            text = "所有修改均在应用内原生完成，并即时同步至 PC 与 Web 端",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.fg3,
+                        )
                     }
 
-                    browserEntries.forEachIndexed { index, entry ->
-                        BrowserEntryRow(
-                            entry = entry,
-                            icon = iconForBrowserEntry(entry.id),
-                            onClick = {
-                                openInBrowser(context, entry.resolveUrl(serverOrigin))
-                            },
+                    nativeEntries.forEachIndexed { index, subPage ->
+                        NativeSettingsEntryRow(
+                            subPage = subPage,
+                            icon = iconForSubPage(subPage),
+                            onClick = { onOpenSubPage(subPage) },
                         )
-                        if (index < browserEntries.lastIndex) {
+                        if (index < nativeEntries.lastIndex) {
                             HorizontalDivider(
                                 thickness = 1.dp,
                                 color = colors.line1,
@@ -684,8 +670,8 @@ private fun SettingsSessionActionRow(
 }
 
 @Composable
-private fun BrowserEntryRow(
-    entry: BrowserManagementEntry,
+private fun NativeSettingsEntryRow(
+    subPage: SettingsSubPage,
     icon: ImageVector,
     onClick: () -> Unit,
 ) {
@@ -696,14 +682,14 @@ private fun BrowserEntryRow(
             .defaultMinSize(minHeight = 56.dp)
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 12.dp)
-            .semantics { contentDescription = "${entry.title}，在系统浏览器打开" },
+            .semantics { contentDescription = "${subPage.title}，${subPage.subtitle}" },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = if (entry.adminOnly) colors.brand else colors.fg2,
+            tint = if (subPage.adminOnly) colors.brand else colors.fg2,
             modifier = Modifier.size(20.dp),
         )
         Column(
@@ -711,52 +697,37 @@ private fun BrowserEntryRow(
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Text(
-                text = entry.title,
+                text = subPage.title,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
                 color = colors.fg,
             )
             Text(
-                text = entry.subtitle,
+                text = subPage.subtitle,
                 style = MaterialTheme.typography.labelSmall,
                 color = colors.fg3,
             )
         }
         Icon(
-            imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
             contentDescription = null,
             tint = colors.fg4,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(20.dp),
         )
     }
 }
 
-private fun iconForBrowserEntry(id: BrowserEntryId): ImageVector = when (id) {
-    BrowserEntryId.SHARE_LINKS -> Icons.Rounded.Link
-    BrowserEntryId.SHARE_PRESETS -> Icons.Rounded.Tune
-    BrowserEntryId.DEVICES -> Icons.Rounded.Devices
-    BrowserEntryId.LOGIN_METHODS -> Icons.Rounded.VerifiedUser
-    BrowserEntryId.PASSWORD -> Icons.Rounded.Password
-    BrowserEntryId.SPACE_SHARING -> Icons.Rounded.Group
-    BrowserEntryId.TOKENS -> Icons.Rounded.Key
-    BrowserEntryId.ADMIN -> Icons.Rounded.AdminPanelSettings
+private fun iconForSubPage(subPage: SettingsSubPage): ImageVector = when (subPage) {
+    SettingsSubPage.SHARE_PRESETS -> Icons.Rounded.Tune
+    SettingsSubPage.SHARE_LINKS -> Icons.Rounded.Link
+    SettingsSubPage.SPACE_SHARING -> Icons.Rounded.Group
+    SettingsSubPage.DEVICES -> Icons.Rounded.Devices
+    SettingsSubPage.TOKENS_AND_DEVICE_CODE -> Icons.Rounded.Key
+    SettingsSubPage.SECURITY_AND_OAUTH -> Icons.Rounded.Security
+    SettingsSubPage.ADMIN -> Icons.Rounded.AdminPanelSettings
 }
 
 private fun copyText(context: Context, text: String) {
     val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
     manager.setPrimaryClip(ClipData.newPlainText("dropit", text))
-}
-
-private fun openInBrowser(context: Context, url: String) {
-    val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return
-    val opened = runCatching {
-        CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, uri)
-    }.isSuccess
-    if (!opened) {
-        runCatching {
-            context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }.onFailure {
-            Toast.makeText(context, "未找到可用的系统浏览器", Toast.LENGTH_SHORT).show()
-        }
-    }
 }

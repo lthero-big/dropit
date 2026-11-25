@@ -8,9 +8,12 @@ import dev.dropit.app.core.network.ClipItem
 import dev.dropit.app.core.network.ItemShare
 import dev.dropit.app.core.network.TargetScope
 import dev.dropit.app.core.repository.ItemShareRepository
+import dev.dropit.app.data.account.AccountSettingsRepository
+import dev.dropit.app.data.account.SharePresets
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -40,6 +43,9 @@ data class ItemShareUiState(
     val item: ClipItem? = null,
     val selectedExpiresIn: String = "1d",
     val selectedMaxViews: Int? = 1,
+    val expiryOptions: List<ShareExpiryOption> = ItemShareViewModel.EXPIRY_OPTIONS,
+    val maxViewsOptions: List<ShareViewsOption> = ItemShareViewModel.MAX_VIEWS_OPTIONS,
+    val isLoadingPresets: Boolean = false,
     val isLoadingList: Boolean = false,
     val isCreating: Boolean = false,
     val revokingIds: Set<String> = emptySet(),
@@ -53,6 +59,7 @@ class ItemShareViewModel(
     private val itemShareRepository: ItemShareRepository,
     private val serverOriginProvider: () -> String,
     private val onSessionExpired: () -> Unit = {},
+    private val accountSettingsRepository: AccountSettingsRepository? = null,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
 
@@ -60,51 +67,130 @@ class ItemShareViewModel(
     val uiState: StateFlow<ItemShareUiState> = _uiState.asStateFlow()
 
     private var loadJob: Job? = null
+    private var lastLoadedPresets: SharePresets = SharePresets()
 
     fun openForItem(scope: TargetScope, item: ClipItem) {
         loadJob?.cancel()
+        val cachedExpiry = SharePresetHelpers.mergedExpiryOptions(lastLoadedPresets)
+        val cachedViews = SharePresetHelpers.mergedViewsOptions(lastLoadedPresets)
         _uiState.value = ItemShareUiState(
             scope = scope,
             item = item,
+            expiryOptions = cachedExpiry,
+            maxViewsOptions = cachedViews,
+            isLoadingPresets = accountSettingsRepository != null,
             isLoadingList = true,
         )
         loadJob = viewModelScope.launch {
-            try {
-                val shares = withContext(ioDispatcher) {
-                    itemShareRepository.listShares(scope, item.id)
+            val sharesDeferred = async(ioDispatcher) {
+                runCatching { itemShareRepository.listShares(scope, item.id) }
+            }
+            val presetsDeferred = async(ioDispatcher) {
+                accountSettingsRepository?.let { repo ->
+                    runCatching { repo.getSharePresets() }.getOrNull()
                 }
-                _uiState.update { current ->
-                    if (current.item?.id != item.id) {
-                        current
-                    } else {
+            }
+
+            val sharesResult = sharesDeferred.await()
+            val fetchedPresets = presetsDeferred.await()
+
+            if (fetchedPresets != null) {
+                lastLoadedPresets = fetchedPresets
+            }
+            val mergedExpiry = SharePresetHelpers.mergedExpiryOptions(lastLoadedPresets)
+            val mergedViews = SharePresetHelpers.mergedViewsOptions(lastLoadedPresets)
+
+            sharesResult.fold(
+                onSuccess = { shares ->
+                    _uiState.update { current ->
+                        if (current.item?.id != item.id) {
+                            current
+                        } else {
+                            current.copy(
+                                isLoadingList = false,
+                                isLoadingPresets = false,
+                                expiryOptions = mergedExpiry,
+                                maxViewsOptions = mergedViews,
+                                selectedExpiresIn = current.selectedExpiresIn.takeIf { sel ->
+                                    mergedExpiry.any { it.value == sel }
+                                } ?: "1d",
+                                selectedMaxViews = current.selectedMaxViews.takeIf { sel ->
+                                    mergedViews.any { it.value == sel }
+                                } ?: 1,
+                                shares = shares,
+                                errorMessage = null,
+                            )
+                        }
+                    }
+                },
+                onFailure = { err ->
+                    val apiError = err as? ApiError
+                    if (apiError?.isUnauthorized == true) onSessionExpired()
+                    _uiState.update { current ->
                         current.copy(
                             isLoadingList = false,
-                            shares = shares,
-                            errorMessage = null,
+                            isLoadingPresets = false,
+                            expiryOptions = mergedExpiry,
+                            maxViewsOptions = mergedViews,
+                            errorMessage = apiError?.userMessage
+                                ?: err.message?.takeIf { m -> m.isNotBlank() }
+                                ?: "加载分享列表失败",
                         )
                     }
-                }
-            } catch (e: ApiError) {
-                if (e.isUnauthorized) onSessionExpired()
-                _uiState.update {
-                    it.copy(
-                        isLoadingList = false,
-                        errorMessage = e.userMessage,
-                    )
-                }
-            } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        isLoadingList = false,
-                        errorMessage = e.message?.takeIf { m -> m.isNotBlank() } ?: "加载分享列表失败",
-                    )
-                }
+                },
+            )
+        }
+    }
+
+    /**
+     * Immediately applies newly saved presets (e.g. from native Share Presets settings page)
+     * so returning to the share sheet reflects changes without delay.
+     */
+    fun applyPresets(presets: SharePresets) {
+        lastLoadedPresets = presets
+        val mergedExpiry = SharePresetHelpers.mergedExpiryOptions(presets)
+        val mergedViews = SharePresetHelpers.mergedViewsOptions(presets)
+        _uiState.update { current ->
+            current.copy(
+                expiryOptions = mergedExpiry,
+                maxViewsOptions = mergedViews,
+                selectedExpiresIn = current.selectedExpiresIn.takeIf { sel ->
+                    mergedExpiry.any { it.value == sel }
+                } ?: "1d",
+                selectedMaxViews = current.selectedMaxViews.takeIf { sel ->
+                    mergedViews.any { it.value == sel }
+                } ?: 1,
+                isLoadingPresets = false,
+            )
+        }
+    }
+
+    fun refreshPresets() {
+        val repo = accountSettingsRepository ?: return
+        _uiState.update { it.copy(isLoadingPresets = true) }
+        viewModelScope.launch {
+            val fetched = runCatching {
+                withContext(ioDispatcher) { repo.getSharePresets() }
+            }.getOrNull()
+            if (fetched != null) {
+                applyPresets(fetched)
+            } else {
+                _uiState.update { it.copy(isLoadingPresets = false) }
             }
         }
     }
 
     fun close() {
         loadJob?.cancel()
+        _uiState.value = ItemShareUiState(
+            expiryOptions = SharePresetHelpers.mergedExpiryOptions(lastLoadedPresets),
+            maxViewsOptions = SharePresetHelpers.mergedViewsOptions(lastLoadedPresets),
+        )
+    }
+
+    fun resetSessionState() {
+        loadJob?.cancel()
+        lastLoadedPresets = SharePresets()
         _uiState.value = ItemShareUiState()
     }
 
@@ -277,6 +363,7 @@ class ItemShareViewModel(
         private val itemShareRepository: ItemShareRepository,
         private val serverOriginProvider: () -> String,
         private val onSessionExpired: () -> Unit,
+        private val accountSettingsRepository: AccountSettingsRepository? = null,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -284,6 +371,7 @@ class ItemShareViewModel(
                 itemShareRepository = itemShareRepository,
                 serverOriginProvider = serverOriginProvider,
                 onSessionExpired = onSessionExpired,
+                accountSettingsRepository = accountSettingsRepository,
             ) as T
         }
     }

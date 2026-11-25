@@ -17,7 +17,6 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -48,25 +47,31 @@ class SettingsViewModelTest {
     }
 
     @Test
-    fun browserManagementLinks_matchSpecPathsAndGateAdminEntryByRole() {
-        val origin = "https://dropit.lthero.com/"
-        val normalEntries = SettingsBrowserLinks.entriesForUser(isAdmin = false)
-        assertFalse(normalEntries.any { it.id == BrowserEntryId.ADMIN })
+    fun nativeSettingsMenu_containsSevenPagesAndGatesAdminByRoleAndScope() {
+        val regularEntries = NativeSettingsMenu.entriesForUser(isAdmin = false, hasAdminScope = false)
+        assertEquals(6, regularEntries.size)
+        assertFalse(regularEntries.contains(SettingsSubPage.ADMIN))
+        assertTrue(regularEntries.contains(SettingsSubPage.SHARE_PRESETS))
+        assertTrue(regularEntries.contains(SettingsSubPage.SHARE_LINKS))
+        assertTrue(regularEntries.contains(SettingsSubPage.SPACE_SHARING))
+        assertTrue(regularEntries.contains(SettingsSubPage.DEVICES))
+        assertTrue(regularEntries.contains(SettingsSubPage.TOKENS_AND_DEVICE_CODE))
+        assertTrue(regularEntries.contains(SettingsSubPage.SECURITY_AND_OAUTH))
 
-        val resolvedPaths = normalEntries.associate { it.id to it.resolveUrl(origin) }
-        assertEquals("https://dropit.lthero.com/settings?tab=share-links", resolvedPaths[BrowserEntryId.SHARE_LINKS])
-        assertEquals("https://dropit.lthero.com/settings?tab=share-presets", resolvedPaths[BrowserEntryId.SHARE_PRESETS])
-        assertEquals("https://dropit.lthero.com/settings?tab=devices", resolvedPaths[BrowserEntryId.DEVICES])
-        assertEquals("https://dropit.lthero.com/settings?tab=login-methods", resolvedPaths[BrowserEntryId.LOGIN_METHODS])
-        assertEquals("https://dropit.lthero.com/settings?tab=password", resolvedPaths[BrowserEntryId.PASSWORD])
-        assertEquals("https://dropit.lthero.com/settings?tab=space-sharing", resolvedPaths[BrowserEntryId.SPACE_SHARING])
-        assertEquals("https://dropit.lthero.com/settings?tab=tokens", resolvedPaths[BrowserEntryId.TOKENS])
+        // Admin role with legacy device-code token (missing admin scope) must NOT expose Admin entry
+        val adminWithoutScope = NativeSettingsMenu.entriesForUser(isAdmin = true, hasAdminScope = false)
+        assertEquals(6, adminWithoutScope.size)
+        assertFalse(adminWithoutScope.contains(SettingsSubPage.ADMIN))
 
-        val adminEntries = SettingsBrowserLinks.entriesForUser(isAdmin = true)
-        val adminEntry = adminEntries.firstOrNull { it.id == BrowserEntryId.ADMIN }
-        assertNotNull(adminEntry)
-        assertEquals("https://dropit.lthero.com/admin", adminEntry!!.resolveUrl(origin))
-        assertTrue(SettingsBrowserLinks.SECURITY_NOTICE.contains("系统浏览器"))
+        // Non-admin role even if scope were present must NOT expose Admin entry
+        val userWithScope = NativeSettingsMenu.entriesForUser(isAdmin = false, hasAdminScope = true)
+        assertEquals(6, userWithScope.size)
+        assertFalse(userWithScope.contains(SettingsSubPage.ADMIN))
+
+        // Admin role + admin scope sees all 7 native secondary pages
+        val adminEntries = NativeSettingsMenu.entriesForUser(isAdmin = true, hasAdminScope = true)
+        assertEquals(7, adminEntries.size)
+        assertTrue(adminEntries.contains(SettingsSubPage.ADMIN))
     }
 
     @Test
@@ -79,28 +84,24 @@ class SettingsViewModelTest {
         )
         val vm = SettingsViewModel(appUpdater = updater, ioDispatcher = testDispatcher)
 
-        // First session background check prompts with isAutoPrompt = true
         vm.triggerBackgroundUpdateCheck("https://dropit.lthero.com#1")
-        vm.triggerBackgroundUpdateCheck("https://dropit.lthero.com#1") // deduplicated
+        vm.triggerBackgroundUpdateCheck("https://dropit.lthero.com#1")
         advanceUntilIdle()
 
         assertEquals(1, updater.checkCallCount)
         assertEquals(newerManifest, vm.uiState.value.promptManifest)
         assertTrue(vm.uiState.value.isAutoPrompt)
 
-        // User chooses "跳过这个版本"
         vm.skipPromptedVersion()
         advanceUntilIdle()
 
         assertEquals(7, updater.skippedVersionCode)
         assertNull(vm.uiState.value.promptManifest)
 
-        // Next session background check does NOT prompt because version 7 was skipped
         vm.triggerBackgroundUpdateCheck("https://dropit.lthero.com#2")
         advanceUntilIdle()
         assertNull(vm.uiState.value.promptManifest)
 
-        // Manual check in Settings STILL opens the update dialog with isAutoPrompt = false
         vm.checkForUpdateManually()
         advanceUntilIdle()
         assertEquals(newerManifest, vm.uiState.value.promptManifest)
@@ -124,7 +125,6 @@ class SettingsViewModelTest {
         advanceUntilIdle()
         assertEquals(UpdateInstallState.NeedsInstallPermission, vm.uiState.value.installState)
 
-        // SHA-256 verification failure surfaced clearly
         updater.downloadOutcome = UpdateInstallState.Failed("安装包校验失败（SHA-256 不一致）")
         vm.startDownloadAndInstall()
         advanceUntilIdle()
@@ -134,7 +134,7 @@ class SettingsViewModelTest {
 
     @Test
     fun manualCheck_reportsUpToDateAndNoReleaseCleanly() = runTest(testDispatcher) {
-        val updater = FakeAppUpdater(checkResult = UpdateCheckResult.UpToDate("0.4.0-native"))
+        val updater = FakeAppUpdater(checkResult = UpdateCheckResult.UpToDate("0.4.1"))
         val vm = SettingsViewModel(appUpdater = updater, ioDispatcher = testDispatcher)
 
         vm.checkForUpdateManually()
@@ -148,7 +148,6 @@ class SettingsViewModelTest {
         advanceUntilIdle()
         assertTrue(vm.uiState.value.updateStatusMessage!!.contains("尚未发布"))
 
-        // Background check silently ignores network errors
         updater.checkResult = UpdateCheckResult.Error("网络连接失败")
         vm.triggerBackgroundUpdateCheck("https://dropit.lthero.com#offline")
         advanceUntilIdle()
@@ -169,7 +168,6 @@ class SettingsViewModelTest {
         advanceUntilIdle()
         assertEquals(newerManifest, vm.uiState.value.promptManifest)
 
-        // Switching to server B where no release exists must clear server A's stale prompt & status
         updater.checkResult = UpdateCheckResult.NoReleasePublished
         vm.triggerBackgroundUpdateCheck("https://server-b.example.com#2")
         advanceUntilIdle()

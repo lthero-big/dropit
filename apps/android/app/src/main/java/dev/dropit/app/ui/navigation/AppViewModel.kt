@@ -4,6 +4,9 @@ import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import dev.dropit.app.core.auth.AccountCapabilityState
+import dev.dropit.app.core.auth.OAuthCallbackPayload
+import dev.dropit.app.core.auth.OAuthLinkResult
 import dev.dropit.app.core.auth.ThemeMode
 import dev.dropit.app.core.repository.TransferStatus
 import dev.dropit.app.core.repository.TransferTask
@@ -15,7 +18,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -58,6 +60,11 @@ data class AppRootUiState(
     val transferTasks: List<TransferTask> = emptyList(),
     val hasPendingShare: Boolean = false,
     val isLoggingOut: Boolean = false,
+    val mustChangePassword: Boolean = false,
+    val hasAccountScope: Boolean = false,
+    val hasAdminScope: Boolean = false,
+    val accountCapability: AccountCapabilityState = AccountCapabilityState.SignedOut,
+    val latestOAuthLinkResult: OAuthLinkResult? = null,
 )
 
 class AppViewModel(
@@ -70,6 +77,7 @@ class AppViewModel(
     val uiState: StateFlow<AppRootUiState> = _uiState.asStateFlow()
 
     private val sessionExpiredMutex = Mutex()
+    private val oauthLinkMutex = Mutex()
     private var initialized = false
     private var sessionExpiredNotice = false
     private var sessionGeneration = 0L
@@ -79,9 +87,11 @@ class AppViewModel(
     init {
         observeSettings()
         observeSession()
+        observeAccountCapability()
         observeTransfers()
         observePendingShare()
         observeGlobalUnauthorized()
+        observeSignedInOAuthCallbacks()
         if (autoInitialize) {
             initialize()
         }
@@ -92,7 +102,16 @@ class AppViewModel(
             container.initialize()
             initialized = true
             val session = container.authRepository.sessionState.value
-            updateRouteFromSession(session.serverOrigin, session.isSignedIn)
+            updateRouteFromSession(
+                serverOrigin = session.serverOrigin,
+                isSignedIn = session.isSignedIn,
+                mustChangePassword = session.mustChangePassword,
+                hasAccountScope = session.hasAccountScope,
+                hasAdminScope = session.hasAdminScope,
+            )
+            if (session.isSignedIn) {
+                consumePendingOAuthLinkIfPresent()
+            }
         }
     }
 
@@ -111,7 +130,21 @@ class AppViewModel(
                 if (session.isSignedIn) {
                     sessionExpiredNotice = false
                 }
-                updateRouteFromSession(session.serverOrigin, session.isSignedIn)
+                updateRouteFromSession(
+                    serverOrigin = session.serverOrigin,
+                    isSignedIn = session.isSignedIn,
+                    mustChangePassword = session.mustChangePassword,
+                    hasAccountScope = session.hasAccountScope,
+                    hasAdminScope = session.hasAdminScope,
+                )
+            }
+        }
+    }
+
+    private fun observeAccountCapability() {
+        viewModelScope.launch {
+            container.authRepository.accountCapability.collect { capability ->
+                _uiState.update { it.copy(accountCapability = capability) }
             }
         }
     }
@@ -151,6 +184,40 @@ class AppViewModel(
         }
     }
 
+    private fun observeSignedInOAuthCallbacks() {
+        viewModelScope.launch(ioDispatcher) {
+            container.oauthCallbackBus.events.collect { payload ->
+                if (!initialized) return@collect
+                if (container.authRepository.sessionState.value.isSignedIn) {
+                    handleSignedInOAuthCallback(payload)
+                }
+            }
+        }
+    }
+
+    private suspend fun consumePendingOAuthLinkIfPresent() {
+        val pending = container.oauthCallbackBus.pendingCallback.value ?: return
+        if (pending is OAuthCallbackPayload.LoginCode) return
+        val consumed = container.oauthCallbackBus.consumePendingCallback() ?: return
+        handleSignedInOAuthCallback(consumed)
+    }
+
+    private suspend fun handleSignedInOAuthCallback(payload: OAuthCallbackPayload) {
+        if (payload is OAuthCallbackPayload.LoginCode) return
+        oauthLinkMutex.withLock {
+            // Clear matching pending callback if it was still sticky on the bus.
+            if (container.oauthCallbackBus.pendingCallback.value == payload) {
+                container.oauthCallbackBus.consumePendingCallback()
+            }
+            val result = container.authRepository.handleOAuthLinkCallback(payload)
+            _uiState.update { it.copy(latestOAuthLinkResult = result) }
+        }
+    }
+
+    fun consumeLatestOAuthLinkResult() {
+        _uiState.update { it.copy(latestOAuthLinkResult = null) }
+    }
+
     /**
      * Single owner for global 401 session expiration handling.
      * Deduplicated per active session generation so concurrent 401 responses never trigger
@@ -178,7 +245,13 @@ class AppViewModel(
                 container.realtimeClient.disconnect(clearState = false)
                 container.authRepository.clearLocalSession(clearServer = false)
                 val origin = container.settingsStore.getServerOrigin()
-                updateRouteFromSession(origin, isSignedIn = false)
+                updateRouteFromSession(
+                    serverOrigin = origin,
+                    isSignedIn = false,
+                    mustChangePassword = false,
+                    hasAccountScope = false,
+                    hasAdminScope = false,
+                )
             }
         }
     }
@@ -193,7 +266,7 @@ class AppViewModel(
      * Explicit user-initiated account switch on the same server.
      * Revokes the current device token remotely and wipes account-scoped local state
      * (temporary room state, transfer queue, pending share, media caches) while preserving
-     * `serverOrigin` so the user can sign in with another account directly.
+     * `serverOrigin` so the user can sign in with another account (or upgrade scope) directly.
      */
     fun switchAccount() {
         if (_uiState.value.isLoggingOut) return
@@ -205,6 +278,7 @@ class AppViewModel(
                     activeMainOrigin = null
                     sessionExpiredNotice = false
                 }
+                container.oauthCallbackBus.clearPendingCallback()
                 container.realtimeClient.disconnect(clearState = true)
                 container.roomRepository.clearRoomState()
                 container.transferManager.clearAllForScopeSwitch()
@@ -215,9 +289,15 @@ class AppViewModel(
                 sessionExpiredMutex.withLock {
                     sessionExpiredNotice = false
                 }
-                _uiState.update { it.copy(isLoggingOut = false) }
+                _uiState.update { it.copy(isLoggingOut = false, latestOAuthLinkResult = null) }
                 val session = container.authRepository.sessionState.value
-                updateRouteFromSession(session.serverOrigin, session.isSignedIn)
+                updateRouteFromSession(
+                    serverOrigin = session.serverOrigin,
+                    isSignedIn = session.isSignedIn,
+                    mustChangePassword = session.mustChangePassword,
+                    hasAccountScope = session.hasAccountScope,
+                    hasAdminScope = session.hasAdminScope,
+                )
             }
         }
     }
@@ -237,14 +317,26 @@ class AppViewModel(
                 sessionExpiredMutex.withLock {
                     sessionExpiredNotice = false
                 }
-                _uiState.update { it.copy(isLoggingOut = false) }
+                _uiState.update { it.copy(isLoggingOut = false, latestOAuthLinkResult = null) }
                 val session = container.authRepository.sessionState.value
-                updateRouteFromSession(session.serverOrigin, session.isSignedIn)
+                updateRouteFromSession(
+                    serverOrigin = session.serverOrigin,
+                    isSignedIn = session.isSignedIn,
+                    mustChangePassword = session.mustChangePassword,
+                    hasAccountScope = session.hasAccountScope,
+                    hasAdminScope = session.hasAdminScope,
+                )
             }
         }
     }
 
-    private fun updateRouteFromSession(serverOrigin: String?, isSignedIn: Boolean) {
+    private fun updateRouteFromSession(
+        serverOrigin: String?,
+        isSignedIn: Boolean,
+        mustChangePassword: Boolean,
+        hasAccountScope: Boolean,
+        hasAdminScope: Boolean,
+    ) {
         val cleanedOrigin = serverOrigin?.takeIf { it.isNotBlank() }
         val nextRoute = when {
             isSignedIn && cleanedOrigin != null -> {
@@ -265,7 +357,14 @@ class AppViewModel(
                 )
             }
         }
-        _uiState.update { it.copy(route = nextRoute) }
+        _uiState.update {
+            it.copy(
+                route = nextRoute,
+                mustChangePassword = isSignedIn && mustChangePassword,
+                hasAccountScope = isSignedIn && hasAccountScope,
+                hasAdminScope = isSignedIn && hasAdminScope,
+            )
+        }
     }
 
     class Factory(

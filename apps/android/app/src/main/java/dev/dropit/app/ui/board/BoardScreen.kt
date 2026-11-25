@@ -118,6 +118,8 @@ fun BoardScreen(
     onOpenImageLightbox: (images: List<ClipItem>, initialIndex: Int, scope: TargetScope) -> Unit,
     onOpenMediaPlayer: (item: ClipItem, isVideo: Boolean, scope: TargetScope) -> Unit,
     onOpenTextReader: (item: ClipItem) -> Unit,
+    suppressItemShareSheet: Boolean = false,
+    onOpenSharePresets: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -637,7 +639,7 @@ fun BoardScreen(
         )
     }
 
-    if (itemShareState.item != null) {
+    if (itemShareState.item != null && !suppressItemShareSheet) {
         ItemShareSheet(
             state = itemShareState,
             nowMs = nowMs,
@@ -654,9 +656,7 @@ fun BoardScreen(
             onSystemShareUrl = { url ->
                 sharePlainText(context, url)
             },
-            onOpenPresetsInBrowser = {
-                openExternalUrl(context, itemShareViewModel.sharePresetsSettingsUrl())
-            },
+            onOpenSharePresets = onOpenSharePresets,
             onDismiss = itemShareViewModel::close,
         )
     }

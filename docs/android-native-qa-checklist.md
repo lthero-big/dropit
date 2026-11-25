@@ -152,3 +152,31 @@
     - 顶栏空间胶囊 → 进入「我的临时房间」→ 测试「复制房间码」「复制链接」「修改房间码/PIN」，并用另一台设备或「输入房间码」验证 PIN 校验与错误提示；按系统返回键确认从临时房间退回我的空间。
     - 任意条目「更多」→「分享链接」→ 创建只读短链，复制 `/s/` 与 `/d/` 链接验证可访问，再点「撤销」确认立即失效。
     - 「设置」→「检查更新」：核对版本号格式与结果提示（若测试服已发布更高 `versionCode` 的 APK，一并复核下载进度、SHA-256 校验与「安装未知应用」权限引导）。
+
+---
+
+## 5. v0.4.1（Stage 8 / RHEA-269）原生全量闭环升级与真机复测清单
+
+> **变更基线**：基于 Stage 7（`main@392832b`，`versionCode = 7 / versionName = 0.4.1`），彻底替代原先「跳转系统浏览器」的外部链接清单，完成原生 OAuth / 密码登录、单项分享预设实时同步、以及全部 7 项设置与管理员原生二级界面。
+
+### 5.1 v0.4.1 新增原生能力与自动化单测覆盖
+
+| 新增模块 | 源码位置 | 自动化单测覆盖 | 状态 |
+| --- | --- | --- | --- |
+| 动态原生登录页（GitHub / Google OAuth Custom Tabs + `dropit://auth/callback` 回跳、邮箱密码登录、折叠设备码备选、强制改密弹窗） | `SRC/ui/onboarding/OnboardingViewModel.kt`、`SRC/ui/onboarding/OnboardingScreen.kt`、`SRC/ui/settings/ForcePasswordChangeDialog.kt`、`SRC/ui/navigation/AppViewModel.kt` | `TEST/ui/onboarding/OnboardingViewModelTest.kt` | **已自动化验证** + 真机复核 Custom Tabs 回跳 |
+| 单项分享面板实时同步 PC/Web 自定义预设（`hours`/`days`/`months`/`views` 去重排序合并，如 `2d → 2 天`），底部直达 App 内原生「分享选项预设」页 | `SRC/ui/share/SharePresetHelpers.kt`、`SRC/ui/share/ItemShareViewModel.kt`、`SRC/ui/share/ItemShareSheet.kt` | `TEST/ui/share/ItemShareViewModelTest.kt` | **已自动化验证** + 真机联调复核 |
+| 7 项设置与管理员原生二级页（分享选项预设、分享管理中心、空间成员与邀请、登录设备、访问令牌与设备码、修改密码与 OAuth 绑定、管理员设置 5 标签页含 `409 ORIGIN_CONFIRM_REQUIRED` 二次确认） | `SRC/ui/settings/SettingsSubPage.kt`、`SettingsCommonComponents.kt`、`SharePresetsSubPage.kt`、`ShareLinksSubPage.kt`、`SpaceSharingSubPage.kt`、`DevicesSubPage.kt`、`TokensAndDeviceCodeSubPage.kt`、`SecurityAndOAuthSubPage.kt`、`AdminSettingsViewModel.kt`、`AdminSettingsSubPage.kt`、`RuntimeLimitsCatalog.kt` | `TEST/ui/settings/SettingsViewModelTest.kt`、`TEST/ui/settings/NativeSettingsSubPagesViewModelTest.kt` | **已自动化验证** + 真机全流程复核 |
+| 旧版设备码 `403 INSUFFICIENT_SCOPE` 降级引导与管理员角色/权限双重门禁（`user.role == "admin" && hasAdminScope`） | `SRC/ui/settings/SettingsScreen.kt`、`SettingsCommonComponents.kt`、`SettingsSubPage.kt` | `TEST/ui/settings/SettingsViewModelTest.kt`、`TEST/ui/settings/NativeSettingsSubPagesViewModelTest.kt` | **已自动化验证** |
+
+### 5.2 v0.4.1 真机重点复测步骤（约 5 分钟）
+
+1. **原生登录与强制改密**：
+   - 输入服务器地址校验通过后，核对自动展示的「使用 GitHub 登录」/「使用 Google 登录」按钮、邮箱密码表单与默认折叠的「使用设备码登录」。
+   - 分别测试 GitHub / Google Custom Tabs 授权后经 `dropit://auth/callback` 自动回跳进入主看板；测试邮箱密码错误提示与管理员重置临时密码后的原生「请先修改临时密码」阻塞弹窗。
+2. **旧版设备码升级权限引导**：
+   - 若从旧版设备码覆盖升级（令牌仅含 `read write` 缺少 `account` scope），进入「设置」确认顶部展示「需要重新登录以解锁应用内设置」卡片，点击一键跳转登录页保留当前服务器地址重新登录。
+3. **单项分享预设与 PC/Web 实时同步**：
+   - 在 PC/Web 或 App 内「设置 → 分享选项预设」添加自定义 `2 天` 有效期与自定义访问次数并保存 → 返回任意条目打开「分享链接」，确认选项列表中按顺序出现「2 天」且可直接选中生成分享短链；点击面板底部「自定义分享选项」确认直达 App 内原生页（不再跳外部浏览器），修改保存返回后立刻生效。
+4. **7 项原生设置二级页与管理员门禁**：
+   - 依次体验：分享管理中心（筛选/翻页/二次复制短链/撤销/删除）、空间成员与邀请（切换只读与可编辑/生成复制空间邀请/退出受邀空间）、登录设备（单个下线/一键踢出其他设备）、访问令牌与设备码（创建 PAT 一次性明文复制/输入 8 位码批准或拒绝设备）、修改密码与登录方式（原生改密/Custom Tabs 绑定 OAuth/防解绑唯一登录方式）。
+   - 分别以普通用户与管理员账号登录，确认普通用户完全不显示「管理员设置」；管理员账号进入后验证 5 个标签页（用户管理/注册策略与邀请码/运行时限额与审计/临时房间/站点域名 409 二次确认与 OAuth 凭据验证）均在 App 内原生完成并全局生效。

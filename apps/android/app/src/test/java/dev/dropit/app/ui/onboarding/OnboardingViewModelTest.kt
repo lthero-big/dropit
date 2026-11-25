@@ -4,7 +4,15 @@ import dev.dropit.app.core.auth.AuthRepository
 import dev.dropit.app.core.auth.AuthSessionState
 import dev.dropit.app.core.auth.DeviceAuthState
 import dev.dropit.app.core.auth.DevicePollOutcome
+import dev.dropit.app.core.auth.OAuthCallbackBus
+import dev.dropit.app.core.auth.OAuthCallbackPayload
+import dev.dropit.app.core.auth.OAuthLoginResult
+import dev.dropit.app.core.auth.PendingOAuthLogin
 import dev.dropit.app.core.network.ApiError
+import dev.dropit.app.core.network.ApiErrorCode
+import dev.dropit.app.core.network.AppAuthTokenResponse
+import dev.dropit.app.core.network.AppAuthUser
+import dev.dropit.app.core.network.AuthProvidersInfo
 import dev.dropit.app.core.network.DeviceAuthorizeResponse
 import dev.dropit.app.core.network.VerifiedServer
 import dev.dropit.app.core.network.VersionInfo
@@ -46,46 +54,160 @@ class OnboardingViewModelTest {
     }
 
     @Test
-    fun submitServerUrl_normalizesBareDomainVerifiesAndStartsDeviceAuth() = runTest(testDispatcher) {
-        val fakeAuth = FakeAuthRepository(
-            pollStates = listOf(
+    fun submitServerUrl_normalizesBareDomainVerifiesAndLoadsAuthProvidersWithoutAutoStartingDeviceCode() =
+        runTest(testDispatcher) {
+            val fakeAuth = FakeAuthRepository(
+                providersInfo = AuthProvidersInfo(
+                    providers = listOf("github", "google"),
+                    password = true,
+                    registration = "invite",
+                ),
+            )
+            val vm = OnboardingViewModel(
+                authRepository = fakeAuth,
+                ioDispatcher = testDispatcher,
+                pollDelayMillis = {},
+                autoStartDeviceAuth = false,
+            )
+
+            vm.onServerUrlChanged("dropit.example.com/")
+            vm.submitServerUrl()
+            advanceUntilIdle()
+
+            val state = vm.uiState.value
+            assertEquals(listOf("https://dropit.example.com"), fakeAuth.verifiedUrls)
+            assertEquals(OnboardingStep.DEVICE_AUTH, state.step)
+            assertEquals("https://dropit.example.com", state.configuredServerOrigin)
+            assertNotNull(state.verifiedServer)
+            assertEquals(listOf("github", "google"), state.enabledOAuthProviders)
+            assertTrue(state.isPasswordEnabled)
+            // Device code remains collapsed & idle until user explicitly expands it.
+            assertFalse(state.isDeviceCodeExpanded)
+            assertEquals(0, fakeAuth.startDeviceAuthCallCount)
+
+            // Expanding device code starts authorization on demand.
+            fakeAuth.pollStates = listOf(
                 DeviceAuthState.WaitingForApproval(sampleAuth("ABCD-1234", interval = 5), 5),
-            ),
-        )
+            )
+            vm.toggleDeviceCodeSection()
+            advanceUntilIdle()
+
+            assertTrue(vm.uiState.value.isDeviceCodeExpanded)
+            assertEquals(1, fakeAuth.startDeviceAuthCallCount)
+            assertEquals(
+                "ABCD-1234",
+                (vm.uiState.value.deviceAuthState as DeviceAuthState.WaitingForApproval).authorization.userCode,
+            )
+        }
+
+    @Test
+    fun passwordLogin_validatesInputsSucceedsAndSurfacesInvalidCredentials() = runTest(testDispatcher) {
+        val fakeAuth = FakeAuthRepository()
         val vm = OnboardingViewModel(
             authRepository = fakeAuth,
+            initialServerOrigin = "https://dropit.example.com",
             ioDispatcher = testDispatcher,
             pollDelayMillis = {},
-            autoStartDeviceAuth = false,
         )
-
-        vm.onServerUrlChanged("dropit.example.com/")
-        vm.submitServerUrl()
         advanceUntilIdle()
 
-        val state = vm.uiState.value
-        assertEquals(listOf("https://dropit.example.com"), fakeAuth.verifiedUrls)
-        assertEquals(1, fakeAuth.startDeviceAuthCallCount)
-        assertEquals(OnboardingStep.DEVICE_AUTH, state.step)
-        assertEquals("https://dropit.example.com", state.configuredServerOrigin)
-        assertNotNull(state.verifiedServer)
-        assertTrue(state.deviceAuthState is DeviceAuthState.WaitingForApproval)
-        assertEquals(
-            "ABCD-1234",
-            (state.deviceAuthState as DeviceAuthState.WaitingForApproval).authorization.userCode,
+        // Blank fields rejected locally
+        vm.submitPasswordLogin()
+        assertEquals("请输入邮箱和密码", vm.uiState.value.authError)
+
+        // Server rejects invalid credentials
+        fakeAuth.passwordLoginError = ApiError(
+            errorCode = ApiErrorCode.INVALID_CREDENTIALS,
+            rawCode = "INVALID_CREDENTIALS",
+            httpStatus = 401,
+            userMessage = ApiErrorCode.INVALID_CREDENTIALS.defaultMessage,
         )
+        vm.onEmailChanged("alice@example.com")
+        vm.onPasswordChanged("wrong-pass")
+        vm.submitPasswordLogin()
+        advanceUntilIdle()
+        assertEquals(ApiErrorCode.INVALID_CREDENTIALS.defaultMessage, vm.uiState.value.authError)
+        assertFalse(fakeAuth.sessionState.value.isSignedIn)
+
+        // Valid credentials complete login with account scope & mustChangePassword
+        fakeAuth.passwordLoginError = null
+        fakeAuth.passwordLoginResponse = AppAuthTokenResponse(
+            accessToken = "tok-pw-1",
+            scope = "read write account",
+            user = AppAuthUser(id = "u1", email = "alice@example.com", name = "Alice", role = "user"),
+            mustChangePassword = true,
+        )
+        vm.onPasswordChanged("TempPass123!")
+        vm.submitPasswordLogin()
+        advanceUntilIdle()
+
+        assertNull(vm.uiState.value.authError)
+        assertEquals("", vm.uiState.value.passwordInput)
+        assertTrue(fakeAuth.sessionState.value.isSignedIn)
+        assertTrue(fakeAuth.sessionState.value.hasAccountScope)
+        assertTrue(fakeAuth.sessionState.value.mustChangePassword)
     }
 
     @Test
-    fun submitServerUrl_whenSessionStateTriggersSyncEntry_startsDeviceAuthOnceAndKeepsVerifiedServer() =
+    fun oauthLogin_launchesCustomTabAndHandlesDeepLinkCallbackSuccessAndError() = runTest(testDispatcher) {
+        val bus = OAuthCallbackBus()
+        val fakeAuth = FakeAuthRepository(
+            providersInfo = AuthProvidersInfo(providers = listOf("github", "google"), password = true),
+        )
+        val vm = OnboardingViewModel(
+            authRepository = fakeAuth,
+            oauthCallbackBus = bus,
+            initialServerOrigin = "https://dropit.example.com",
+            ioDispatcher = testDispatcher,
+            pollDelayMillis = {},
+        )
+        advanceUntilIdle()
+
+        vm.startOAuthLogin("github")
+        advanceUntilIdle()
+        assertEquals("github", vm.uiState.value.activeOAuthProvider)
+        assertEquals(
+            "https://dropit.example.com/api/auth/github?app_redirect=dropit://auth/callback&app_state=state-123456",
+            vm.uiState.value.pendingOAuthLaunchUrl,
+        )
+        vm.consumePendingOAuthLaunchUrl()
+        assertNull(vm.uiState.value.pendingOAuthLaunchUrl)
+
+        // Error callback from OAuth provider surfaces localized message
+        fakeAuth.oauthLoginCallbackResult = OAuthLoginResult.Failed(
+            ApiError.fromOAuthErrorCode("OAUTH_DENIED"),
+        )
+        bus.onCallbackUri("dropit://auth/callback?error=OAUTH_DENIED&state=state-123456")
+        advanceUntilIdle()
+        assertEquals(ApiErrorCode.OAUTH_DENIED.defaultMessage, vm.uiState.value.authError)
+        assertNull(vm.uiState.value.activeOAuthProvider)
+
+        // Successful OAuth login callback exchanges code & signs in
+        vm.startOAuthLogin("google")
+        advanceUntilIdle()
+        val successResp = AppAuthTokenResponse(
+            accessToken = "tok-google-1",
+            scope = "read write account admin",
+            user = AppAuthUser(id = "u-admin", email = "admin@example.com", name = "Admin", role = "admin"),
+            mustChangePassword = false,
+        )
+        fakeAuth.oauthLoginCallbackResult = OAuthLoginResult.Success(successResp)
+        bus.onCallbackUri("dropit://auth/callback?code=one-time-code&state=state-123456")
+        advanceUntilIdle()
+
+        assertNull(vm.uiState.value.authError)
+        assertNull(vm.uiState.value.activeOAuthProvider)
+        assertTrue(fakeAuth.sessionState.value.isSignedIn)
+        assertTrue(fakeAuth.sessionState.value.hasAdminScope)
+    }
+
+    @Test
+    fun submitServerUrl_whenSessionStateTriggersSyncEntry_keepsVerifiedServerAndLoadsProviders() =
         runTest(testDispatcher) {
             lateinit var vm: OnboardingViewModel
             val fakeAuth = FakeAuthRepository(
-                pollStates = listOf(
-                    DeviceAuthState.WaitingForApproval(sampleAuth("ONCE-2026", interval = 5), 5),
-                ),
+                providersInfo = AuthProvidersInfo(providers = listOf("github"), password = true),
                 onServerSaved = { origin ->
-                    // Simulate AppViewModel -> DropitApp LaunchedEffect firing syncEntry mid-verification
                     vm.syncEntry(origin, sessionExpired = false)
                 },
             )
@@ -100,22 +222,19 @@ class OnboardingViewModelTest {
             vm.submitServerUrl()
             advanceUntilIdle()
 
-            // Simulate another LaunchedEffect syncEntry after submitServerUrl completes
             vm.syncEntry("https://dropit.example.com", sessionExpired = false)
             advanceUntilIdle()
 
             val state = vm.uiState.value
-            assertEquals(1, fakeAuth.startDeviceAuthCallCount)
             assertEquals(OnboardingStep.DEVICE_AUTH, state.step)
             assertNotNull(state.verifiedServer)
-            assertEquals("0.4.0", state.verifiedServer?.versionInfo?.version)
+            assertEquals("0.4.1", state.verifiedServer?.versionInfo?.version)
+            assertEquals(listOf("github"), state.enabledOAuthProviders)
 
-            // Switching server back to SERVER_CONFIG and submitting again starts a fresh authorization once
             vm.switchServer()
             assertEquals(OnboardingStep.SERVER_CONFIG, vm.uiState.value.step)
             vm.submitServerUrl()
             advanceUntilIdle()
-            assertEquals(2, fakeAuth.startDeviceAuthCallCount)
             assertNotNull(vm.uiState.value.verifiedServer)
         }
 
@@ -169,7 +288,6 @@ class OnboardingViewModelTest {
         assertTrue(vm.uiState.value.isServerOffline)
         assertNotNull(vm.uiState.value.serverError)
 
-        // Retry after network comes back
         fakeAuth.verifyError = null
         vm.submitServerUrl()
         advanceUntilIdle()
@@ -222,13 +340,11 @@ class OnboardingViewModelTest {
         advanceUntilIdle()
         assertEquals(DeviceAuthState.Expired, vm.uiState.value.deviceAuthState)
 
-        // Retry yields Denied
         fakeAuth.pollStates = listOf(DeviceAuthState.Denied)
         vm.startDeviceAuth()
         advanceUntilIdle()
         assertEquals(DeviceAuthState.Denied, vm.uiState.value.deviceAuthState)
 
-        // Switch server returns to SERVER_CONFIG and resets device auth state
         vm.switchServer()
         assertEquals(OnboardingStep.SERVER_CONFIG, vm.uiState.value.step)
         assertEquals(DeviceAuthState.Idle, vm.uiState.value.deviceAuthState)
@@ -238,7 +354,7 @@ class OnboardingViewModelTest {
     @Test
     fun syncEntry_after401PreservesServerOriginAndShowsExpiredNotice() = runTest(testDispatcher) {
         val fakeAuth = FakeAuthRepository(
-            pollStates = listOf(DeviceAuthState.WaitingForApproval(sampleAuth("REAU-4010", 5), 5)),
+            providersInfo = AuthProvidersInfo(providers = listOf("github"), password = true),
         )
         val vm = OnboardingViewModel(
             authRepository = fakeAuth,
@@ -254,60 +370,14 @@ class OnboardingViewModelTest {
         assertEquals(OnboardingStep.DEVICE_AUTH, state.step)
         assertEquals("https://dropit.lthero.com", state.configuredServerOrigin)
         assertTrue(state.sessionExpiredNotice)
-        assertTrue(state.deviceAuthState is DeviceAuthState.WaitingForApproval)
-        assertEquals(1, fakeAuth.startDeviceAuthCallCount)
+        assertEquals(listOf("github"), state.enabledOAuthProviders)
+        assertEquals(1, fakeAuth.providersCallCount)
 
-        // Repeated identical syncEntry does not re-request device code
+        // Repeated identical syncEntry does not re-fetch providers unnecessarily
         vm.syncEntry(serverOrigin = "https://dropit.lthero.com", sessionExpired = true)
         advanceUntilIdle()
-        assertEquals(1, fakeAuth.startDeviceAuthCallCount)
+        assertEquals(1, fakeAuth.providersCallCount)
     }
-
-    @Test
-    fun syncEntry_afterApprovedOnSameServer_restartsDeviceAuthForAccountSwitchWithoutStaleExpiredNotice() =
-        runTest(testDispatcher) {
-            val firstAuth = sampleAuth("ACCT-0001", interval = 5)
-            val fakeAuth = FakeAuthRepository(
-                authResponse = firstAuth,
-                pollStates = listOf(
-                    DeviceAuthState.WaitingForApproval(firstAuth, pollIntervalSeconds = 5),
-                    DeviceAuthState.Approved(serverOrigin = "https://dropit.lthero.com", scope = "read write"),
-                ),
-            )
-            val vm = OnboardingViewModel(
-                authRepository = fakeAuth,
-                initialServerOrigin = "https://dropit.lthero.com",
-                initialSessionExpired = true,
-                ioDispatcher = testDispatcher,
-                pollDelayMillis = {},
-                autoStartDeviceAuth = true,
-            )
-
-            advanceUntilIdle()
-            assertEquals(1, fakeAuth.startDeviceAuthCallCount)
-            assertTrue(vm.uiState.value.deviceAuthState is DeviceAuthState.Approved)
-
-            // User clicks "切换账号" from Settings on the SAME server -> DropitApp calls syncEntry(origin, false)
-            val secondAuth = sampleAuth("ACCT-0002", interval = 5)
-            fakeAuth.authResponse = secondAuth
-            fakeAuth.pollStates = listOf(
-                DeviceAuthState.WaitingForApproval(secondAuth, pollIntervalSeconds = 5),
-            )
-
-            vm.syncEntry(serverOrigin = "https://dropit.lthero.com", sessionExpired = false)
-            advanceUntilIdle()
-
-            val state = vm.uiState.value
-            assertEquals(2, fakeAuth.startDeviceAuthCallCount)
-            assertEquals(OnboardingStep.DEVICE_AUTH, state.step)
-            assertEquals("https://dropit.lthero.com", state.configuredServerOrigin)
-            assertFalse(state.sessionExpiredNotice)
-            assertTrue(state.deviceAuthState is DeviceAuthState.WaitingForApproval)
-            assertEquals(
-                "ACCT-0002",
-                (state.deviceAuthState as DeviceAuthState.WaitingForApproval).authorization.userCode,
-            )
-        }
 
     private fun sampleAuth(code: String, interval: Int = 5) = DeviceAuthorizeResponse(
         deviceCode = "dev-$code",
@@ -320,6 +390,16 @@ class OnboardingViewModelTest {
 
     private class FakeAuthRepository(
         var verifyError: Throwable? = null,
+        var providersInfo: AuthProvidersInfo = AuthProvidersInfo(providers = emptyList(), password = true),
+        var passwordLoginError: Throwable? = null,
+        var passwordLoginResponse: AppAuthTokenResponse = AppAuthTokenResponse(
+            accessToken = "tok-default",
+            scope = "read write account",
+            user = AppAuthUser(id = "u1", email = "u@example.com", name = "User", role = "user"),
+        ),
+        var oauthLoginCallbackResult: OAuthLoginResult = OAuthLoginResult.Failed(
+            ApiError.fromOAuthErrorCode("OAUTH_STATE_INVALID"),
+        ),
         var authResponse: DeviceAuthorizeResponse = DeviceAuthorizeResponse(
             deviceCode = "dev-code-1",
             userCode = "ABCD-1234",
@@ -339,6 +419,7 @@ class OnboardingViewModelTest {
 
         val verifiedUrls = mutableListOf<String>()
         var startDeviceAuthCallCount = 0
+        var providersCallCount = 0
 
         override suspend fun refreshSessionState(): AuthSessionState = _sessionState.value
 
@@ -349,8 +430,53 @@ class OnboardingViewModelTest {
             onServerSaved(rawUrl)
             return VerifiedServer(
                 serverOrigin = rawUrl,
-                versionInfo = VersionInfo(version = "0.4.0", commit = "8843e66", install = "docker"),
+                versionInfo = VersionInfo(version = "0.4.1", commit = "392832b", install = "docker"),
             )
+        }
+
+        override suspend fun getAuthProviders(serverOrigin: String?): AuthProvidersInfo {
+            providersCallCount++
+            return providersInfo
+        }
+
+        override suspend fun loginWithPassword(
+            serverOrigin: String,
+            email: String,
+            password: String,
+            invite: String?,
+        ): AppAuthTokenResponse {
+            passwordLoginError?.let { throw it }
+            _sessionState.value = AuthSessionState(
+                serverOrigin = serverOrigin,
+                isSignedIn = true,
+                tokenScopes = passwordLoginResponse.parsedScopes,
+                mustChangePassword = passwordLoginResponse.mustChangePassword,
+            )
+            return passwordLoginResponse
+        }
+
+        override suspend fun startAppOAuthLogin(
+            serverOrigin: String,
+            provider: String,
+            invite: String?,
+        ): PendingOAuthLogin = PendingOAuthLogin(
+            provider = provider,
+            serverOrigin = serverOrigin,
+            state = "state-123456",
+            launchUrl = "$serverOrigin/api/auth/$provider?app_redirect=dropit://auth/callback&app_state=state-123456",
+        )
+
+        override suspend fun handleOAuthLoginCallback(payload: OAuthCallbackPayload): OAuthLoginResult {
+            val res = oauthLoginCallbackResult
+            if (res is OAuthLoginResult.Success) {
+                _sessionState.value = AuthSessionState(
+                    serverOrigin = _sessionState.value.serverOrigin ?: "https://dropit.example.com",
+                    isSignedIn = true,
+                    tokenScopes = res.response.parsedScopes,
+                    mustChangePassword = res.response.mustChangePassword,
+                )
+            }
+            return res
         }
 
         override suspend fun startDeviceAuthorization(

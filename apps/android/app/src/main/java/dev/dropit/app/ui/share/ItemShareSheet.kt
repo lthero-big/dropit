@@ -18,11 +18,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -64,7 +65,7 @@ fun ItemShareSheet(
     onRevokeShare: (String) -> Unit,
     onCopyUrl: (String) -> Unit,
     onSystemShareUrl: (String) -> Unit,
-    onOpenPresetsInBrowser: () -> Unit,
+    onOpenSharePresets: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val item = state.item ?: return
@@ -116,18 +117,30 @@ fun ItemShareSheet(
                 )
             }
 
-            // Expiry selector
+            // Expiry selector (merged built-in + server custom presets)
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    text = "有效期",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colors.fg2,
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = "有效期",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.fg2,
+                    )
+                    if (state.isLoadingPresets) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(12.dp),
+                            strokeWidth = 1.5.dp,
+                            color = colors.fg3,
+                        )
+                    }
+                }
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    ItemShareViewModel.EXPIRY_OPTIONS.forEach { option ->
+                    state.expiryOptions.forEach { option ->
                         ShareOptionChip(
                             label = option.label,
                             selected = state.selectedExpiresIn == option.value,
@@ -138,7 +151,7 @@ fun ItemShareSheet(
                 }
             }
 
-            // Max views selector
+            // Max views selector (merged built-in + server custom presets)
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     text = "访问次数上限",
@@ -149,7 +162,7 @@ fun ItemShareSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    ItemShareViewModel.MAX_VIEWS_OPTIONS.forEach { option ->
+                    state.maxViewsOptions.forEach { option ->
                         ShareOptionChip(
                             label = option.label,
                             selected = state.selectedMaxViews == option.value,
@@ -160,7 +173,7 @@ fun ItemShareSheet(
                 }
             }
 
-            // Create action + presets browser hint
+            // Create action + native in-app share presets link
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Button(
                     onClick = onCreateShare,
@@ -196,22 +209,28 @@ fun ItemShareSheet(
                         .fillMaxWidth()
                         .defaultMinSize(minHeight = 48.dp)
                         .clip(shapes.sm)
-                        .clickable(onClick = onOpenPresetsInBrowser)
-                        .padding(vertical = 4.dp),
+                        .clickable(onClick = onOpenSharePresets)
+                        .padding(horizontal = 4.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Tune,
+                        contentDescription = null,
+                        tint = colors.fg3,
+                        modifier = Modifier.size(16.dp),
+                    )
                     Text(
-                        text = "自定义分享预设需在系统浏览器设置中配置",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.fg3,
-                        modifier = Modifier.weight(1f, fill = false),
+                        text = "自定义分享选项（实时同步 PC / Web）",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.fg2,
+                        modifier = Modifier.weight(1f),
                     )
                     Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                        contentDescription = "在系统浏览器打开分享预设",
+                        imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                        contentDescription = "打开分享选项预设",
                         tint = colors.fg3,
-                        modifier = Modifier.size(13.dp),
+                        modifier = Modifier.size(18.dp),
                     )
                 }
             }
