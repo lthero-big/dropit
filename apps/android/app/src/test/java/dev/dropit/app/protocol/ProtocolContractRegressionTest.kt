@@ -25,8 +25,8 @@ class ProtocolContractRegressionTest {
             "Native versionCode must strictly exceed legacy Capacitor 0.3.2 (code 5)",
             BuildConfig.VERSION_CODE > 5,
         )
-        assertEquals(6, BuildConfig.VERSION_CODE)
-        assertEquals("0.4.0", BuildConfig.VERSION_NAME)
+        assertEquals(7, BuildConfig.VERSION_CODE)
+        assertEquals("0.4.1", BuildConfig.VERSION_NAME)
         assertTrue(
             "versionName must match scripts/publish-android-apk.mjs validation regex",
             Regex("^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$").matches(BuildConfig.VERSION_NAME),
@@ -36,20 +36,20 @@ class ProtocolContractRegressionTest {
             UpdateFiles.isDownloadPath("/api/app/android/download/dropit-android-${BuildConfig.VERSION_NAME}.apk"),
         )
         val label = ServerUrl.versionLabel(BuildConfig.VERSION_NAME, "a1b2c3d4e5f6", "2026-11-25T06:00:00Z")
-        assertEquals("版本 0.4.0 · a1b2c3d · 2026-11-25", label)
+        assertEquals("版本 0.4.1 · a1b2c3d · 2026-11-25", label)
     }
 
     @Test
     fun updateManifestContractMatchesPublishAndroidApkScript() {
         val validSha = "a".repeat(64)
         val manifest = AppUpdateManifest(
-            versionCode = 6,
-            versionName = "0.4.0",
+            versionCode = 7,
+            versionName = "0.4.1",
             notes = "Kotlin + Jetpack Compose 原生客户端",
             size = 12_345_678L,
             sha256 = validSha,
             publishedAt = "2026-11-25T06:00:00.000Z",
-            url = "/api/app/android/download/dropit-android-0.4.0.apk",
+            url = "/api/app/android/download/dropit-android-0.4.1.apk",
         )
         assertTrue(UpdateFiles.isValidManifest(manifest))
         assertTrue(
