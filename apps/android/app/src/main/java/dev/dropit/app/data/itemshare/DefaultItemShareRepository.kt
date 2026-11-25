@@ -21,8 +21,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * - `GET  /api/spaces/:space/items/:id/shares` (and `/api/rooms/:room/items/:id/shares`)
  * - `DELETE /api/spaces/:space/shares/:shareId` (and `/api/rooms/:room/shares/:shareId`)
  *
- * Deliberately never calls `browserSession()`-only endpoints (`/api/shares`, `/api/shares/:shareId/*`,
- * `/api/me/share-presets`).
+ * Deliberately never calls `browserSession()`-only endpoints (`/api/shares`, `/api/shares/:shareId/link`,
+ * `/api/shares/:shareId/revoke`, `/api/me/share-presets`).
  */
 class DefaultItemShareRepository(
     private val apiClient: DropitApiClient,

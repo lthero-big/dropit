@@ -256,7 +256,7 @@ class DefaultRoomRepository(
     }
 
     /**
-     * Convenience scope helper for switching board/transfer/realtime seamlessly onto `/api/rooms/:room/*`.
+     * Convenience scope helper for switching board/transfer/realtime seamlessly onto `/api/rooms/:room/...`.
      */
     fun activeRoomScope(): TargetScope.RoomScope? =
         _activeRoom.value?.token?.takeIf { it.isNotBlank() }?.let { TargetScope.RoomScope(it) }
