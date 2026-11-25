@@ -1,37 +1,65 @@
 name: Android Native APK
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/android/**"
+      - ".github/workflows/android-native.yml"
+      - "scripts/publish-android-apk.mjs"
   pull_request:
     paths:
       - "apps/android/**"
       - ".github/workflows/android-native.yml"
+      - "scripts/publish-android-apk.mjs"
 permissions:
   contents: read
+concurrency:
+  group: android-native-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   android-native:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/android
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
       - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-home-cache-cleanup: true
+      - name: Install and build local dropit server for protocol regression
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @dropit/server build
       - name: Build info
+        working-directory: apps/android
         env:
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           VERSION=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)
+          VERSION_CODE=$(sed -n 's/.*versionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts)
           SHORT="${SHA:0:7}"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ -z "$VERSION" ] || [ -z "$VERSION_CODE" ]; then
+            echo "Failed to parse versionName/versionCode from apps/android/app/build.gradle.kts" >&2
+            exit 1
+          fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "SHORT=$SHORT" >> "$GITHUB_ENV"
           echo "DROPIT_BUILD_COMMIT=$SHA" >> "$GITHUB_ENV"
           echo "DROPIT_BUILD_DATE=$BUILD_DATE" >> "$GITHUB_ENV"
-          echo "Native build: version=$VERSION commit=$SHORT date=$BUILD_DATE"
+          echo "Native build: version=$VERSION code=$VERSION_CODE commit=$SHORT date=$BUILD_DATE"
+      # Same PKCS12 signing key as legacy Capacitor builds (ANDROID_KEYSTORE_B64), so native
+      # 0.4.0 (code 6) installs directly over 0.3.2 (code 5) without uninstalling or losing data.
       - name: Signing key
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -42,18 +70,143 @@ jobs:
             echo "DROPIT_KEYSTORE=$RUNNER_TEMP/dropit.p12" >> "$GITHUB_ENV"
             echo "::add-mask::$KEYSTORE_PASSWORD"
             echo "DROPIT_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "SIGNING_MODE=release-keystore (ANDROID_KEYSTORE_B64)" >> "$GITHUB_ENV"
           else
             echo "No ANDROID_KEYSTORE_B64 secret: using default debug key"
+            echo "SIGNING_MODE=default-debug-keystore" >> "$GITHUB_ENV"
           fi
-      - name: Test and assemble debug APK
-        run: chmod +x gradlew && ./gradlew testDebugUnitTest assembleDebug --no-daemon
-      - name: Name the APK
+      - name: Run unit + real-server protocol regression tests and assemble APK
         run: |
-          mkdir -p out
-          cp app/build/outputs/apk/debug/app-debug.apk "out/dropit-android-native-$VERSION-$SHORT.apk"
+          set -euo pipefail
+          LIVE_DATA_DIR="$RUNNER_TEMP/dropit-live-data"
+          LIVE_APK_SRC="$RUNNER_TEMP/dropit-update-test.apk"
+          rm -rf "$LIVE_DATA_DIR"
+          mkdir -p "$LIVE_DATA_DIR/app/android"
+
+          # Create a deterministic fixture APK and publish it via scripts/publish-android-apk.mjs
+          # so DefaultAppUpdater verifies the real server /api/app/android/latest & /download endpoints.
+          printf 'PK\003\004dropit-protocol-regression-apk-%s\n' "$SHORT" > "$LIVE_APK_SRC"
+          dd if=/dev/zero bs=1024 count=32 >> "$LIVE_APK_SRC" 2>/dev/null
+          TEST_UPDATE_SHA="$(sha256sum "$LIVE_APK_SRC" | awk '{print $1}')"
+          node scripts/publish-android-apk.mjs "$LIVE_APK_SRC" \
+            --code 7 \
+            --name 0.4.1 \
+            --notes "CI protocol regression fixture release" \
+            --dir "$LIVE_DATA_DIR/app/android"
+
+          SERVER_LOG="$RUNNER_TEMP/dropit-live-server.log"
+          HOST=127.0.0.1 \
+          PORT=18787 \
+          APP_ORIGIN=http://127.0.0.1:18787 \
+          DATA_DIR="$LIVE_DATA_DIR" \
+          ADMIN_EMAIL=regression@dropit.test \
+          ADMIN_PASSWORD=DropitRegressionPass2026! \
+          UPLOAD_CHUNK_BYTES=65536 \
+          RATE_GENERAL=1000 \
+          RATE_AUTH=100 \
+          RATE_UPLOAD=200 \
+          RATE_ROOM=50 \
+          RATE_TOKEN=500 \
+          DROPIT_VERSION="$VERSION" \
+          DROPIT_COMMIT="$SHORT" \
+          DROPIT_BUILD_DATE="$DROPIT_BUILD_DATE" \
+          DROPIT_INSTALL=source \
+          node apps/server/dist/index.js > "$SERVER_LOG" 2>&1 &
+          SERVER_PID=$!
+
+          cleanup() {
+            kill "$SERVER_PID" 2>/dev/null || true
+            wait "$SERVER_PID" 2>/dev/null || true
+            rm -rf "$LIVE_DATA_DIR" "$LIVE_APK_SRC"
+          }
+          trap cleanup EXIT
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18787/healthz >/dev/null 2>&1; then
+              break
+            fi
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "Local dropit server exited prematurely:" >&2
+              cat "$SERVER_LOG" >&2
+              exit 1
+            fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:18787/healthz >/dev/null
+
+          cd apps/android
+          chmod +x gradlew
+          DROPIT_LIVE_SERVER_URL=http://127.0.0.1:18787 \
+          DROPIT_LIVE_ADMIN_EMAIL=regression@dropit.test \
+          DROPIT_LIVE_ADMIN_PASSWORD=DropitRegressionPass2026! \
+          DROPIT_LIVE_EXPECTED_UPDATE_VERSION=0.4.1 \
+          DROPIT_LIVE_EXPECTED_UPDATE_CODE=7 \
+          DROPIT_LIVE_EXPECTED_UPDATE_SHA256="$TEST_UPDATE_SHA" \
+          DROPIT_REQUIRE_LIVE_SERVER=1 \
+          ./gradlew testDebugUnitTest assembleDebug --no-daemon
+      - name: Name APK, verify signature, compute SHA-256 & test publish script compatibility
+        run: |
+          set -euo pipefail
           rm -f "$RUNNER_TEMP/dropit.p12"
+          OUT_DIR="apps/android/out"
+          APK_NAME="dropit-android-${VERSION}-${SHORT}.apk"
+          APK_PATH="${OUT_DIR}/${APK_NAME}"
+          mkdir -p "$OUT_DIR"
+          cp apps/android/app/build/outputs/apk/debug/app-debug.apk "$APK_PATH"
+
+          APK_SIZE="$(wc -c < "$APK_PATH" | tr -d ' ')"
+          APK_SHA256="$(sha256sum "$APK_PATH" | awk '{print $1}')"
+          (cd "$OUT_DIR" && sha256sum "$APK_NAME" > "${APK_NAME}.sha256")
+          cat "${APK_PATH}.sha256"
+
+          # Verify APK signature and capture signer SHA-256 fingerprint
+          APKSIGNER="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
+          CERT_SHA256="unavailable"
+          if [ -n "$APKSIGNER" ]; then
+            SIGNER_OUT="$("$APKSIGNER" verify --print-certs "$APK_PATH")"
+            echo "$SIGNER_OUT"
+            CERT_SHA256="$(echo "$SIGNER_OUT" | sed -n 's/.*certificate SHA-256 digest: //p' | head -n 1)"
+          else
+            echo "::warning::apksigner not found under ANDROID_HOME; skipped apksigner verify"
+          fi
+
+          # Verify full compatibility with scripts/publish-android-apk.mjs against the real built APK
+          PUB_DIR="$RUNNER_TEMP/publish-compat-check"
+          rm -rf "$PUB_DIR"
+          node scripts/publish-android-apk.mjs "$APK_PATH" \
+            --code "$VERSION_CODE" \
+            --name "$VERSION" \
+            --notes "CI publish compatibility check ($SHORT)" \
+            --dir "$PUB_DIR"
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            const m = JSON.parse(readFileSync(process.argv[1], 'utf8'));
+            if (m.versionCode !== Number(process.argv[2])) throw new Error('versionCode mismatch');
+            if (m.versionName !== process.argv[3]) throw new Error('versionName mismatch');
+            if (m.sha256 !== process.argv[4]) throw new Error('sha256 mismatch');
+            if (m.size !== Number(process.argv[5])) throw new Error('size mismatch');
+            if (m.file !== 'dropit-android-' + process.argv[3] + '.apk') throw new Error('file mismatch');
+            console.log('publish-android-apk.mjs compatibility verified:', JSON.stringify(m));
+          " "$PUB_DIR/latest.json" "$VERSION_CODE" "$VERSION" "$APK_SHA256" "$APK_SIZE"
+          rm -rf "$PUB_DIR"
+
+          {
+            echo "## Android Native APK Build"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| APK File | \`${APK_NAME}\` |"
+            echo "| Version | \`${VERSION}\` (code \`${VERSION_CODE}\`) |"
+            echo "| Commit | \`${SHORT}\` |"
+            echo "| Size | \`${APK_SIZE}\` bytes |"
+            echo "| APK SHA-256 | \`${APK_SHA256}\` |"
+            echo "| Signing Mode | \`${SIGNING_MODE}\` |"
+            echo "| Signer Cert SHA-256 | \`${CERT_SHA256}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: dropit-android-native-debug-apk
-          path: apps/android/out/*.apk
+          name: dropit-android-apk
+          path: |
+            apps/android/out/*.apk
+            apps/android/out/*.apk.sha256
           retention-days: 30
