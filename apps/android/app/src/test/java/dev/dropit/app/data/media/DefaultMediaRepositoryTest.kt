@@ -291,9 +291,10 @@ class DefaultMediaRepositoryTest {
         assertTrue(cachedFile1.isFile)
         assertEquals(0, cacheClearCount.get())
 
-        // Logout on same server triggers automatic cache clear
+        // Logout on same server triggers automatic cache clear (wait on real wall clock,
+        // because clearCaches() runs on Dispatchers.IO outside runTest's virtual scheduler).
         sessionFlow.value = AuthSessionState(serverOrigin = baseUrl, isSignedIn = false)
-        withTimeout(5_000L) { cacheClearedSignals.receive() }
+        withContext(Dispatchers.Default) { withTimeout(5_000L) { cacheClearedSignals.receive() } }
         assertEquals(1, cacheClearCount.get())
         assertTrue(tempCacheDir.listFiles().isNullOrEmpty())
 
@@ -303,7 +304,7 @@ class DefaultMediaRepositoryTest {
         assertTrue(cachedFile2.isFile)
 
         sessionFlow.value = AuthSessionState(serverOrigin = otherBaseUrl, isSignedIn = true)
-        withTimeout(5_000L) { cacheClearedSignals.receive() }
+        withContext(Dispatchers.Default) { withTimeout(5_000L) { cacheClearedSignals.receive() } }
         assertEquals(2, cacheClearCount.get())
         assertTrue(tempCacheDir.listFiles().isNullOrEmpty())
     }

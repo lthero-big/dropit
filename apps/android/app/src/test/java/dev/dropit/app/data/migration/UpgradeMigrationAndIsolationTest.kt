@@ -52,6 +52,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -609,7 +610,7 @@ class UpgradeMigrationAndIsolationTest {
 
         // Smooth re-login flow: logout(clearServer = false) keeps serverOrigin, wipes old token & image cache
         authRepo.logout(clearServer = false)
-        withTimeout(5_000L) { cacheClearedSignals.receive() }
+        withContext(Dispatchers.Default) { withTimeout(5_000L) { cacheClearedSignals.receive() } }
         assertEquals(originA, settingsStore.getServerOrigin())
         assertNull(tokenVault.getToken())
         assertFalse(authRepo.sessionState.value.isSignedIn)
