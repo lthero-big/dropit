@@ -45,16 +45,17 @@ object OAuthCallbackParser {
     const val PATH = "/callback"
 
     fun isCallbackUri(rawUri: String?): Boolean {
-        if (rawUri.isNullOrBlank()) return false
-        val parsed = runCatching { URI(rawUri.trim()) }.getOrNull() ?: return false
+        val normalized = normalizeIntentUriIfNeeded(rawUri) ?: return false
+        val parsed = runCatching { URI(normalized) }.getOrNull() ?: return false
         return parsed.scheme.equals(SCHEME, ignoreCase = true) &&
             parsed.host.equals(HOST, ignoreCase = true) &&
             parsed.path == PATH
     }
 
     fun parse(rawUri: String?): OAuthCallbackPayload? {
-        if (!isCallbackUri(rawUri)) return null
-        val parsed = runCatching { URI(rawUri!!.trim()) }.getOrNull() ?: return null
+        val normalized = normalizeIntentUriIfNeeded(rawUri) ?: return null
+        if (!isCallbackUri(normalized)) return null
+        val parsed = runCatching { URI(normalized) }.getOrNull() ?: return null
         val params = parseQuery(parsed.rawQuery)
         val state = params["state"]?.trim().orEmpty()
         if (state.isEmpty()) return null
@@ -89,6 +90,22 @@ object OAuthCallbackParser {
         }
 
         return null
+    }
+
+    /**
+     * Defensively converts an unpacked `intent://auth/callback?...#Intent;scheme=dropit;...;end`
+     * URI back to `dropit://auth/callback?...` in case a non-standard browser forwards the raw
+     * intent URI string without stripping the `#Intent;...;end` fragment.
+     */
+    private fun normalizeIntentUriIfNeeded(rawUri: String?): String? {
+        val trimmed = rawUri?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        if (!trimmed.startsWith("intent://", ignoreCase = true)) return trimmed
+        val hashIdx = trimmed.indexOf("#Intent;")
+        if (hashIdx < 0) return null
+        val fragment = trimmed.substring(hashIdx)
+        if (!fragment.contains("scheme=dropit;", ignoreCase = true)) return null
+        val withoutScheme = trimmed.substring("intent://".length, hashIdx)
+        return "$SCHEME://$withoutScheme"
     }
 
     private fun parseQuery(rawQuery: String?): Map<String, String> {

@@ -6,6 +6,7 @@ import dev.dropit.app.core.auth.InMemorySettingsStore
 import dev.dropit.app.core.network.AppUpdateManifest
 import dev.dropit.app.core.network.DropitApiClient
 import dev.dropit.app.core.network.SessionCredentialsProvider
+import dev.dropit.app.core.network.UpdateSource
 import dev.dropit.app.core.repository.UpdateCheckResult
 import dev.dropit.app.core.repository.UpdateInstallState
 import kotlinx.coroutines.CancellationException
@@ -57,7 +58,9 @@ class DefaultAppUpdaterTest {
         settingsStore: InMemorySettingsStore = InMemorySettingsStore(AppSettings(serverOrigin = baseUrl)),
         installer: FakeApkInstaller = FakeApkInstaller(),
         currentVersionCode: Int = 6,
+        currentVersionName: String = "0.4.0-native",
         allowHttp: Boolean = true,
+        githubReleasesUrl: String? = null,
     ): DefaultAppUpdater {
         val creds = object : SessionCredentialsProvider {
             override suspend fun serverOrigin(): String? = settingsStore.getServerOrigin()
@@ -76,8 +79,9 @@ class DefaultAppUpdaterTest {
             cacheDir = cacheDir,
             installer = installer,
             currentVersionCode = currentVersionCode,
-            currentVersionName = "0.4.0-native",
+            currentVersionName = currentVersionName,
             allowInsecureHttpForTest = allowHttp,
+            githubReleasesUrl = githubReleasesUrl,
         )
     }
 
@@ -288,6 +292,302 @@ class DefaultAppUpdaterTest {
         assertEquals(UpdateInstallState.Idle, updater.installState.value)
         assertFalse("Partial APK file must be deleted on cancellation", partApk.exists())
         assertEquals(0, installer.launchCount)
+    }
+
+    @Test
+    fun checkLatest_githubReleasesFiltersDraftPrereleaseAndVerifiesSha256WithRedirectDownload() = runTest {
+        val githubServer = MockWebServer()
+        githubServer.start()
+        try {
+            val ghBase = githubServer.url("/").toString().trimEnd('/')
+            val apkBytes = ByteArray(4096) { (it * 13 + 5).toByte() }
+            val expectedSha = sha256(apkBytes)
+            val apkName = "dropit-android-0.4.2-abc1234.apk"
+
+            val releasesJson = """
+                [
+                  {
+                    "tag_name": "android-v0.4.3",
+                    "name": "draft release",
+                    "draft": true,
+                    "prerelease": false,
+                    "published_at": "2026-11-26T00:00:00Z",
+                    "assets": [
+                      {"name": "dropit-android-0.4.3.apk", "size": 100, "browser_download_url": "$ghBase/dl/0.4.3.apk"},
+                      {"name": "dropit-android-0.4.3.apk.sha256", "size": 90, "browser_download_url": "$ghBase/dl/0.4.3.apk.sha256"}
+                    ]
+                  },
+                  {
+                    "tag_name": "android-v0.4.3-rc.1",
+                    "name": "prerelease",
+                    "draft": false,
+                    "prerelease": true,
+                    "published_at": "2026-11-26T00:00:00Z",
+                    "assets": [
+                      {"name": "dropit-android-0.4.3-rc.1.apk", "size": 100, "browser_download_url": "$ghBase/dl/rc.apk"},
+                      {"name": "dropit-android-0.4.3-rc.1.apk.sha256", "size": 90, "browser_download_url": "$ghBase/dl/rc.apk.sha256"}
+                    ]
+                  },
+                  {
+                    "tag_name": "v0.9.9",
+                    "name": "server release",
+                    "draft": false,
+                    "prerelease": false,
+                    "assets": []
+                  },
+                  {
+                    "tag_name": "android-v0.4.2",
+                    "name": "dropit Android v0.4.2 (code 8)",
+                    "draft": false,
+                    "prerelease": false,
+                    "published_at": "2026-11-25T13:00:00Z",
+                    "body": "## dropit Android v0.4.2\n| 版本号 (`versionCode`) | `8` |\n支持 GitHub Releases 检查更新与原生 Google 登录",
+                    "assets": [
+                      {"name": "$apkName", "size": ${apkBytes.size}, "browser_download_url": "$ghBase/releases/download/android-v0.4.2/$apkName"},
+                      {"name": "$apkName.sha256", "size": 100, "browser_download_url": "$ghBase/releases/download/android-v0.4.2/$apkName.sha256"}
+                    ]
+                  }
+                ]
+            """.trimIndent()
+
+            // Self-hosted server has no release -> silently ignored
+            server.enqueue(MockResponse().setResponseCode(404).setBody("""{"error":{"code":"NO_RELEASE"}}"""))
+            // GitHub returns releases list, then 302 -> .apk.sha256
+            githubServer.enqueue(MockResponse().setResponseCode(200).setBody(releasesJson))
+            githubServer.enqueue(MockResponse().setResponseCode(302).addHeader("Location", "$ghBase/cdn/$apkName.sha256"))
+            githubServer.enqueue(MockResponse().setResponseCode(200).setBody("$expectedSha  $apkName\n"))
+
+            val installer = FakeApkInstaller(canInstall = true)
+            val updater = createUpdater(
+                installer = installer,
+                currentVersionCode = 7,
+                currentVersionName = "0.4.1",
+                githubReleasesUrl = "$ghBase/repos/lthero-big/dropit/releases?per_page=10",
+            )
+
+            val check = updater.checkLatest(force = true)
+            assertTrue("Expected UpdateAvailable from GitHub, got $check", check is UpdateCheckResult.UpdateAvailable)
+            val available = check as UpdateCheckResult.UpdateAvailable
+            assertEquals(UpdateSource.GITHUB, available.manifest.source)
+            assertEquals("0.4.2", available.manifest.versionName)
+            assertEquals(8, available.manifest.versionCode)
+            assertEquals(expectedSha, available.manifest.sha256)
+            assertEquals("2026-11-25T13:00:00Z", available.manifest.publishedAt)
+            assertTrue(available.manifest.notes.contains("GitHub Releases"))
+
+            val listReq = githubServer.takeRequest()
+            assertEquals("application/vnd.github+json", listReq.getHeader("Accept"))
+            assertEquals("dropit-android/0.4.1", listReq.getHeader("User-Agent"))
+
+            // Download follows 302 redirect within allowlist and verifies SHA-256
+            githubServer.enqueue(MockResponse().setResponseCode(302).addHeader("Location", "$ghBase/cdn/$apkName"))
+            githubServer.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(apkBytes)))
+
+            val outcome = updater.downloadAndInstall(available.manifest)
+            assertEquals(UpdateInstallState.ReadyToInstall, outcome)
+            assertEquals(1, installer.launchCount)
+            assertEquals(apkBytes.size.toLong(), installer.launchedApk?.length())
+        } finally {
+            githubServer.shutdown()
+        }
+    }
+
+    @Test
+    fun checkLatest_prefersSelfHostedForSameLatestVersionAndFallsBackToGitHubOnTransportError() = runTest {
+        val githubServer = MockWebServer()
+        githubServer.start()
+        try {
+            val ghBase = githubServer.url("/").toString().trimEnd('/')
+            val apkBytes = ByteArray(2048) { (it * 5 + 3).toByte() }
+            val expectedSha = sha256(apkBytes)
+            val apkName = "dropit-android-0.4.2-ce204eb.apk"
+
+            // Both self-hosted and GitHub serve 0.4.2 (code 8)
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """{"versionCode":8,"versionName":"0.4.2","notes":"自托管发布","size":${apkBytes.size},"sha256":"$expectedSha","url":"/api/app/android/download/dropit-android-0.4.2.apk"}""",
+                ),
+            )
+            githubServer.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """
+                    [
+                      {
+                        "tag_name": "android-v0.4.2",
+                        "draft": false,
+                        "prerelease": false,
+                        "published_at": "2026-11-25T13:00:00Z",
+                        "body": "| 版本号 (`versionCode`) | `8` |",
+                        "assets": [
+                          {"name": "$apkName", "size": ${apkBytes.size}, "browser_download_url": "$ghBase/dl/$apkName"},
+                          {"name": "$apkName.sha256", "size": 100, "browser_download_url": "$ghBase/dl/$apkName.sha256"}
+                        ]
+                      }
+                    ]
+                    """.trimIndent(),
+                ),
+            )
+            githubServer.enqueue(MockResponse().setResponseCode(200).setBody("$expectedSha  $apkName"))
+
+            val installer = FakeApkInstaller(canInstall = true)
+            val updater = createUpdater(
+                installer = installer,
+                currentVersionCode = 7,
+                currentVersionName = "0.4.1",
+                githubReleasesUrl = "$ghBase/releases",
+            )
+
+            val check = updater.checkLatest(force = true) as UpdateCheckResult.UpdateAvailable
+            assertEquals(UpdateSource.SELF_HOSTED, check.manifest.source)
+            assertEquals("$baseUrl/api/app/android/download/dropit-android-0.4.2.apk", check.downloadUrl)
+            assertEquals("$ghBase/dl/$apkName", check.manifest.fallbackUrl)
+            assertEquals(expectedSha, check.manifest.fallbackSha256)
+
+            // Self-hosted download fails with 502 -> transparently falls back to GitHub download & verifies SHA-256!
+            server.enqueue(MockResponse().setResponseCode(502))
+            githubServer.enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(apkBytes)))
+
+            val outcome = updater.downloadAndInstall(check.manifest)
+            assertEquals(UpdateInstallState.ReadyToInstall, outcome)
+            assertEquals(1, installer.launchCount)
+            assertEquals(apkBytes.size.toLong(), installer.launchedApk?.length())
+        } finally {
+            githubServer.shutdown()
+        }
+    }
+
+    @Test
+    fun checkLatest_fallsBackToSelfHostedWhenGitHubUnreachableAndPicksHigherVersion() = runTest {
+        val githubServer = MockWebServer()
+        githubServer.start()
+        try {
+            val ghBase = githubServer.url("/").toString().trimEnd('/')
+            val apkBytes = "apk-v042".toByteArray()
+            val sha = sha256(apkBytes)
+
+            // 1. GitHub fails (503) while self-hosted has 0.4.2 -> succeeds via self-hosted
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """{"versionCode":8,"versionName":"0.4.2","notes":"from self-hosted","size":${apkBytes.size},"sha256":"$sha","url":"/api/app/android/download/dropit-android-0.4.2.apk"}""",
+                ),
+            )
+            githubServer.enqueue(MockResponse().setResponseCode(503))
+
+            val updater = createUpdater(
+                currentVersionCode = 7,
+                currentVersionName = "0.4.1",
+                githubReleasesUrl = "$ghBase/releases",
+            )
+            val fallbackCheck = updater.checkLatest(force = true)
+            assertTrue(fallbackCheck is UpdateCheckResult.UpdateAvailable)
+            assertEquals(UpdateSource.SELF_HOSTED, (fallbackCheck as UpdateCheckResult.UpdateAvailable).manifest.source)
+
+            // 2. Self-hosted has older 0.4.1 while GitHub has newer 0.4.2 -> picks GitHub!
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """{"versionCode":7,"versionName":"0.4.1","notes":"old","size":${apkBytes.size},"sha256":"$sha","url":"/api/app/android/download/dropit-android-0.4.1.apk"}""",
+                ),
+            )
+            githubServer.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """
+                    [
+                      {
+                        "tag_name": "android-v0.4.2",
+                        "draft": false,
+                        "prerelease": false,
+                        "body": "v0.4.2 notes",
+                        "assets": [
+                          {"name": "dropit-android-0.4.2.apk", "size": ${apkBytes.size}, "browser_download_url": "$ghBase/dl/0.4.2.apk"},
+                          {"name": "dropit-android-0.4.2.apk.sha256", "size": 90, "browser_download_url": "$ghBase/dl/0.4.2.apk.sha256"}
+                        ]
+                      }
+                    ]
+                    """.trimIndent(),
+                ),
+            )
+            githubServer.enqueue(MockResponse().setResponseCode(200).setBody("$sha  dropit-android-0.4.2.apk"))
+
+            val newerGh = updater.checkLatest(force = true) as UpdateCheckResult.UpdateAvailable
+            assertEquals(UpdateSource.GITHUB, newerGh.manifest.source)
+            assertEquals("0.4.2", newerGh.manifest.versionName)
+            assertEquals(0, newerGh.manifest.versionCode)
+
+            // Skip by versionName works even when versionCode == 0
+            assertTrue(updater.shouldPromptAutoUpdate(newerGh.manifest))
+            updater.skipVersion(newerGh.manifest)
+            assertFalse(updater.shouldPromptAutoUpdate(newerGh.manifest))
+            assertTrue(updater.shouldPromptAutoUpdate(newerGh.manifest.copy(versionName = "0.4.3")))
+        } finally {
+            githubServer.shutdown()
+        }
+    }
+
+    @Test
+    fun githubDownload_rejectsInvalidSha256FileUnknownRedirectHostAndExcessiveRedirects() = runTest {
+        val githubServer = MockWebServer()
+        githubServer.start()
+        try {
+            val ghBase = githubServer.url("/").toString().trimEnd('/')
+            val apkBytes = "valid-apk".toByteArray()
+            val validSha = sha256(apkBytes)
+            val installer = FakeApkInstaller(canInstall = true)
+            val updater = createUpdater(
+                installer = installer,
+                currentVersionCode = 7,
+                currentVersionName = "0.4.1",
+                githubReleasesUrl = "$ghBase/releases",
+            )
+
+            // 1. Invalid .apk.sha256 content rejects GitHub candidate
+            server.enqueue(MockResponse().setResponseCode(404).setBody("""{"error":{"code":"NO_RELEASE"}}"""))
+            githubServer.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """
+                    [
+                      {
+                        "tag_name": "android-v0.4.2",
+                        "draft": false,
+                        "prerelease": false,
+                        "assets": [
+                          {"name": "dropit-android-0.4.2.apk", "size": ${apkBytes.size}, "browser_download_url": "$ghBase/dl/0.4.2.apk"},
+                          {"name": "dropit-android-0.4.2.apk.sha256", "size": 90, "browser_download_url": "$ghBase/dl/0.4.2.apk.sha256"}
+                        ]
+                      }
+                    ]
+                    """.trimIndent(),
+                ),
+            )
+            githubServer.enqueue(MockResponse().setResponseCode(200).setBody("INVALID_CHECKSUM  dropit-android-0.4.2.apk"))
+            val badShaCheck = updater.checkLatest(force = true)
+            assertTrue(badShaCheck is UpdateCheckResult.Error)
+
+            // 2. Redirect to unknown domain rejected
+            val ghManifest = AppUpdateManifest(
+                versionCode = 8,
+                versionName = "0.4.2",
+                size = apkBytes.size.toLong(),
+                sha256 = validSha,
+                url = "$ghBase/dl/0.4.2.apk",
+                source = UpdateSource.GITHUB,
+            )
+            githubServer.enqueue(MockResponse().setResponseCode(302).addHeader("Location", "https://evil.example/evil.apk"))
+            val evilRedirect = updater.downloadAndInstall(ghManifest)
+            assertTrue(evilRedirect is UpdateInstallState.Failed)
+            assertTrue((evilRedirect as UpdateInstallState.Failed).message.contains("未知域名"))
+            assertEquals(0, installer.launchCount)
+
+            // 3. More than 5 redirects rejected
+            repeat(6) { hop ->
+                githubServer.enqueue(MockResponse().setResponseCode(302).addHeader("Location", "$ghBase/hop/${hop + 1}"))
+            }
+            val tooManyRedirects = updater.downloadAndInstall(ghManifest)
+            assertTrue(tooManyRedirects is UpdateInstallState.Failed)
+            assertTrue((tooManyRedirects as UpdateInstallState.Failed).message.contains("重定向次数超过上限"))
+            assertEquals(0, installer.launchCount)
+        } finally {
+            githubServer.shutdown()
+        }
     }
 
     private fun sha256(bytes: ByteArray): String =

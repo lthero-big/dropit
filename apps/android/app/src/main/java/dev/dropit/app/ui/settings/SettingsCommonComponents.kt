@@ -7,7 +7,6 @@ import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -546,15 +545,9 @@ internal fun shareSettingsText(context: Context, text: String) {
 }
 
 internal fun openSettingsCustomTab(context: Context, rawUrl: String) {
-    val uri = runCatching { Uri.parse(rawUrl) }.getOrNull() ?: return
-    val opened = runCatching {
-        CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, uri)
-    }.isSuccess
-    if (!opened) {
-        runCatching {
-            context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }.onFailure {
-            Toast.makeText(context, "未找到可用的浏览器", Toast.LENGTH_SHORT).show()
-        }
-    }
+    dev.dropit.app.ui.common.CustomTabsHelper.openUrl(
+        context = context,
+        rawUrl = rawUrl,
+        fallbackErrorMessage = "未找到可用的浏览器",
+    )
 }

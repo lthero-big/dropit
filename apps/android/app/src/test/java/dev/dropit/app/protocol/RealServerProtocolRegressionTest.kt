@@ -111,9 +111,9 @@ class RealServerProtocolRegressionTest {
     private val adminPassword: String = System.getenv("DROPIT_LIVE_ADMIN_PASSWORD")?.takeIf { it.isNotEmpty() }
         ?: "DropitRegressionPass2026!"
     private val expectedUpdateVersion: String = System.getenv("DROPIT_LIVE_EXPECTED_UPDATE_VERSION")?.trim()?.takeIf { it.isNotEmpty() }
-        ?: "0.4.1"
+        ?: "0.4.2"
     private val expectedUpdateCode: Int = System.getenv("DROPIT_LIVE_EXPECTED_UPDATE_CODE")?.trim()?.toIntOrNull()
-        ?: 7
+        ?: 8
     private val expectedUpdateSha256: String? = System.getenv("DROPIT_LIVE_EXPECTED_UPDATE_SHA256")?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
 
     private lateinit var okHttpClient: OkHttpClient
@@ -697,6 +697,7 @@ class RealServerProtocolRegressionTest {
             currentVersionCode = 6,
             currentVersionName = "0.4.0",
             allowInsecureHttpForTest = true,
+            githubReleasesUrl = null,
         )
         val checkResult = updater.checkLatest(force = true)
         assertTrue("Expected UpdateAvailable from real server, got $checkResult", checkResult is UpdateCheckResult.UpdateAvailable)
@@ -1019,6 +1020,42 @@ class RealServerProtocolRegressionTest {
         assertEquals("test_client_id", oauthUpdated.providers.first { it.provider == "github" }.clientId)
         val oauthDeleted = accountRepo.deleteOAuthProvider("github")
         assertEquals("none", oauthDeleted.providers.first { it.provider == "github" }.source)
+
+        // ------------------------------------------------------------------
+        // 7. v0.4.2 Google googleClientId exposure & native ID Token endpoint contract
+        // ------------------------------------------------------------------
+        val providersBeforeGoogle = authRepo.getAuthProviders(origin)
+        assertNull(providersBeforeGoogle.googleClientId)
+        try {
+            authRepo.loginWithGoogleIdToken(origin, "header.payload.signature")
+            fail("Expected 404 PROVIDER_UNAVAILABLE when Google OAuth is not configured")
+        } catch (e: ApiError) {
+            assertEquals(404, e.httpStatus)
+            assertEquals(ApiErrorCode.PROVIDER_UNAVAILABLE, e.errorCode)
+        }
+
+        val testGoogleClientId = "regression-google-client.apps.googleusercontent.com"
+        accountRepo.updateOAuthProvider(
+            provider = "google",
+            clientId = testGoogleClientId,
+            clientSecret = "test_google_secret_123456",
+            enabled = true,
+        )
+        val providersWithGoogle = authRepo.getAuthProviders(origin)
+        assertTrue("google" in providersWithGoogle.providers)
+        assertEquals(testGoogleClientId, providersWithGoogle.googleClientId)
+
+        try {
+            authRepo.loginWithGoogleIdToken(origin, "not-a-valid-jwt")
+            fail("Expected 401 OAUTH_PROVIDER_ERROR for malformed Google ID token")
+        } catch (e: ApiError) {
+            assertEquals(401, e.httpStatus)
+            assertEquals(ApiErrorCode.OAUTH_PROVIDER_ERROR, e.errorCode)
+        }
+
+        accountRepo.deleteOAuthProvider("google")
+        val providersAfterGoogleDelete = authRepo.getAuthProviders(origin)
+        assertNull(providersAfterGoogleDelete.googleClientId)
 
         // Clean up member and admin tokens
         memberAuth.logout(clearServer = true)

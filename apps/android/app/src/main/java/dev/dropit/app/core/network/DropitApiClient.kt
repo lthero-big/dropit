@@ -192,6 +192,34 @@ class DropitApiClient(
         )
     }
 
+    suspend fun loginWithGoogleIdToken(
+        serverOrigin: String,
+        idToken: String,
+        deviceName: String? = null,
+        invite: String? = null,
+    ): AppAuthTokenResponse {
+        val origin = validateOrigin(serverOrigin)
+        val payload = buildJsonObject {
+            put("idToken", JsonPrimitive(idToken))
+            deviceName?.trim()?.takeIf { it.isNotEmpty() }?.let { put("deviceName", JsonPrimitive(it)) }
+            invite?.trim()?.takeIf { it.isNotEmpty() }?.let { put("invite", JsonPrimitive(it)) }
+        }
+        val request = buildRequest(
+            origin = origin,
+            path = "/api/auth/app/google/id-token",
+            method = "POST",
+            jsonBody = json.encodeToString(JsonObject.serializer(), payload),
+            authenticated = false,
+        )
+        return executeJson(
+            request = request,
+            authenticated = false,
+            origin = origin,
+            path = "/api/auth/app/google/id-token",
+            deserializer = AppAuthTokenResponse.serializer(),
+        )
+    }
+
     suspend fun requestAppOAuthLink(
         provider: String,
         appState: String? = null,

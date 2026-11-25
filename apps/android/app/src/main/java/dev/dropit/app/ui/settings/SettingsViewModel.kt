@@ -180,7 +180,7 @@ class SettingsViewModel(
         }
         viewModelScope.launch {
             withContext(ioDispatcher) {
-                appUpdater.skipVersion(manifest.versionCode)
+                appUpdater.skipVersion(manifest)
             }
             appUpdater.resetInstallState()
             _uiState.update {
