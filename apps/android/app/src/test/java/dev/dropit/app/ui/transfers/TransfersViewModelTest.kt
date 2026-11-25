@@ -117,6 +117,41 @@ class TransfersViewModelTest {
     }
 
     @Test
+    fun cancelFailedTask_marksCancelledSoUserCanClearPermanentlyFailedItems() = runTest(testDispatcher) {
+        val manager = FakeTransferManager(
+            initialTasks = listOf(
+                TransferTask(
+                    id = "t-stuck-fail",
+                    serverOrigin = "https://dropit.lthero.com",
+                    targetScope = TargetScope.SpaceScope("sp-1"),
+                    direction = TransferDirection.UPLOAD,
+                    fileName = "已清理的临时文件.zip",
+                    mimeType = "application/zip",
+                    totalBytes = 1024L,
+                    status = TransferStatus.FAILED,
+                    errorMessage = "本地临时文件已清理，请重新选择文件",
+                ),
+            ),
+        )
+        val vm = TransfersViewModel(transferManager = manager, ioDispatcher = testDispatcher)
+        advanceUntilIdle()
+
+        assertEquals(1, vm.uiState.value.failedCount)
+        assertFalse(vm.uiState.value.canClearCompleted)
+
+        vm.cancelTask("t-stuck-fail")
+        advanceUntilIdle()
+
+        assertEquals(0, vm.uiState.value.failedCount)
+        assertEquals(1, vm.uiState.value.completedCount)
+        assertTrue(vm.uiState.value.canClearCompleted)
+
+        vm.clearCompleted()
+        advanceUntilIdle()
+        assertTrue(vm.uiState.value.tasks.isEmpty())
+    }
+
+    @Test
     fun transferFormatting_formatsSpeedEtaStatusAndScopeAccurately() {
         assertNull(TransferFormatting.formatSpeed(0L))
         assertEquals("512 B/s", TransferFormatting.formatSpeed(512L))

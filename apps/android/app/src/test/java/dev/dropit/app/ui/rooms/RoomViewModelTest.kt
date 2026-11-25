@@ -93,6 +93,14 @@ class RoomViewModelTest {
     }
 
     @Test
+    fun pinValidation_rejectsControlCharactersAndBoundsLength() {
+        assertNull(RoomValidation.validatePin("1234", required = true))
+        assertNotNull(RoomValidation.validatePin("123", required = true))
+        assertNotNull(RoomValidation.validatePin("1".repeat(33), required = true))
+        assertNotNull(RoomValidation.validatePin("12\n34", required = true))
+    }
+
+    @Test
     fun joinRoom_handlesPinRequiredPinInvalidRateLimitAndSuccessWithoutTriggering401Logout() = runTest(testDispatcher) {
         var sessionExpiredTriggered = 0
         val repo = FakeRoomRepository()

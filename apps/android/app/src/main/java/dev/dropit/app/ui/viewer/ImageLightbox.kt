@@ -29,6 +29,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.ZoomOutMap
 import androidx.compose.material3.ButtonDefaults
@@ -56,6 +57,7 @@ import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -70,6 +72,7 @@ import dev.dropit.app.ui.board.ClipFormatting
 import dev.dropit.app.ui.theme.DropitMediaColors
 import dev.dropit.app.ui.theme.DropitMonoTypography
 import dev.dropit.app.ui.theme.DropitTheme
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 @Composable
@@ -87,29 +90,36 @@ fun ImageLightbox(
     if (images.isEmpty()) return
     val safeInitialIndex = initialIndex.coerceIn(0, images.lastIndex)
     val pagerState = rememberPagerState(initialPage = safeInitialIndex, pageCount = { images.size })
+    val density = LocalDensity.current
+    val dismissThresholdPx = remember(density) { with(density) { 120.dp.toPx() } }
     var showChrome by remember { mutableStateOf(true) }
     var activeScale by remember { mutableFloatStateOf(1f) }
+    var dismissDragY by remember { mutableFloatStateOf(0f) }
     var resetSignal by remember { mutableStateOf(0) }
 
     val currentItem = images[pagerState.currentPage.coerceIn(0, images.lastIndex)]
-    val displayName = remember(currentItem.filename) {
-        ClipFormatting.middleEllipsizeFilename(currentItem.filename ?: "图片", maxChars = 32)
+    val maxTitleChars = if (density.fontScale >= 1.3f) 18 else 26
+    val displayName = remember(currentItem.filename, maxTitleChars) {
+        ClipFormatting.middleEllipsizeFilename(currentItem.filename ?: "图片", maxChars = maxTitleChars)
     }
 
     LaunchedEffect(pagerState.currentPage) {
         activeScale = 1f
+        dismissDragY = 0f
     }
 
     BackHandler(onBack = onClose)
 
+    val scrimAlpha = (1f - (dismissDragY / (dismissThresholdPx * 2.5f)).coerceIn(0f, 0.55f))
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(DropitMediaColors.LightboxScrim),
+            .background(DropitMediaColors.LightboxScrim.copy(alpha = DropitMediaColors.LightboxScrim.alpha * scrimAlpha)),
     ) {
         HorizontalPager(
             state = pagerState,
-            userScrollEnabled = activeScale <= 1.02f,
+            userScrollEnabled = activeScale <= 1.02f && dismissDragY <= 4f,
             modifier = Modifier.fillMaxSize(),
         ) { page ->
             val pageItem = images[page]
@@ -119,11 +129,18 @@ fun ImageLightbox(
                 mediaRepository = mediaRepository,
                 imageLoader = imageLoader,
                 resetSignal = if (page == pagerState.currentPage) resetSignal else 0,
+                dismissThresholdPx = dismissThresholdPx,
                 onScaleChanged = { newScale ->
                     if (page == pagerState.currentPage) {
                         activeScale = newScale
                     }
                 },
+                onDismissDragChanged = { dragY ->
+                    if (page == pagerState.currentPage) {
+                        dismissDragY = dragY
+                    }
+                },
+                onSwipeDownDismiss = onClose,
                 onSingleTap = { showChrome = !showChrome },
             )
         }
@@ -172,11 +189,13 @@ fun ImageLightbox(
                         if (currentItem.size > 0L) add(ServerUrl.formatSize(currentItem.size))
                         if (activeScale > 1.02f) add("${(activeScale * 100f).roundToInt()}%")
                     }.joinToString(" · ")
-                    Text(
-                        text = meta,
-                        style = DropitMonoTypography.meta,
-                        color = DropitMediaColors.OverlaySecondary,
-                    )
+                    if (meta.isNotEmpty()) {
+                        Text(
+                            text = meta,
+                            style = DropitMonoTypography.meta,
+                            color = DropitMediaColors.OverlaySecondary,
+                        )
+                    }
                 }
             }
         }
@@ -254,7 +273,10 @@ private fun ZoomableLightboxPage(
     mediaRepository: MediaRepository,
     imageLoader: ImageLoader,
     resetSignal: Int,
+    dismissThresholdPx: Float,
     onScaleChanged: (Float) -> Unit,
+    onDismissDragChanged: (Float) -> Unit,
+    onSwipeDownDismiss: () -> Unit,
     onSingleTap: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -262,12 +284,18 @@ private fun ZoomableLightboxPage(
     var previewUrl by remember(item.id, scope) { mutableStateOf<String?>(null) }
     var isPreviewLoaded by remember(item.id, scope) { mutableStateOf(false) }
     var previewFailed by remember(item.id, scope) { mutableStateOf(false) }
+    var thumbFailed by remember(item.id, scope) { mutableStateOf(false) }
+    var retryTick by remember(item.id, scope) { mutableStateOf(0) }
 
     var scale by remember(item.id) { mutableFloatStateOf(1f) }
     var offset by remember(item.id) { mutableStateOf(Offset.Zero) }
+    var verticalDismissOffset by remember(item.id) { mutableFloatStateOf(0f) }
     var containerSize by remember { mutableStateOf(IntSize.Zero) }
 
-    LaunchedEffect(item.id, scope) {
+    LaunchedEffect(item.id, scope, retryTick) {
+        isPreviewLoaded = false
+        previewFailed = false
+        thumbFailed = false
         thumbUrl = runCatching { mediaRepository.thumbnailUrl(scope, item.id) }.getOrNull()
         previewUrl = runCatching { mediaRepository.previewUrl(scope, item.id) }.getOrNull()
     }
@@ -276,7 +304,9 @@ private fun ZoomableLightboxPage(
         if (resetSignal > 0) {
             scale = 1f
             offset = Offset.Zero
+            verticalDismissOffset = 0f
             onScaleChanged(1f)
+            onDismissDragChanged(0f)
         }
     }
 
@@ -305,13 +335,17 @@ private fun ZoomableLightboxPage(
                             scale = 2.2f
                             offset = Offset.Zero
                         }
+                        verticalDismissOffset = 0f
+                        onDismissDragChanged(0f)
                         onScaleChanged(scale)
                     },
                 )
             }
-            .pointerInput(item.id) {
+            .pointerInput(item.id, dismissThresholdPx) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
+                    var verticalSwipeActive = false
+                    var dragY = 0f
                     do {
                         val event = awaitPointerEvent()
                         val pointerCount = event.changes.count { it.pressed }
@@ -319,6 +353,12 @@ private fun ZoomableLightboxPage(
                         val panChange = event.calculatePan()
 
                         if (pointerCount > 1 || scale > 1.02f) {
+                            verticalSwipeActive = false
+                            if (dragY != 0f) {
+                                dragY = 0f
+                                verticalDismissOffset = 0f
+                                onDismissDragChanged(0f)
+                            }
                             val nextScale = (scale * zoomChange).coerceIn(1f, 4f)
                             val nextOffset = if (nextScale > 1.02f) {
                                 clampOffset(offset + panChange, nextScale)
@@ -333,8 +373,31 @@ private fun ZoomableLightboxPage(
                                     change.consume()
                                 }
                             }
+                        } else if (pointerCount == 1) {
+                            if (!verticalSwipeActive && panChange.y > 6f && abs(panChange.y) > abs(panChange.x) * 1.35f) {
+                                verticalSwipeActive = true
+                            }
+                            if (verticalSwipeActive) {
+                                dragY = (dragY + panChange.y).coerceAtLeast(0f)
+                                verticalDismissOffset = dragY
+                                onDismissDragChanged(dragY)
+                                event.changes.forEach { change ->
+                                    if (change.positionChanged()) {
+                                        change.consume()
+                                    }
+                                }
+                            }
                         }
                     } while (event.changes.any { it.pressed })
+
+                    if (verticalSwipeActive) {
+                        if (dragY >= dismissThresholdPx) {
+                            onSwipeDownDismiss()
+                        } else {
+                            verticalDismissOffset = 0f
+                            onDismissDragChanged(0f)
+                        }
+                    }
                 }
             },
         contentAlignment = Alignment.Center,
@@ -345,7 +408,7 @@ private fun ZoomableLightboxPage(
                 scaleX = scale
                 scaleY = scale
                 translationX = offset.x
-                translationY = offset.y
+                translationY = offset.y + verticalDismissOffset
             }
 
         // Progressive layer 1: immediate cached thumbnail
@@ -353,11 +416,13 @@ private fun ZoomableLightboxPage(
             AsyncImage(
                 model = ImageRequest.Builder(context)
                     .data(thumbUrl)
+                    .setParameter("retry", retryTick)
                     .crossfade(false)
                     .build(),
                 contentDescription = item.filename ?: "图片预览",
                 imageLoader = imageLoader,
                 contentScale = ContentScale.Fit,
+                onError = { thumbFailed = true },
                 modifier = transformModifier,
             )
         }
@@ -367,6 +432,7 @@ private fun ZoomableLightboxPage(
             AsyncImage(
                 model = ImageRequest.Builder(context)
                     .data(previewUrl)
+                    .setParameter("retry", retryTick)
                     .crossfade(true)
                     .build(),
                 contentDescription = item.filename ?: "图片原图预览",
@@ -391,18 +457,37 @@ private fun ZoomableLightboxPage(
             )
         }
 
-        if (previewFailed && thumbUrl.isNullOrBlank()) {
+        if (previewFailed && (thumbUrl.isNullOrBlank() || thumbFailed)) {
             Surface(
                 shape = DropitTheme.shapes.md,
                 color = Color(0xCC1D1C1A),
                 tonalElevation = 0.dp,
+                modifier = Modifier.padding(horizontal = 24.dp),
             ) {
-                Text(
-                    text = "图片加载失败，请点击下方「保存原图」后查看",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = DropitMediaColors.OverlayPrimary,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                )
+                Column(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = "图片加载失败，可点击重试或「保存原图」后查看",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = DropitMediaColors.OverlayPrimary,
+                    )
+                    TextButton(
+                        onClick = { retryTick++ },
+                        modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                        colors = ButtonDefaults.textButtonColors(contentColor = DropitTheme.colors.brand),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("重试加载")
+                    }
+                }
             }
         }
     }

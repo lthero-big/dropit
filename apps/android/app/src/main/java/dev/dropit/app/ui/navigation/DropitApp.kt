@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
@@ -96,6 +95,7 @@ private sealed class ActiveViewer {
 
     data class TextReader(
         val item: ClipItem,
+        val scope: TargetScope?,
     ) : ActiveViewer()
 }
 
@@ -147,7 +147,10 @@ fun DropitApp(
                     }
                 }
                 Box(modifier = Modifier.weight(1f)) {
-                    OnboardingScreen(viewModel = onboardingViewModel)
+                    OnboardingScreen(
+                        viewModel = onboardingViewModel,
+                        applyStatusBarsPadding = !rootState.hasPendingShare,
+                    )
                 }
             }
         }
@@ -213,6 +216,8 @@ fun DropitApp(
 
             LaunchedEffect(sessionKey) {
                 boardViewModel.activateSession(sessionKey)
+                itemShareViewModel.close()
+                roomViewModel.clearDialogFeedback()
                 // Asynchronous non-blocking update check once per authenticated session
                 settingsViewModel.triggerBackgroundUpdateCheck(sessionKey)
             }
@@ -305,7 +310,6 @@ private fun DropitMainScaffold(
                         containerColor = colors.surface0,
                         contentColor = colors.fg,
                         tonalElevation = 0.dp,
-                        modifier = Modifier.navigationBarsPadding(),
                     ) {
                         MainTab.entries.forEach { tab ->
                             val selected = selectedTab == tab
@@ -388,7 +392,7 @@ private fun DropitMainScaffold(
                             activeViewer = ActiveViewer.Media(item, isVideo, scope)
                         },
                         onOpenTextReader = { item ->
-                            activeViewer = ActiveViewer.TextReader(item)
+                            activeViewer = ActiveViewer.TextReader(item, boardState.activeScope)
                         },
                     )
 
@@ -456,12 +460,22 @@ private fun DropitMainScaffold(
                 TextMarkdownViewer(
                     item = viewer.item,
                     nowMs = nowMs,
+                    scope = viewer.scope,
+                    mediaRepository = mediaRepository,
                     onCopyText = { text ->
                         copyPlainText(context, text)
                         boardViewModel.markItemCopied(viewer.item.id)
                     },
                     onShareText = { text ->
                         shareText(context, text)
+                    },
+                    onDownloadFallback = if (viewer.item.isFile) {
+                        {
+                            boardViewModel.downloadItem(viewer.item)
+                            Toast.makeText(context, "已加入下载队列", Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        null
                     },
                     onOpenUrl = { url ->
                         openUrlExternally(context, url)
@@ -475,14 +489,19 @@ private fun DropitMainScaffold(
 
         // System Share Confirmation Bottom Sheet (shown once authenticated & pending share exists)
         if (shareTargetState.pendingShare != null) {
+            val maxTextBytes = boardState.me?.maxTextBytes ?: 0L
             ShareTargetSheet(
                 state = shareTargetState,
+                maxTextBytes = maxTextBytes,
+                isLoadingSpaces = boardState.isLoadingInitial,
+                spacesLoadError = boardState.offlineBannerMessage,
+                onRetryLoadSpaces = boardViewModel::loadInitial,
                 onSelectTarget = shareTargetViewModel::selectTarget,
                 onSelectGroup = shareTargetViewModel::selectGroup,
                 onTextChanged = shareTargetViewModel::updateText,
                 onRemoveFile = shareTargetViewModel::removeFile,
                 onConfirmSend = {
-                    shareTargetViewModel.submitShare { feedback, hasFiles ->
+                    shareTargetViewModel.submitShare(maxTextBytes = maxTextBytes) { feedback, hasFiles ->
                         boardViewModel.showSnackbar(feedback, showTransfersAction = hasFiles)
                         if (hasFiles) {
                             selectedTab = MainTab.TRANSFERS

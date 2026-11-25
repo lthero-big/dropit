@@ -18,6 +18,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -46,7 +48,9 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Inbox
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -68,12 +72,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -99,6 +105,7 @@ import dev.dropit.app.ui.theme.DropitElevation
 import dev.dropit.app.ui.theme.DropitTheme
 import dev.dropit.app.ui.theme.groupDotColor
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun BoardScreen(
@@ -119,6 +126,7 @@ fun BoardScreen(
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Periodic tick for relative times & remaining expiry countdowns
@@ -233,6 +241,13 @@ fun BoardScreen(
                             viewModel.showSnackbar("房间码已复制")
                         }
                     },
+                    onCopyRoomLink = {
+                        val url = roomViewModel.shareUrlFor(room)
+                        if (url.isNotBlank()) {
+                            copyToClipboard(context, url)
+                            viewModel.showSnackbar("房间链接已复制")
+                        }
+                    },
                     onShareRoomLink = {
                         val url = roomViewModel.shareUrlFor(room)
                         sharePlainText(context, url)
@@ -298,6 +313,9 @@ fun BoardScreen(
                                 state.selectedGroupFilter != GroupFilter.All ||
                                 state.selectedKindFilter != ContentTypeFilter.ALL,
                             isReadOnly = state.isReadOnly,
+                            offlineMessage = if (state.allItems.isEmpty()) state.offlineBannerMessage else null,
+                            hasActiveScope = state.activeScope != null,
+                            onRetry = viewModel::reconnectRealtime,
                             onClearFilters = {
                                 viewModel.setSearchQuery("")
                                 viewModel.selectGroupFilter(GroupFilter.All)
@@ -568,7 +586,31 @@ fun BoardScreen(
             -> {
                 { onOpenTextReader(item) }
             }
+            ClipVisualKind.FILE -> if (ClipFormatting.isPreviewableTextFile(item)) {
+                { onOpenTextReader(item) }
+            } else {
+                null
+            }
             else -> null
+        }
+
+        val copyDownloadUrlAction: (() -> Unit)? = if (item.isFile && state.activeScope != null) {
+            {
+                val scope = state.activeScope
+                if (scope != null) {
+                    coroutineScope.launch {
+                        val url = runCatching { mediaRepository.downloadUrl(scope, item.id) }.getOrNull()
+                        if (!url.isNullOrBlank()) {
+                            copyToClipboard(context, url)
+                            viewModel.showSnackbar("下载链接已复制")
+                        } else {
+                            viewModel.showSnackbar("无法生成下载链接")
+                        }
+                    }
+                }
+            }
+        } else {
+            null
         }
 
         ItemMoreActionsSheet(
@@ -588,6 +630,7 @@ fun BoardScreen(
                     itemShareViewModel.openForItem(scope, item)
                 }
             },
+            onCopyDownloadUrl = copyDownloadUrlAction,
             onOpenPreview = previewAction,
             onRequestRetract = { retractConfirmItem = item },
             onDismiss = { moreSheetItem = null },
@@ -1008,6 +1051,7 @@ private fun ReadOnlySpaceBanner(ownerName: String?) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BoardFilterBar(
     state: BoardUiState,
@@ -1026,7 +1070,7 @@ private fun BoardFilterBar(
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             LazyRow(
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -1080,35 +1124,40 @@ private fun BoardFilterBar(
                     )
                 }
 
-                // Create group entry (writable spaces only)
+                // Create group entry (writable spaces only; 48.dp touch target)
                 if (!state.isReadOnly) {
                     item(key = "group-add") {
-                        Surface(
+                        Box(
                             modifier = Modifier
-                                .defaultMinSize(minHeight = 36.dp)
+                                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                .clip(DropitTheme.shapes.pill)
                                 .clickable(onClick = onCreateGroup)
                                 .semantics { contentDescription = "新建分组" },
-                            shape = DropitTheme.shapes.pill,
-                            color = colors.surface1,
-                            border = BorderStroke(1.dp, colors.line2),
-                            tonalElevation = 0.dp,
+                            contentAlignment = Alignment.Center,
                         ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            Surface(
+                                shape = DropitTheme.shapes.pill,
+                                color = colors.surface1,
+                                border = BorderStroke(1.dp, colors.line2),
+                                tonalElevation = 0.dp,
                             ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Add,
-                                    contentDescription = null,
-                                    tint = colors.fg2,
-                                    modifier = Modifier.size(15.dp),
-                                )
-                                Text(
-                                    text = "新建分组",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = colors.fg2,
-                                )
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Add,
+                                        contentDescription = null,
+                                        tint = colors.fg2,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                    Text(
+                                        text = "新建分组",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = colors.fg2,
+                                    )
+                                }
                             }
                         }
                     }
@@ -1118,23 +1167,28 @@ private fun BoardFilterBar(
             // Inline manage bar when a custom group is selected in a writable space
             val activeNamedGroup = (state.selectedGroupFilter as? GroupFilter.Named)?.name
             if (activeNamedGroup != null && !state.isReadOnly) {
-                Row(
+                FlowRow(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 14.dp)
-                        .padding(bottom = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                        .padding(bottom = 4.dp),
+                    verticalArrangement = Arrangement.Center,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Text(
-                        text = "当前分组：$activeNamedGroup",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.fg3,
-                    )
+                    Box(
+                        modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        Text(
+                            text = "当前分组：$activeNamedGroup",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.fg3,
+                        )
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         TextButton(
                             onClick = { onRenameGroup(activeNamedGroup) },
-                            modifier = Modifier.defaultMinSize(minHeight = 40.dp),
+                            modifier = Modifier.defaultMinSize(minHeight = 48.dp),
                             colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
                         ) {
                             Icon(
@@ -1147,7 +1201,7 @@ private fun BoardFilterBar(
                         }
                         TextButton(
                             onClick = { onDeleteGroup(activeNamedGroup) },
-                            modifier = Modifier.defaultMinSize(minHeight = 40.dp),
+                            modifier = Modifier.defaultMinSize(minHeight = 48.dp),
                             colors = ButtonDefaults.textButtonColors(contentColor = colors.destructive),
                         ) {
                             Icon(
@@ -1175,52 +1229,57 @@ private fun FilterChipPill(
 ) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
-    Surface(
+    Box(
         modifier = Modifier
-            .defaultMinSize(minHeight = 36.dp)
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            .clip(shapes.pill)
             .clickable(onClick = onClick),
-        shape = shapes.pill,
-        color = if (selected) colors.fg else colors.surface2,
-        border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
-        tonalElevation = 0.dp,
+        contentAlignment = Alignment.Center,
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        Surface(
+            shape = shapes.pill,
+            color = if (selected) colors.fg else colors.surface2,
+            border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
+            tonalElevation = 0.dp,
         ) {
-            if (dotColor != null) {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .clip(CircleShape)
-                        .then(
-                            if (hollowDot) {
-                                Modifier.background(Color.Transparent).padding(0.dp)
-                            } else {
-                                Modifier.background(dotColor)
-                            },
-                        ),
-                ) {
-                    if (hollowDot) {
-                        Surface(
-                            modifier = Modifier.size(7.dp),
-                            shape = CircleShape,
-                            color = Color.Transparent,
-                            border = BorderStroke(1.2.dp, if (selected) colors.bg else dotColor),
-                            tonalElevation = 0.dp,
-                            content = {},
-                        )
+            Row(
+                modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (dotColor != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .then(
+                                if (hollowDot) {
+                                    Modifier.background(Color.Transparent).padding(0.dp)
+                                } else {
+                                    Modifier.background(dotColor)
+                                },
+                            ),
+                    ) {
+                        if (hollowDot) {
+                            Surface(
+                                modifier = Modifier.size(7.dp),
+                                shape = CircleShape,
+                                color = Color.Transparent,
+                                border = BorderStroke(1.2.dp, if (selected) colors.bg else dotColor),
+                                tonalElevation = 0.dp,
+                                content = {},
+                            )
+                        }
                     }
                 }
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (selected) colors.bg else colors.fg2,
+                    maxLines = 1,
+                    softWrap = false,
+                )
             }
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                color = if (selected) colors.bg else colors.fg2,
-                maxLines = 1,
-                softWrap = false,
-            )
         }
     }
 }
@@ -1289,6 +1348,9 @@ private fun FloatingQuickSendBar(
 ) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
+    val compactLabels = LocalDensity.current.fontScale >= 1.4f
+    val buttonHorizontalPadding = if (compactLabels) 9.dp else 12.dp
+    val primaryHorizontalPadding = if (compactLabels) 11.dp else 14.dp
 
     Surface(
         modifier = modifier,
@@ -1301,7 +1363,7 @@ private fun FloatingQuickSendBar(
         Row(
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(if (compactLabels) 2.dp else 4.dp),
         ) {
             // Primary action: New Text
             Surface(
@@ -1315,9 +1377,9 @@ private fun FloatingQuickSendBar(
                 tonalElevation = 0.dp,
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    modifier = Modifier.padding(horizontal = primaryHorizontalPadding, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(if (compactLabels) 4.dp else 6.dp),
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Edit,
@@ -1332,6 +1394,7 @@ private fun FloatingQuickSendBar(
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -1342,10 +1405,10 @@ private fun FloatingQuickSendBar(
                     .defaultMinSize(minHeight = 48.dp)
                     .clip(shapes.pill)
                     .clickable(enabled = !isSending, onClick = onSendClipboard)
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .padding(horizontal = buttonHorizontalPadding, vertical = 10.dp)
                     .semantics { contentDescription = "从剪贴板发送" },
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                horizontalArrangement = Arrangement.spacedBy(if (compactLabels) 3.dp else 5.dp),
             ) {
                 Icon(
                     imageVector = Icons.Rounded.ContentPasteGo,
@@ -1359,6 +1422,7 @@ private fun FloatingQuickSendBar(
                     color = colors.fg,
                     maxLines = 1,
                     softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
 
@@ -1368,10 +1432,10 @@ private fun FloatingQuickSendBar(
                     .defaultMinSize(minHeight = 48.dp)
                     .clip(shapes.pill)
                     .clickable(onClick = onPickFiles)
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .padding(horizontal = buttonHorizontalPadding, vertical = 10.dp)
                     .semantics { contentDescription = "选择并发送文件" },
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                horizontalArrangement = Arrangement.spacedBy(if (compactLabels) 3.dp else 5.dp),
             ) {
                 Icon(
                     imageVector = Icons.Rounded.AttachFile,
@@ -1385,6 +1449,7 @@ private fun FloatingQuickSendBar(
                     color = colors.fg,
                     maxLines = 1,
                     softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -1395,10 +1460,16 @@ private fun FloatingQuickSendBar(
 private fun BoardEmptyState(
     hasSearchOrFilter: Boolean,
     isReadOnly: Boolean,
+    offlineMessage: String?,
+    hasActiveScope: Boolean,
+    onRetry: () -> Unit,
     onClearFilters: () -> Unit,
     onComposeText: () -> Unit,
 ) {
     val colors = DropitTheme.colors
+    val shapes = DropitTheme.shapes
+    val isOfflineEmpty = offlineMessage != null && !hasSearchOrFilter
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1410,18 +1481,23 @@ private fun BoardEmptyState(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Icon(
-                imageVector = Icons.Rounded.Inbox,
+                imageVector = if (isOfflineEmpty) Icons.Rounded.CloudOff else Icons.Rounded.Inbox,
                 contentDescription = null,
-                tint = colors.fg4,
+                tint = if (isOfflineEmpty) colors.warn else colors.fg4,
                 modifier = Modifier.size(44.dp),
             )
             Text(
-                text = if (hasSearchOrFilter) "没有匹配的内容" else "剪贴板还是空的",
+                text = when {
+                    isOfflineEmpty -> "无法连接到服务器"
+                    hasSearchOrFilter -> "没有匹配的内容"
+                    else -> "剪贴板还是空的"
+                },
                 style = MaterialTheme.typography.titleMedium,
                 color = colors.fg,
             )
             Text(
                 text = when {
+                    isOfflineEmpty -> offlineMessage.orEmpty()
                     hasSearchOrFilter -> "尝试换个关键词或切换回「全部分组」查看。"
                     isReadOnly -> "当前只读空间暂无条目，对方发送内容后会实时显示在这里。"
                     else -> "点击下方「发文本」「剪贴板」或「发文件」，即可跨设备实时同步。"
@@ -1429,7 +1505,25 @@ private fun BoardEmptyState(
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.fg3,
             )
-            if (hasSearchOrFilter) {
+            if (isOfflineEmpty) {
+                Button(
+                    onClick = onRetry,
+                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                    shape = shapes.md,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = colors.brand,
+                        contentColor = colors.brandFg,
+                    ),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("重新连接", fontWeight = FontWeight.Medium)
+                }
+            } else if (hasSearchOrFilter) {
                 TextButton(
                     onClick = onClearFilters,
                     modifier = Modifier.defaultMinSize(minHeight = 48.dp),
@@ -1437,7 +1531,7 @@ private fun BoardEmptyState(
                 ) {
                     Text("清空筛选条件")
                 }
-            } else if (!isReadOnly) {
+            } else if (!isReadOnly && hasActiveScope) {
                 TextButton(
                     onClick = onComposeText,
                     modifier = Modifier.defaultMinSize(minHeight = 48.dp),

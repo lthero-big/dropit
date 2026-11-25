@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import dev.dropit.app.core.network.ApiError
 import dev.dropit.app.core.network.RoomInfo
+import dev.dropit.app.core.network.ServerUrl
 import dev.dropit.app.core.network.Space
 import dev.dropit.app.core.network.TargetScope
 import dev.dropit.app.core.repository.BoardRepository
@@ -12,6 +13,7 @@ import dev.dropit.app.core.repository.PendingShare
 import dev.dropit.app.core.repository.ShareInbox
 import dev.dropit.app.core.repository.StagedShareFile
 import dev.dropit.app.core.repository.TransferManager
+import dev.dropit.app.ui.board.ClipFormatting
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -231,6 +233,7 @@ class ShareTargetViewModel(
      * guarding against duplicate taps or re-entry for the same [PendingShare.id].
      */
     fun submitShare(
+        maxTextBytes: Long = 0L,
         onSubmitted: (feedbackMessage: String, hasFiles: Boolean) -> Unit = { _, _ -> },
     ) {
         val snapshot = _uiState.value
@@ -243,6 +246,12 @@ class ShareTargetViewModel(
         val selectedFiles = snapshot.files
         if (trimmedText.isEmpty() && selectedFiles.isEmpty()) {
             _uiState.update { it.copy(errorMessage = "请至少保留一段文本或一个文件") }
+            return
+        }
+        if (maxTextBytes > 0L && trimmedText.isNotEmpty() && ClipFormatting.utf8ByteCount(trimmedText) > maxTextBytes) {
+            _uiState.update {
+                it.copy(errorMessage = "分享文本已超出单条上限（${ServerUrl.formatSize(maxTextBytes)}），请精简后再发送")
+            }
             return
         }
 
@@ -280,26 +289,39 @@ class ShareTargetViewModel(
                 _uiState.update { it.copy(isSubmitting = false) }
                 onSubmitted(message, filesEnqueued > 0)
             } catch (e: ApiError) {
-                if (!textSent && filesEnqueued == 0) {
+                // If text succeeded before file enqueue failed, strip already-sent text so retrying
+                // only retries the remaining unsent files without creating duplicate text items.
+                if (filesEnqueued == 0) {
                     submittedShareIds.remove(pending.id)
                 }
-                _uiState.update {
-                    it.copy(
+                _uiState.update { current ->
+                    current.copy(
                         isSubmitting = false,
-                        errorMessage = e.userMessage,
+                        editedText = if (textSent) "" else current.editedText,
+                        errorMessage = if (textSent) {
+                            "文本已发送，但文件加入队列失败：${e.userMessage}（点击确认发送可重试文件）"
+                        } else {
+                            e.userMessage
+                        },
                     )
                 }
                 if (e.isUnauthorized) {
                     onSessionExpired()
                 }
             } catch (e: Exception) {
-                if (!textSent && filesEnqueued == 0) {
+                if (filesEnqueued == 0) {
                     submittedShareIds.remove(pending.id)
                 }
-                _uiState.update {
-                    it.copy(
+                val detail = e.message?.takeIf { m -> m.isNotBlank() } ?: "发送分享内容失败，请重试"
+                _uiState.update { current ->
+                    current.copy(
                         isSubmitting = false,
-                        errorMessage = e.message?.takeIf { m -> m.isNotBlank() } ?: "发送分享内容失败，请重试",
+                        editedText = if (textSent) "" else current.editedText,
+                        errorMessage = if (textSent) {
+                            "文本已发送，但文件加入队列失败：$detail（点击确认发送可重试文件）"
+                        } else {
+                            detail
+                        },
                     )
                 }
             }

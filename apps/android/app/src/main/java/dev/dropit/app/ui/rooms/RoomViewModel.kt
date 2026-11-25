@@ -50,6 +50,9 @@ object RoomValidation {
         if (raw.length < PIN_MIN_LENGTH || raw.length > PIN_MAX_LENGTH) {
             return "PIN 长度需为 $PIN_MIN_LENGTH–$PIN_MAX_LENGTH 位"
         }
+        if (raw.any { it.isISOControl() }) {
+            return "PIN 不能包含控制字符"
+        }
         return null
     }
 

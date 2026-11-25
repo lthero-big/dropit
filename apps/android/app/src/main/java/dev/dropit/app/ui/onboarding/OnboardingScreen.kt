@@ -91,6 +91,7 @@ import dev.dropit.app.ui.theme.DropitTheme
 fun OnboardingScreen(
     viewModel: OnboardingViewModel,
     modifier: Modifier = Modifier,
+    applyStatusBarsPadding: Boolean = true,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = DropitTheme.colors
@@ -112,7 +113,7 @@ fun OnboardingScreen(
         modifier = modifier
             .fillMaxSize()
             .background(colors.bg)
-            .statusBarsPadding()
+            .then(if (applyStatusBarsPadding) Modifier.statusBarsPadding() else Modifier)
             .displayCutoutPadding()
             .navigationBarsPadding()
             .imePadding(),
@@ -325,7 +326,7 @@ private fun ServerConfigContent(
                     Text(
                         text = "仅允许受加密保护的 https:// 服务器；连接前会校验 /api/version 确认服务器版本。",
                         style = MaterialTheme.typography.labelSmall,
-                        color = colors.fg4,
+                        color = colors.fg3,
                     )
                 }
             }
@@ -373,7 +374,7 @@ private fun DeviceAuthContent(
             // Top bar with switch server entry
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 TextButton(
@@ -390,11 +391,16 @@ private fun DeviceAuthContent(
                     Text(
                         text = "更换服务器",
                         style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
 
+                Spacer(modifier = Modifier.weight(1f))
+
                 state.configuredServerOrigin?.let { origin ->
                     Surface(
+                        modifier = Modifier.weight(1f, fill = false),
                         shape = shapes.pill,
                         color = colors.surface0,
                         border = BorderStroke(1.dp, colors.line1),

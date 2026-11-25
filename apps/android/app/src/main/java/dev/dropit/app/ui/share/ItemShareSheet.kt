@@ -39,6 +39,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -190,7 +194,8 @@ fun ItemShareSheet(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .defaultMinSize(minHeight = 40.dp)
+                        .defaultMinSize(minHeight = 48.dp)
+                        .clip(shapes.sm)
                         .clickable(onClick = onOpenPresetsInBrowser)
                         .padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -200,6 +205,7 @@ fun ItemShareSheet(
                         text = "自定义分享预设需在系统浏览器设置中配置",
                         style = MaterialTheme.typography.labelSmall,
                         color = colors.fg3,
+                        modifier = Modifier.weight(1f, fill = false),
                     )
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
@@ -213,7 +219,9 @@ fun ItemShareSheet(
             // Feedback / error banners
             state.feedbackMessage?.let { msg ->
                 Surface(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { liveRegion = LiveRegionMode.Polite },
                     shape = shapes.md,
                     color = colors.okSoft,
                     tonalElevation = 0.dp,
@@ -229,7 +237,9 @@ fun ItemShareSheet(
 
             state.errorMessage?.let { err ->
                 Surface(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { liveRegion = LiveRegionMode.Polite },
                     shape = shapes.md,
                     color = colors.brandSoft,
                     border = BorderStroke(1.dp, colors.destructive.copy(alpha = 0.35f)),
@@ -399,6 +409,7 @@ private fun GeneratedLinkBlock(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ShareHistoryCard(
     share: ItemShare,
@@ -437,12 +448,13 @@ private fun ShareHistoryCard(
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.Center,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Row(
+                    modifier = Modifier.defaultMinSize(minHeight = 36.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
@@ -454,7 +466,7 @@ private fun ShareHistoryCard(
                         Text(
                             text = status.label,
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (isActive) colors.ok else colors.fg4,
+                            color = if (isActive) colors.ok else colors.fg3,
                             modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
                         )
                     }
@@ -526,20 +538,25 @@ private fun ShareOptionChip(
 ) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
-    Surface(
+    Box(
         modifier = Modifier
-            .defaultMinSize(minHeight = 40.dp)
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            .clip(shapes.pill)
             .clickable(enabled = enabled, onClick = onClick),
-        shape = shapes.pill,
-        color = if (selected) colors.fg else colors.surface0,
-        border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
-        tonalElevation = 0.dp,
+        contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = if (selected) colors.bg else colors.fg2,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-        )
+        Surface(
+            shape = shapes.pill,
+            color = if (selected) colors.fg else colors.surface0,
+            border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
+            tonalElevation = 0.dp,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (selected) colors.bg else colors.fg2,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            )
+        }
     }
 }

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -21,6 +22,7 @@ import androidx.compose.material.icons.automirrored.rounded.ExitToApp
 import androidx.compose.material.icons.rounded.Casino
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MeetingRoom
 import androidx.compose.material.icons.rounded.Share
@@ -44,7 +46,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -61,6 +67,7 @@ fun ActiveRoomBanner(
     isOwner: Boolean,
     nowMs: Long,
     onCopyCode: () -> Unit,
+    onCopyRoomLink: () -> Unit = {},
     onShareRoomLink: () -> Unit,
     onEditCodeAndPin: () -> Unit,
     onLeaveRoom: () -> Unit,
@@ -83,37 +90,43 @@ fun ActiveRoomBanner(
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.MeetingRoom,
-                    contentDescription = null,
-                    tint = colors.devPad,
-                    modifier = Modifier.size(18.dp),
-                )
-                Text(
-                    text = "房间码",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.fg3,
-                )
-                Surface(
-                    shape = shapes.sm,
-                    color = colors.codeBg,
-                    border = BorderStroke(1.dp, colors.line2),
-                    tonalElevation = 0.dp,
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text(
-                        text = room.code ?: room.token.take(6),
-                        style = DropitMonoTypography.codeBlock.copy(fontWeight = FontWeight.SemiBold),
-                        color = colors.fg,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                    Icon(
+                        imageVector = Icons.Rounded.MeetingRoom,
+                        contentDescription = null,
+                        tint = colors.devPad,
+                        modifier = Modifier.size(18.dp),
                     )
+                    Text(
+                        text = "房间码",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.fg3,
+                    )
+                    Surface(
+                        shape = shapes.sm,
+                        color = colors.codeBg,
+                        border = BorderStroke(1.dp, colors.line2),
+                        tonalElevation = 0.dp,
+                    ) {
+                        Text(
+                            text = room.code ?: room.token.take(6),
+                            style = DropitMonoTypography.codeBlock.copy(fontWeight = FontWeight.SemiBold),
+                            color = colors.fg,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        )
+                    }
                 }
                 if (room.hasPin) {
                     Surface(
+                        modifier = Modifier.align(Alignment.CenterVertically),
                         shape = shapes.pill,
                         color = colors.warnSoft,
                         tonalElevation = 0.dp,
@@ -137,12 +150,12 @@ fun ActiveRoomBanner(
                         }
                     }
                 }
-                Spacer(modifier = Modifier.weight(1f))
                 expiry?.let {
                     Text(
                         text = it.label,
                         style = DropitMonoTypography.meta,
                         color = if (it.isExpiringSoon) colors.brand else colors.fg3,
+                        modifier = Modifier.align(Alignment.CenterVertically),
                     )
                 }
             }
@@ -164,6 +177,19 @@ fun ActiveRoomBanner(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("复制房间码", style = MaterialTheme.typography.labelMedium)
+                    }
+                    TextButton(
+                        onClick = onCopyRoomLink,
+                        modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                        colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Link,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("复制链接", style = MaterialTheme.typography.labelMedium)
                     }
                     TextButton(
                         onClick = onShareRoomLink,
@@ -385,6 +411,14 @@ fun JoinRoomDialog(
                         capitalization = KeyboardCapitalization.None,
                         autoCorrectEnabled = false,
                         keyboardType = KeyboardType.Ascii,
+                        imeAction = if (effectiveShowPin) ImeAction.Next else ImeAction.Done,
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            if (!state.isSubmitting && code.isNotBlank() && (!state.requiresPinForJoin || pin.isNotEmpty())) {
+                                onJoin(code, pin.ifBlank { null })
+                            }
+                        },
                     ),
                     shape = shapes.md,
                     textStyle = DropitMonoTypography.codeBlock.copy(color = colors.fg),
@@ -407,6 +441,16 @@ fun JoinRoomDialog(
                         label = { Text("房间 PIN") },
                         placeholder = { Text("输入 4–32 位 PIN", color = colors.fg4) },
                         visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                if (!state.isSubmitting && code.isNotBlank() && (!state.requiresPinForJoin || pin.isNotEmpty())) {
+                                    onJoin(code, pin.ifBlank { null })
+                                }
+                            },
+                        ),
                         shape = shapes.md,
                         textStyle = MaterialTheme.typography.bodyMedium.copy(color = colors.fg),
                         colors = OutlinedTextFieldDefaults.colors(
@@ -420,7 +464,7 @@ fun JoinRoomDialog(
                 } else {
                     TextButton(
                         onClick = { showPinInput = true },
-                        modifier = Modifier.defaultMinSize(minHeight = 40.dp),
+                        modifier = Modifier.defaultMinSize(minHeight = 48.dp),
                         colors = ButtonDefaults.textButtonColors(contentColor = colors.fg3),
                     ) {
                         Icon(
@@ -435,7 +479,9 @@ fun JoinRoomDialog(
 
                 state.errorMessage?.let { err ->
                     Surface(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics { liveRegion = LiveRegionMode.Polite },
                         shape = shapes.sm,
                         color = colors.brandSoft,
                         tonalElevation = 0.dp,
@@ -477,6 +523,7 @@ fun JoinRoomDialog(
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun EditRoomCodeDialog(
     room: RoomInfo,
@@ -564,7 +611,10 @@ fun EditRoomCodeDialog(
                     Text(text = it, style = MaterialTheme.typography.labelSmall, color = colors.destructive)
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     Button(
                         onClick = { onSaveCode(draftCode) },
                         enabled = !state.isSubmitting && draftCode.length == 6 && codeError == null && draftCode != room.code,
@@ -622,7 +672,10 @@ fun EditRoomCodeDialog(
                     Text(text = it, style = MaterialTheme.typography.labelSmall, color = colors.destructive)
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     Button(
                         onClick = { onSavePin(draftPin) },
                         enabled = !state.isSubmitting && draftPin.length >= RoomValidation.PIN_MIN_LENGTH && pinError == null,
@@ -650,16 +703,26 @@ fun EditRoomCodeDialog(
                 }
 
                 state.successMessage?.let { msg ->
-                    Text(text = msg, style = MaterialTheme.typography.labelSmall, color = colors.ok)
+                    Text(
+                        text = msg,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.ok,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
                 }
                 state.errorMessage?.let { err ->
-                    Text(text = err, style = MaterialTheme.typography.labelSmall, color = colors.destructive)
+                    Text(
+                        text = err,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.destructive,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
                 }
 
                 Text(
                     text = "修改房间码后，旧房间码与旧链接立即失效。",
                     style = MaterialTheme.typography.labelSmall,
-                    color = colors.fg4,
+                    color = colors.fg3,
                 )
             }
         },

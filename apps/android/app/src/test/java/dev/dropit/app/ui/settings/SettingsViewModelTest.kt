@@ -155,6 +155,30 @@ class SettingsViewModelTest {
         assertNull(vm.uiState.value.promptManifest)
     }
 
+    @Test
+    fun sessionSwitch_clearsStaleUpdateStatusAndPromptBeforeCheckingNewSession() = runTest(testDispatcher) {
+        val updater = FakeAppUpdater(
+            checkResult = UpdateCheckResult.UpdateAvailable(
+                manifest = newerManifest,
+                downloadUrl = "https://server-a.example.com${newerManifest.url}",
+            ),
+        )
+        val vm = SettingsViewModel(appUpdater = updater, ioDispatcher = testDispatcher)
+
+        vm.triggerBackgroundUpdateCheck("https://server-a.example.com#1")
+        advanceUntilIdle()
+        assertEquals(newerManifest, vm.uiState.value.promptManifest)
+
+        // Switching to server B where no release exists must clear server A's stale prompt & status
+        updater.checkResult = UpdateCheckResult.NoReleasePublished
+        vm.triggerBackgroundUpdateCheck("https://server-b.example.com#2")
+        advanceUntilIdle()
+
+        assertNull(vm.uiState.value.promptManifest)
+        assertNull(vm.uiState.value.updateStatusMessage)
+        assertFalse(vm.uiState.value.isAutoPrompt)
+    }
+
     private class FakeAppUpdater(
         var checkResult: UpdateCheckResult,
         var downloadOutcome: UpdateInstallState = UpdateInstallState.ReadyToInstall,

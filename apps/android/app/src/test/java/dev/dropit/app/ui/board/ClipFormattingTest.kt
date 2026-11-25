@@ -84,6 +84,37 @@ class ClipFormattingTest {
         assertTrue(result.endsWith(".pdf"))
         assertTrue(result.contains("…"))
         assertTrue(result.length <= 22)
+
+        // Tight budget with long extension & special characters (+, spaces) must stay bounded and keep extension
+        val specialName = "2026 年度设计 + 研发评审终稿说明文档.markdown"
+        val tight = ClipFormatting.middleEllipsizeFilename(specialName, maxChars = 18)
+        assertTrue(tight.endsWith(".markdown"))
+        assertTrue(tight.contains("…"))
+        assertTrue(tight.length <= 18)
+    }
+
+    @Test
+    fun isPreviewableTextFile_detectsTextCodeMarkdownAndExcludesBinaries() {
+        assertTrue(
+            ClipFormatting.isPreviewableTextFile(
+                ClipItem(id = "1", spaceId = "s", kind = "file", filename = "说明文档.md", mime = "text/markdown"),
+            ),
+        )
+        assertTrue(
+            ClipFormatting.isPreviewableTextFile(
+                ClipItem(id = "2", spaceId = "s", kind = "file", filename = "config.json", mime = "application/json"),
+            ),
+        )
+        assertFalse(
+            ClipFormatting.isPreviewableTextFile(
+                ClipItem(id = "3", spaceId = "s", kind = "file", filename = "报告.pdf", mime = "application/pdf"),
+            ),
+        )
+        assertFalse(
+            ClipFormatting.isPreviewableTextFile(
+                ClipItem(id = "4", spaceId = "s", kind = "file", filename = "表格.xlsx", mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            ),
+        )
     }
 
     @Test
@@ -93,6 +124,13 @@ class ClipFormattingTest {
         assertNotNull(ClipFormatting.validateGroupName("未分组", emptyList()))
         assertNotNull(ClipFormatting.validateGroupName("工作", listOf("工作")))
         assertNull(ClipFormatting.validateGroupName("工作", listOf("工作"), renamingFrom = "工作"))
+
+        // Server enforces max 24 Unicode code points and rejects control characters
+        assertNull(ClipFormatting.validateGroupName("一".repeat(24), emptyList()))
+        assertNotNull(ClipFormatting.validateGroupName("一".repeat(25), emptyList()))
+        assertNotNull(ClipFormatting.validateGroupName("工作\u0007", emptyList()))
+        // Collapses internal whitespace before duplicate check
+        assertNotNull(ClipFormatting.validateGroupName("前端  团队", listOf("前端 团队")))
 
         val fullGroups = (1..24).map { "分组$it" }
         assertNotNull(ClipFormatting.validateGroupName("分组25", fullGroups))
