@@ -1,4 +1,8 @@
-name: Android APK
+# Legacy Capacitor Android APK workflow (0.3.x rollback only).
+# Since 0.4.0 (versionCode 6), the default Android build & release pipeline is
+# `.github/workflows/android-native.yml` (pure Kotlin + Jetpack Compose in `apps/android/`).
+# This workflow is kept solely for emergency Capacitor rollback builds or maintenance under `mobile/`.
+name: Android Legacy APK (Capacitor Rollback)
 on:
   workflow_dispatch:
   pull_request:
@@ -52,13 +56,18 @@ jobs:
             echo "No ANDROID_KEYSTORE_B64 secret: using a throwaway debug key"
           fi
       - run: chmod +x android/gradlew && cd android && ./gradlew testDebugUnitTest assembleDebug --no-daemon
-      - name: Name the APK
+      - name: Name the APK and compute SHA-256
         run: |
           mkdir -p out
-          cp android/app/build/outputs/apk/debug/app-debug.apk "out/dropit-android-$VERSION-$SHORT.apk"
+          APK_NAME="dropit-android-${VERSION}-${SHORT}.apk"
+          cp android/app/build/outputs/apk/debug/app-debug.apk "out/${APK_NAME}"
+          (cd out && sha256sum "${APK_NAME}" > "${APK_NAME}.sha256")
+          cat "out/${APK_NAME}.sha256"
           rm -f "$RUNNER_TEMP/dropit.p12"
       - uses: actions/upload-artifact@v4
         with:
-          name: dropit-android-debug-apk
-          path: mobile/out/*.apk
+          name: dropit-android-legacy-debug-apk
+          path: |
+            mobile/out/*.apk
+            mobile/out/*.apk.sha256
           retention-days: 30
