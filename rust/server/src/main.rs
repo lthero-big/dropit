@@ -285,6 +285,22 @@ async fn main() -> StartupResult<()> {
         .route("/api/rooms/{room}/items/text", post(rooms::text))
         .route("/api/rooms/{room}/items/file", post(uploads::upload_room))
         .route(
+            "/api/rooms/{room}/uploads",
+            post(uploads::create_room_upload),
+        )
+        .route(
+            "/api/rooms/{room}/uploads/{id}",
+            get(uploads::get_room_upload).delete(uploads::cancel_room_upload),
+        )
+        .route(
+            "/api/rooms/{room}/uploads/{id}/chunks/{index}",
+            put(uploads::put_room_chunk),
+        )
+        .route(
+            "/api/rooms/{room}/uploads/{id}/complete",
+            post(uploads::complete_room),
+        )
+        .route(
             "/api/rooms/{room}/items/{id}",
             delete(rooms::delete_item).patch(items::edit),
         )
@@ -672,6 +688,19 @@ async fn request_context(
     response
 }
 
+fn chunk_upload_path(path: &str) -> bool {
+    let mut parts = path.split('/');
+    parts.next() == Some("")
+        && parts.next() == Some("api")
+        && matches!(parts.next(), Some("spaces" | "rooms"))
+        && parts.next().is_some_and(|part| !part.is_empty())
+        && parts.next() == Some("uploads")
+        && parts.next().is_some_and(|part| !part.is_empty())
+        && parts.next() == Some("chunks")
+        && parts.next().is_some_and(|part| !part.is_empty())
+        && parts.next().is_none()
+}
+
 async fn api_context(
     app: &StateData,
     request: &axum::http::request::Parts,
@@ -683,7 +712,14 @@ async fn api_context(
     let ip = client_ip(&app.config, headers, peer).to_canonical();
     let ip_summary = summarize_ip(ip);
     let ip = ip.to_string();
-    app.limit("general:ip", &ip, app.config.rate_general)?;
+    // Chunk PUT uses only the chunk bucket. It must not consume general, token,
+    // room-access, or room-write, matching the TypeScript middleware.
+    let chunk_request = request.method == Method::PUT && chunk_upload_path(request.uri.path());
+    if chunk_request {
+        app.limit("chunk:ip", &ip, app.config.rate_chunk)?;
+    } else {
+        app.limit("general:ip", &ip, app.config.rate_general)?;
+    }
     let raw_session = read_cookie(headers, cookie_name(secure_cookie));
     let auth = if let Some(authorization) = header_value(headers, "authorization") {
         let raw = authorization
@@ -705,7 +741,11 @@ async fn api_context(
             error.header = Some((header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer")));
             return Err(error);
         };
-        app.limit("token", &bearer.id, app.config.rate_token)?;
+        if chunk_request {
+            app.limit("chunk-token", &bearer.id, app.config.rate_chunk)?;
+        } else {
+            app.limit("token", &bearer.id, app.config.rate_token)?;
+        }
         Some(Auth {
             account: Arc::new(account),
             session_hash: String::new(),
@@ -727,11 +767,15 @@ async fn api_context(
         None
     };
     if let Some(auth) = &auth {
-        app.limit(
-            "general:user",
-            &auth.account.user.id,
-            app.config.rate_general,
-        )?;
+        if chunk_request {
+            app.limit("chunk:user", &auth.account.user.id, app.config.rate_chunk)?;
+        } else {
+            app.limit(
+                "general:user",
+                &auth.account.user.id,
+                app.config.rate_general,
+            )?;
+        }
     }
 
     let safe = matches!(request.method.as_str(), "GET" | "HEAD" | "OPTIONS");

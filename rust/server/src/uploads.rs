@@ -713,7 +713,7 @@ pub async fn create_upload(
     let mut upload = db::NewUpload {
         id: uuid::Uuid::new_v4().to_string(),
         space_id: space_id.clone(),
-        user_id: auth.account.user.id.clone(),
+        user_id: Some(auth.account.user.id.clone()),
         principal: format!("user:{}", auth.account.user.id),
         filename,
         mime,
@@ -789,8 +789,7 @@ pub async fn put_chunk(
             authorized_upload(db, &scope, &user_id, &id)
         })
         .await?;
-    app.limit("chunk:ip", &context.ip, app.config.rate_chunk)?;
-    app.limit("chunk:user", &auth.account.user.id, app.config.rate_chunk)?;
+    // Chunk rate is consumed in api_context so this path does not also take general/token.
     let checksum = header_value(request.headers(), "x-chunk-sha256").map(str::to_owned);
     if let Some(checksum) = &checksum
         && (checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -1009,6 +1008,124 @@ async fn finish_complete(
     Ok((item, groups, channel))
 }
 
+async fn finish_room_complete(
+    app: &App,
+    space_id: &str,
+    upload: &db::UploadSession,
+    group: Option<String>,
+    device: Option<db::Device>,
+    cancel: &Notify,
+) -> ApiResult<(db::Item, Option<Vec<String>>, String)> {
+    let scope = space_id.to_owned();
+    let id = upload.id.clone();
+    let chunks = app
+        .db
+        .run(move |db| {
+            room_upload(db, &scope, &id)?;
+            db::upload_chunks(db, &id)
+        })
+        .await?;
+    let count = div_ceil(upload.size, upload.chunk_size);
+    let contiguous = chunks.len() as i64 == count
+        && chunks
+            .iter()
+            .enumerate()
+            .all(|(index, chunk)| chunk.index == index as i64);
+    let sizes_match = chunks.iter().map(|chunk| chunk.size).sum::<i64>() == upload.size
+        && chunks.iter().enumerate().all(|(index, chunk)| {
+            chunk.size
+                == upload
+                    .chunk_size
+                    .min(upload.size - index as i64 * upload.chunk_size)
+        });
+    if !contiguous || !sizes_match {
+        return Err(ApiError::new(400, "UPLOAD_INCOMPLETE"));
+    }
+    if was_cancelled(cancel) {
+        return Err(ApiError::NOT_FOUND);
+    }
+    let directory = downloads::files_dir(&app.config.data);
+    let keys: Vec<String> = chunks.iter().map(|chunk| chunk.key.clone()).collect();
+    let assembled = assemble_chunks(&directory, &keys, upload.size as u64, cancel).await?;
+    let prefix = read_prefix(&assembled.staged.path, 4096).await?;
+    if upload.mime == "image/svg+xml" || svg_prefix(&prefix) {
+        return Err(ApiError::new(415, "INVALID_IMAGE"));
+    }
+    let sniffed = sniff_raster(&prefix);
+    let mut thumbnail: Option<(String, Staged, i64)> = None;
+    if sniffed.is_some() || wants_thumbnail(&upload.mime) {
+        let path = assembled.staged.path.clone();
+        let derived = tokio::task::spawn_blocking(move || images::derive_file(&path, 320))
+            .await
+            .map_err(ApiError::internal)?
+            .map_err(ApiError::from)?;
+        if derived.len() > images::THUMBNAIL_BYTES {
+            return Err(ApiError::new(413, "FILE_TOO_LARGE"));
+        }
+        let thumb = write_bytes(&directory, &derived).await?;
+        thumbnail = Some((thumb.key, thumb.staged, derived.len() as i64));
+    }
+    let group = group
+        .filter(|value| !value.is_empty())
+        .map(|value| clean_group(&value))
+        .transpose()?;
+    let thumb_size = thumbnail.as_ref().map(|(_, _, size)| *size).unwrap_or(0);
+    let input = db::FileInput {
+        // TS sanitizes again after reading the persisted session name. A lone
+        // UTF-16 unit at the cutoff has become three replacement characters on
+        // that read, so apply the 180-unit limit to the stored-read value too.
+        filename: clean_filename(&upload.filename),
+        mime: upload.mime.clone(),
+        size: assembled.size as i64,
+        stored_bytes: assembled.size as i64 + thumb_size,
+        file_key: assembled.key.clone(),
+        thumbnail_key: thumbnail.as_ref().map(|(key, _, _)| key.clone()),
+        group,
+        device,
+    };
+    let channel = space_id.to_owned();
+    let space_id = space_id.to_owned();
+    let upload_id = upload.id.clone();
+    let config = app.config.clone();
+    // Gate then DB, matching room text, retract, and the room snapshot. A retract
+    // cannot commit between this write and item.created. The gate drops before
+    // the caller flushes garbage.
+    let _gate = app.realtime.gate.lock().await;
+    let committed = app
+        .db
+        .run(move |db| {
+            if room_upload(db, &space_id, &upload_id).is_err() {
+                return Err(ApiError::NOT_FOUND);
+            }
+            let before = db::groups(db, &space_id)?;
+            let item = db::complete_room_upload(db, &config, &space_id, &upload_id, input);
+            let after = db::groups(db, &space_id)?;
+            Ok((item, (before != after).then_some(after)))
+        })
+        .await;
+    let (item, groups) = committed?;
+    // A committed group stays even when the later item insert fails. Publish it
+    // before returning that error, matching resolveGroup before addItem.
+    if let Some(groups) = &groups {
+        app.realtime
+            .publish(&channel, json!({ "type": "groups", "groups": groups }));
+    }
+    let item = match item {
+        Ok(item) => item,
+        Err(error) => return Err(error),
+    };
+    // Still holding the gate, after the commit and before item.created.
+    crate::realtime::test_barrier("room-complete-committed").await;
+    app.realtime
+        .publish(&channel, json!({ "type": "item.created", "item": item }));
+    drop(_gate);
+    forget_staged(assembled.staged);
+    if let Some((_, staged, _)) = thumbnail {
+        forget_staged(staged);
+    }
+    Ok((item, groups, channel))
+}
+
 pub async fn cancel_upload(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
@@ -1032,6 +1149,261 @@ pub async fn cancel_upload(
         &auth.account.user.id,
         app.config.rate_general,
     )?;
+    let id = upload_id.clone();
+    app.db.run(move |db| db::delete_upload(db, &id)).await?;
+    abort_session(&app, &upload_id).await;
+    let directory = downloads::files_dir(&app.config.data);
+    flush_garbage(&app, &directory).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn room_write_limit(app: &App, context: &RequestContext) -> ApiResult<()> {
+    app.limit("room-write:ip", &context.ip, app.config.rate_room)?;
+    if let Some(auth) = &context.auth {
+        app.limit(
+            "room-write:user",
+            &auth.account.user.id,
+            app.config.rate_room,
+        )?;
+    }
+    Ok(())
+}
+
+fn room_principal(context: &RequestContext, space_id: &str) -> String {
+    match context.auth.as_ref() {
+        Some(auth) => format!("user:{}", auth.account.user.id),
+        None => format!("room:{space_id}"),
+    }
+}
+
+fn room_upload(
+    db: &rusqlite::Connection,
+    space_id: &str,
+    upload_id: &str,
+) -> ApiResult<db::UploadSession> {
+    let upload = db::upload_session(db, upload_id, now())?.ok_or(ApiError::NOT_FOUND)?;
+    // Any holder of this room token may resume the session. A user-owned private
+    // session must not be completed into the room.
+    if upload.space_id != space_id || upload.user_id.is_some() {
+        return Err(ApiError::NOT_FOUND);
+    }
+    Ok(upload)
+}
+
+pub async fn create_room_upload(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<UrlPath<String>, PathRejection>,
+    request: Request,
+) -> ApiResult<impl IntoResponse> {
+    let UrlPath(token) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let room = crate::rooms::scope(&app, &context, &token).await?;
+    room_write_limit(&app, &context)?;
+    let body = crate::read_json(request, 8192).await?;
+    let filename = crate::input_js_string(body.get("filename"), 4096)?.clean_filename();
+    let size = json_size(body.get("size"), app.config.room_max_file)?;
+    let mime = session_mime(body.get("mime"))?;
+    let created_at = now();
+    let mut upload = db::NewUpload {
+        id: uuid::Uuid::new_v4().to_string(),
+        space_id: room.id.clone(),
+        user_id: None,
+        principal: room_principal(&context, &room.id),
+        filename,
+        mime,
+        size,
+        chunk_size: app.config.upload_chunk_bytes,
+        created_at,
+        expires_at: created_at.saturating_add(86_400_000),
+        quota: app.config.room_quota,
+        max_items: app.config.max_items.min(100),
+        sessions_per_user: app.config.upload_sessions_per_user,
+        sessions_global: app.config.upload_sessions_global,
+    };
+    let response_id = upload.id.clone();
+    app.db
+        .run(move |db| db::create_upload_for_room(db, &mut upload))
+        .await?;
+    let created = app
+        .db
+        .run(move |db| db::upload_session(db, &response_id, now()))
+        .await?
+        .ok_or(ApiError::NOT_FOUND)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "uploadId": created.id,
+            "chunkSize": created.chunk_size,
+            "expiresAt": created.expires_at,
+            "received": [],
+        })),
+    ))
+}
+
+pub async fn get_room_upload(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<UrlPath<(String, String)>, PathRejection>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let UrlPath((token, upload_id)) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let room = crate::rooms::scope(&app, &context, &token).await?;
+    let (upload, chunks) = app
+        .db
+        .run(move |db| {
+            let upload = room_upload(db, &room.id, &upload_id)?;
+            let chunks = db::upload_chunks(db, &upload_id)?;
+            Ok((upload, chunks))
+        })
+        .await?;
+    Ok(Json(json!({
+        "size": upload.size,
+        "chunkSize": upload.chunk_size,
+        "expiresAt": upload.expires_at,
+        "received": chunks.into_iter().map(|chunk| chunk.index).collect::<Vec<_>>(),
+    })))
+}
+
+pub async fn put_room_chunk(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<UrlPath<(String, String, String)>, PathRejection>,
+    request: Request,
+) -> ApiResult<StatusCode> {
+    let UrlPath((token, upload_id, raw_index)) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    // Chunk PUT skips room-access and room-write. The capability is still required.
+    let room = crate::rooms::load_room(&app, &token).await?;
+    let space_id = room.id.clone();
+    let id = upload_id.clone();
+    app.db
+        .run(move |db| room_upload(db, &space_id, &id))
+        .await?;
+    let checksum = header_value(request.headers(), "x-chunk-sha256").map(str::to_owned);
+    if let Some(checksum) = &checksum
+        && (checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(ApiError::new(400, "INVALID_CHECKSUM"));
+    }
+    let principal = room_principal(&context, &room.id);
+    let permit = acquire_chunk(&app, &upload_id, &principal)?;
+    let directory = downloads::files_dir(&app.config.data);
+    let timeout_ms = app.config.upload_chunk_timeout_ms as u64;
+    let index = chunk_index(&raw_index)?;
+    let space_id = room.id.clone();
+    let id = upload_id.clone();
+    let expected = app
+        .db
+        .run(move |db| {
+            let upload = room_upload(db, &space_id, &id)?;
+            chunk_expected(&upload, index)
+        })
+        .await?;
+    let stored = match timeout(
+        Duration::from_millis(timeout_ms),
+        write_limited(&directory, request.into_body(), expected, &permit.notify),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => return Err(ApiError::new(400, "UPLOAD_TIMEOUT")),
+    };
+    if stored.size != expected {
+        return Err(ApiError::new(400, "CHUNK_SIZE_MISMATCH"));
+    }
+    if let Some(checksum) = checksum
+        && !stored.sha256.eq_ignore_ascii_case(&checksum)
+    {
+        return Err(ApiError::new(400, "CHECKSUM_MISMATCH"));
+    }
+    let space_id = room.id.clone();
+    let id = upload_id.clone();
+    let key = stored.key.clone();
+    let sha = stored.sha256.clone();
+    let committed = app
+        .db
+        .run(move |db| {
+            room_upload(db, &space_id, &id)?;
+            db::save_chunk(db, &id, index, &key, expected as i64, &sha, now())
+        })
+        .await?;
+    if committed {
+        forget_staged(stored.staged);
+    } else {
+        drop(stored);
+        let _ = flush_garbage(&app, &directory).await;
+    }
+    drop(permit);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn complete_room(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<UrlPath<(String, String)>, PathRejection>,
+    request: Request,
+) -> ApiResult<impl IntoResponse> {
+    let UrlPath((token, upload_id)) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let room = crate::rooms::scope(&app, &context, &token).await?;
+    room_write_limit(&app, &context)?;
+    let space_id = room.id.clone();
+    let id = upload_id.clone();
+    let upload = app
+        .db
+        .run(move |db| room_upload(db, &space_id, &id))
+        .await?;
+    let headers = request.headers().clone();
+    let group = decoded_group(header_value(&headers, "x-dropit-group"))?;
+    let device = parse_device(&headers);
+    // 409 UPLOAD_IN_PROGRESS returns before the slot and before session deletion.
+    let complete_notify = begin_complete(&app, &upload_id)?;
+    // Same four-slot cap as legacy POST. A full pool returns 429 UPLOAD_BUSY
+    // without incrementing. The slot drops on every later exit, including quota
+    // failure and cancel, so a held complete cannot leak a permit.
+    let slot = match acquire(&app, false, UPLOAD_SLOTS, "UPLOAD_BUSY") {
+        Ok(slot) => slot,
+        Err(error) => {
+            let id = upload_id.clone();
+            let _ = app.db.run(move |db| db::delete_upload(db, &id)).await;
+            end_complete(&app, &upload_id);
+            let directory = downloads::files_dir(&app.config.data);
+            let _ = flush_garbage(&app, &directory).await;
+            return Err(error);
+        }
+    };
+    let result =
+        finish_room_complete(&app, &room.id, &upload, group, device, &complete_notify).await;
+    let directory = downloads::files_dir(&app.config.data);
+    // Release the in-progress mark before deleting a failed session. A racing
+    // complete then observes UPLOAD_IN_PROGRESS while the session still exists,
+    // matching the TypeScript 409, and does not delete that session.
+    end_complete(&app, &upload_id);
+    if result.is_err() {
+        let id = upload_id.clone();
+        let _ = app.db.run(move |db| db::delete_upload(db, &id)).await;
+    }
+    // Publish already happened inside the commit gate. Flush garbage only after
+    // that gate is released, on failure too. Keep the original business result
+    // even if garbage I/O fails; the durable queue will retry it later.
+    drop(slot);
+    let _ = flush_garbage(&app, &directory).await;
+    let (item, _groups, _channel) = result?;
+    Ok((StatusCode::CREATED, Json(json!({ "item": item }))))
+}
+
+pub async fn cancel_room_upload(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    path: Result<UrlPath<(String, String)>, PathRejection>,
+) -> ApiResult<StatusCode> {
+    let UrlPath((token, upload_id)) = path.map_err(|_| ApiError::NOT_FOUND)?;
+    let room = crate::rooms::scope(&app, &context, &token).await?;
+    let space_id = room.id.clone();
+    let id = upload_id.clone();
+    app.db
+        .run(move |db| {
+            room_upload(db, &space_id, &id)?;
+            Ok(())
+        })
+        .await?;
     let id = upload_id.clone();
     app.db.run(move |db| db::delete_upload(db, &id)).await?;
     abort_session(&app, &upload_id).await;
@@ -1091,6 +1463,15 @@ async fn abort_session(app: &App, upload_id: &str) {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// Stop in-process writers for sessions that maintenance or account disable already removed.
+pub async fn abort_sessions(app: &App, ids: &[String]) {
+    for id in ids {
+        abort_session(app, id).await;
+    }
+    let directory = downloads::files_dir(&app.config.data);
+    flush_garbage(app, &directory).await;
 }
 
 fn authorized_upload(
@@ -1351,10 +1732,10 @@ async fn flush_garbage(app: &App, directory: &Path) {
 /// `DROPIT_SWEEP_ON_SPACES=1` runs this from GET /api/spaces so the HTTP harness
 /// can prove expiry and garbage cleanup. It is not a public route.
 pub async fn sweep_expired(app: &App, older_than: i64) -> ApiResult<()> {
-    let directory = downloads::files_dir(&app.config.data);
     let time = now();
-    let _ = app.db.run(move |db| db::expire_uploads(db, time)).await?;
-    flush_garbage(app, &directory).await;
+    let ids = app.db.run(move |db| db::expire_uploads(db, time)).await?;
+    abort_sessions(app, &ids).await;
+    let directory = downloads::files_dir(&app.config.data);
     let referenced = app.db.run(|db| db::referenced_file_keys(db)).await?;
     let referenced: std::collections::HashSet<String> = referenced.into_iter().collect();
     let entries = match tokio::fs::read_dir(&directory).await {

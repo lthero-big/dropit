@@ -308,7 +308,7 @@ Private-space chunk sessions use the same cookie session and writable-member
 checks as direct upload. The routes are POST /api/spaces/:space/uploads,
 GET and DELETE /api/spaces/:space/uploads/:id, PUT
 /api/spaces/:space/uploads/:id/chunks/:index, and POST
-/api/spaces/:space/uploads/:id/complete. Room upload routes are not in this slice.
+/api/spaces/:space/uploads/:id/complete. Room chunk routes use the same shapes and are covered in the RHEA-243 section.
 
 Create returns 201 with uploadId, chunkSize, expiresAt, and received. chunkSize
 is frozen from uploadChunkBytes. expiresAt is the earlier of 24 hours and the
@@ -361,8 +361,8 @@ busy, expiry cleanup, and restart resume.
 
 ## Coverage boundary
 
-Room APIs, room chunk uploads, sharing, the remaining admin APIs, static web hosting,
-update endpoints and historical schema upgrades remain outside this
+Room APIs, sharing, and room chunk uploads are covered in the later sections.
+Static web hosting, update endpoints, and admin APIs not covered later stay outside this
 slice. Unsupported routes return the existing JSON NOT_FOUND form. An invalid
 Authorization header returns UNAUTHENTICATED with WWW-Authenticate instead of
 falling back to a cookie.
@@ -595,3 +595,79 @@ editing, safe text rendering, group filtering/move/rename/delete and reload
 against either backend through the existing smoke runner.
 
 For the integrated migration and remaining release boundaries, see `../MAP.md`.
+
+## Temporary room chunk sessions (RHEA-243)
+
+Room chunk routes match the private-space session shape on the room capability
+base: POST /api/rooms/:room/uploads, GET and DELETE
+/api/rooms/:room/uploads/:id, PUT /api/rooms/:room/uploads/:id/chunks/:index,
+and POST /api/rooms/:room/uploads/:id/complete. A room code is not an upload
+credential. The entry token stays valid when the code or PIN changes. A closed
+room makes those routes 404 and leaves the session in place so reopen can
+resume it. Deleting the room removes its uploads and items and aborts in-flight
+chunk writes.
+
+The stored userId is always NULL, including when the caller is signed in. The
+item stays in the room space. Room reservations and completed room files do not
+change /api/me reservedBytes or usedBytes. A signed-in caller uses principal
+user:<id>, shared with that account's private sessions. An anonymous caller uses
+room:<spaceId>. Session caps follow the current caller, not the stored
+principal. Quota, file size and the item ceiling use the room limits
+(roomQuotaBytes, roomMaxFileBytes, and min(100, maxItems)). Thumbnail storedBytes
+count against the room quota. expiresAt is the earlier of 24 hours and the room
+expiry, and chunkSize is frozen at create.
+
+Any holder of the room token can read, write, complete or cancel that room's
+sessions. A private-space session cannot be completed through the room path, and
+a room session cannot be completed through the space path. Viewer membership is
+not required. A bearer token still needs write scope and the room token. Cookie
+requests without a matching Origin are rejected. Chunk PUT uses only the chunk
+rate bucket for the IP, account and PAT. It does not consume general, upload,
+room-write or token budgets. Create and complete use room-access plus room-write.
+
+Disabling an account deletes uploads whose userId or principal belongs to that
+account, including room sessions that caller created, and aborts their writers.
+Anonymous room:<id> sessions survive. Expiry removes sessions past their own
+expiry, the room expiry, or a disabled user/principal, then flushes garbage.
+Restart keeps received chunk indexes.
+
+Complete inserts the file in the room with userId NULL. It shares the four-slot
+upload permit with legacy uploads and returns 429 UPLOAD_BUSY when the pool is
+full, then deletes the session and releases the reservation. The permit drops
+on quota failure and cancel as well. A committed group is published even when
+the later item insert fails. Room complete takes the realtime gate before the
+database commit and publishes groups and item.created before releasing it.
+Garbage I/O runs after that release. The room snapshot takes the same gate,
+drains only events already queued, reads the database, then releases the gate
+before sending. A write cannot land between that read and the lock, and a
+retract cannot land between the commit and item.created. Events published
+after the gate drops stay in the socket queue and are not cleared.
+SVG prefix and raster thumbnail rules match private-space complete. A 409 from
+a complete already in progress does not delete the session. A failed complete
+after it begins does. Concurrent completes yield one 201 and one 409.
+
+The comparison is tests/room-chunks-compat.mjs, launched by tests/room_chunks.rs
+together with tests/rhea243-review-probe.mjs and tests/review3-cleanup-probe.mjs.
+All three archive the TypeScript
+baseline 37ce06ebfab2cd98b81e49ce54fb24ec5daeec68 and run against isolated data.
+The probe asserts shared-slot 429 UPLOAD_BUSY, a groups broadcast after a failed
+complete, and no item.created after retract. It also sets DROPIT_BARRIER_DIR,
+a test-only rendezvous that is a no-op when unset, and holds the snapshot read
+and the commit-to-publish section while a conflicting write or retract is in
+flight. On 2026-11-19 the compatibility script passed 524 responses, covering
+protocol and CLI/mobile request shapes, conflict, cancel, disconnect, concurrent
+complete, expiry, limits, item caps, session caps, chunk busy, chunk rate
+isolation, restart, and room close/reopen/delete. Thumbnail bytes are not
+compared; content type image/webp and source download bytes are.
+
+The strict cleanup probe extends the third review's unchanged quota-cleanup
+assertion. With maintenance delayed for 24 hours on both implementations, it
+checks files, durable garbage, upload/chunk rows and quota immediately after
+thumbnail quota failure, invalid SVG/raster, incomplete upload and cancellation.
+Replacing a chunk object with a directory causes real read/unlink failures even
+under root: incomplete completion retains its 400, assembly I/O returns 500,
+and failed deletion retains a durable garbage row until an explicit retry.
+Repeated failures followed by successful chunk/legacy uploads check permit
+release. Room session filenames use the accepted JS string boundary on create,
+then sanitize the database-read value again on complete, matching TS's UTF-16
+cutoff, raw SQLite bytes and replacement characters. No schema change is needed.

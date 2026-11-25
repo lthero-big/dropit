@@ -806,12 +806,18 @@ pub struct ExpiredItem {
     pub id: String,
 }
 
+/// Items removed by expiry, plus upload sessions whose in-process writers must abort.
+pub struct ExpireBatch {
+    pub items: Vec<ExpiredItem>,
+    pub upload_ids: Vec<String>,
+}
+
 /// Remove expired database state in one immediate transaction.
 ///
 /// File objects are never removed while this transaction is running.  Their
 /// keys are first put in `garbage`, so a process stop between the database
 /// commit and the filesystem pass is safe and retryable.
-pub fn expire(db: &mut Connection, time: i64) -> ApiResult<Vec<ExpiredItem>> {
+pub fn expire(db: &mut Connection, time: i64) -> ApiResult<ExpireBatch> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
     let items = {
@@ -896,10 +902,13 @@ pub fn expire(db: &mut Connection, time: i64) -> ApiResult<Vec<ExpiredItem>> {
     )?;
     tx.commit()?;
 
-    Ok(items
-        .into_iter()
-        .map(|(id, space_id, _, _)| ExpiredItem { space_id, id })
-        .collect())
+    Ok(ExpireBatch {
+        items: items
+            .into_iter()
+            .map(|(id, space_id, _, _)| ExpiredItem { space_id, id })
+            .collect(),
+        upload_ids: uploads,
+    })
 }
 
 pub struct UploadSession {
@@ -924,7 +933,8 @@ pub struct UploadChunk {
 pub struct NewUpload {
     pub id: String,
     pub space_id: String,
-    pub user_id: String,
+    /// `None` binds SQL NULL. Room sessions stay out of the account quota.
+    pub user_id: Option<String>,
     pub principal: String,
     pub filename: crate::js::JsString,
     pub mime: String,
@@ -944,18 +954,16 @@ pub struct NewUpload {
 /// the immediate transaction. The user id comes from that authenticated session.
 pub fn create_upload_for_user(db: &mut Connection, upload: &mut NewUpload) -> ApiResult<()> {
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let space = check_writer(
-        &tx,
-        &upload.space_id,
-        Some(&upload.user_id),
-        upload.created_at,
-    )?;
+    let Some(user_id) = upload.user_id.as_deref() else {
+        return Err(ApiError::internal("user upload"));
+    };
+    let space = check_writer(&tx, &upload.space_id, Some(user_id), upload.created_at)?;
     // Activity does not extend the session. A space that expires sooner wins.
     upload.expires_at = upload.expires_at.min(space.expires_at.unwrap_or(i64::MAX));
     check_capacity(
         &tx,
         &upload.space_id,
-        Some(&upload.user_id),
+        Some(user_id),
         upload.size,
         upload.quota,
         upload.max_items,
@@ -976,6 +984,53 @@ pub fn create_upload_for_user(db: &mut Connection, upload: &mut NewUpload) -> Ap
             upload.id,
             upload.space_id,
             upload.user_id,
+            upload.principal,
+            upload.filename,
+            upload.mime,
+            upload.size,
+            upload.chunk_size,
+            upload.created_at,
+            upload.expires_at,
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Reserve a room session. `userId` stays NULL so it never counts on `/api/me`.
+///
+/// The room capability is the authority. A live room is required again inside
+/// the transaction so a closed or expired room cannot take a reservation.
+pub fn create_upload_for_room(db: &mut Connection, upload: &mut NewUpload) -> ApiResult<()> {
+    if upload.user_id.is_some() {
+        return Err(ApiError::internal("room upload user"));
+    }
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let space = room(&tx, &upload.space_id, upload.created_at)?;
+    upload.expires_at = upload.expires_at.min(space.expires_at.unwrap_or(i64::MAX));
+    check_capacity(
+        &tx,
+        &upload.space_id,
+        None,
+        upload.size,
+        upload.quota,
+        upload.max_items,
+        upload.created_at,
+    )?;
+    let (total, own): (i64, i64) = tx.query_row(
+        "SELECT count(*), coalesce(sum(principal=?1),0) FROM uploads WHERE expiresAt>?2",
+        params![upload.principal, upload.created_at],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if total >= upload.sessions_global || own >= upload.sessions_per_user {
+        return Err(ApiError::new(429, "UPLOAD_SESSION_LIMIT"));
+    }
+    tx.execute(
+        "INSERT INTO uploads (id,spaceId,userId,principal,filename,mime,size,chunkSize,createdAt,expiresAt)
+         VALUES (?1,?2,NULL,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            upload.id,
+            upload.space_id,
             upload.principal,
             upload.filename,
             upload.mime,
@@ -1075,6 +1130,37 @@ pub fn delete_upload(db: &mut Connection, id: &str) -> ApiResult<Vec<String>> {
     tx.execute("DELETE FROM uploads WHERE id=?", [id])?;
     tx.commit()?;
     Ok(keys)
+}
+
+/// Drop private sessions and authenticated room sessions for a disabled account.
+///
+/// Anonymous `room:<spaceId>` sessions are left for the room holder.
+pub fn delete_user_uploads(db: &mut Connection, user_id: &str) -> ApiResult<Vec<String>> {
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let principal = format!("user:{user_id}");
+    let mut stmt = tx.prepare("SELECT id FROM uploads WHERE userId=? OR principal=?")?;
+    let ids = stmt
+        .query_map(params![user_id, principal], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    drop(stmt);
+    for id in &ids {
+        discard_upload(&tx, id)?;
+    }
+    tx.commit()?;
+    Ok(ids)
+}
+
+fn discard_upload(tx: &rusqlite::Transaction<'_>, id: &str) -> ApiResult<()> {
+    let mut stmt = tx.prepare("SELECT key FROM upload_chunks WHERE uploadId=?")?;
+    let keys = stmt
+        .query_map([id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    drop(stmt);
+    for key in keys {
+        tx.execute("INSERT OR IGNORE INTO garbage (key) VALUES (?)", [key])?;
+    }
+    tx.execute("DELETE FROM uploads WHERE id=?", [id])?;
+    Ok(())
 }
 
 /// Drop expired sessions, sessions in expired spaces, and disabled users' sessions.
@@ -1186,6 +1272,77 @@ pub fn complete_upload(
             device.map(|device| &device.id),
             device.map(|device| &device.name),
             device.map(|device| &device.kind),
+        ],
+    )?;
+    let inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
+    tx.commit()?;
+    Ok(inserted)
+}
+
+/// Release a room reservation and insert the file in one immediate transaction.
+///
+/// The item stays in the room space with a NULL user id. It is not a private-space object.
+pub fn complete_room_upload(
+    db: &mut Connection,
+    config: &Config,
+    space_id: &str,
+    upload_id: &str,
+    input: FileInput,
+) -> ApiResult<Item> {
+    let time = now();
+    if let Some(group) = &input.group {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        room(&tx, space_id, time)?;
+        ensure_group(&tx, space_id, group, time)?;
+        tx.commit()?;
+    }
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let space = room(&tx, space_id, time)?;
+    let upload = upload_session(&tx, upload_id, time)?.ok_or(ApiError::NOT_FOUND)?;
+    if upload.space_id != space_id || upload.user_id.is_some() {
+        return Err(ApiError::NOT_FOUND);
+    }
+    discard_upload(&tx, upload_id)?;
+    let (used, reserved): (i64, i64) = tx.query_row(
+        "SELECT coalesce(sum(storedBytes),0),coalesce((SELECT sum(size) FROM uploads WHERE spaceId=? AND expiresAt>?),0) FROM items WHERE spaceId=?",
+        params![space_id, time, space_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if used + reserved + input.stored_bytes > config.room_quota {
+        return Err(ApiError::new(413, "QUOTA_EXCEEDED"));
+    }
+    let count: i64 = tx.query_row(
+        "SELECT count(*) + (SELECT count(*) FROM uploads WHERE spaceId=? AND expiresAt>?) FROM items WHERE spaceId=?",
+        params![space_id, time, space_id],
+        |row| row.get(0),
+    )?;
+    if count >= config.max_items.min(100) {
+        return Err(ApiError::new(413, "ITEM_LIMIT"));
+    }
+    let id = Uuid::new_v4().to_string();
+    let expires_at = space
+        .expires_at
+        .unwrap_or(i64::MAX)
+        .min(time + config.retention);
+    let device = input.device.as_ref();
+    tx.execute(
+        "INSERT INTO items (id,spaceId,userId,kind,filename,mime,size,storedBytes,fileKey,thumbnailKey,createdAt,expiresAt,updatedAt,groupName,deviceId,deviceName,deviceKind)
+         VALUES (?1,?2,NULL,'file',?3,?4,?5,?6,?7,?8,?9,?10,?9,?11,?12,?13,?14)",
+        params![
+            id,
+            space_id,
+            input.filename,
+            input.mime,
+            input.size,
+            input.stored_bytes,
+            input.file_key,
+            input.thumbnail_key,
+            time,
+            expires_at,
+            input.group,
+            device.map(|d| &d.id),
+            device.map(|d| &d.name),
+            device.map(|d| &d.kind),
         ],
     )?;
     let inserted = tx.query_row("SELECT * FROM items WHERE id=?", [id], item)?;
@@ -1411,8 +1568,9 @@ mod tests {
             .unwrap();
 
         let expired = expire(&mut connection, 1000).unwrap();
-        assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0].id, "i");
+        assert_eq!(expired.items.len(), 1);
+        assert_eq!(expired.items[0].id, "i");
+        assert_eq!(expired.upload_ids, vec!["upload".to_owned()]);
         let keys = garbage_keys(&connection).unwrap();
         assert!(
             keys.iter()

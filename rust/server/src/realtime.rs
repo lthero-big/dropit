@@ -491,6 +491,10 @@ async fn run_room(
     bearer: Option<String>,
 ) {
     let app = sub.app.clone();
+    // Same critical section as private `run`: gate, then drain, then the DB read.
+    // A room write takes this gate before it commits and publishes, so it cannot
+    // land between the read and the lock. Drain only what was already queued.
+    // Drop the gate before send; holding it across the socket would stall writers.
     let snapshot = {
         let _gate = app.realtime.gate.lock().await;
         if !room_authorized(&app, &room_token, bearer.as_deref()).await {
@@ -500,8 +504,12 @@ async fn run_room(
         while let Ok(payload) = sub.receiver.try_recv() {
             consume(&sub, payload.len());
         }
+        // These two waits stay on either side of the read, with no drain between
+        // them. A write that finishes while either is held means the gate was not.
+        test_barrier("room-snapshot-before-read").await;
         let token = room_token.clone();
-        app.db
+        let snapshot = app
+            .db
             .run(move |db| {
                 let id = token
                     .split_once('.')
@@ -510,7 +518,11 @@ async fn run_room(
                     .to_owned();
                 db::snapshot(db, db::room(db, &id, crate::now())?)
             })
-            .await
+            .await;
+        if snapshot.is_ok() {
+            test_barrier("room-snapshot-after-read").await;
+        }
+        snapshot
     };
     let Ok(snapshot) = snapshot else {
         close(&mut socket, 1011, "Snapshot unavailable").await;
@@ -585,6 +597,35 @@ async fn send(socket: &mut WebSocket, message: Message) -> Result<(), ()> {
         .map_err(|_| ())?
         .map_err(|_| ())
 }
+/// Test-only rendezvous. Unset `DROPIT_BARRIER_DIR` is a no-op.
+///
+/// The harness writes `<name>.release` after observing `<name>.reached`.
+/// Callers that hold `realtime.gate` keep holding it across this wait.
+pub(crate) async fn test_barrier(name: &str) {
+    let Ok(dir) = std::env::var("DROPIT_BARRIER_DIR") else {
+        return;
+    };
+    if dir.is_empty() {
+        return;
+    }
+    let root = std::path::PathBuf::from(dir);
+    let reached = root.join(format!("{name}.reached"));
+    let release = root.join(format!("{name}.release"));
+    if tokio::fs::write(&reached, b"1").await.is_err() {
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if tokio::fs::try_exists(&release).await.unwrap_or(false) {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn close(socket: &mut WebSocket, code: u16, reason: &'static str) {
     let _ = send(
         socket,
