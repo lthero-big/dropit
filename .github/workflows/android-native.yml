@@ -1,0 +1,59 @@
+name: Android Native APK
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "apps/android/**"
+      - ".github/workflows/android-native.yml"
+permissions:
+  contents: read
+jobs:
+  android-native:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build info
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          VERSION=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)
+          SHORT="${SHA:0:7}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "SHORT=$SHORT" >> "$GITHUB_ENV"
+          echo "DROPIT_BUILD_COMMIT=$SHA" >> "$GITHUB_ENV"
+          echo "DROPIT_BUILD_DATE=$BUILD_DATE" >> "$GITHUB_ENV"
+          echo "Native build: version=$VERSION commit=$SHORT date=$BUILD_DATE"
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/dropit.p12"
+            echo "DROPIT_KEYSTORE=$RUNNER_TEMP/dropit.p12" >> "$GITHUB_ENV"
+            echo "::add-mask::$KEYSTORE_PASSWORD"
+            echo "DROPIT_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          else
+            echo "No ANDROID_KEYSTORE_B64 secret: using default debug key"
+          fi
+      - name: Test and assemble debug APK
+        run: chmod +x gradlew && ./gradlew testDebugUnitTest assembleDebug --no-daemon
+      - name: Name the APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk "out/dropit-android-native-$VERSION-$SHORT.apk"
+          rm -f "$RUNNER_TEMP/dropit.p12"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dropit-android-native-debug-apk
+          path: apps/android/out/*.apk
+          retention-days: 30
