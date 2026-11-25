@@ -23,7 +23,7 @@ android {
         minSdk = 23
         targetSdk = 35
         versionCode = 6
-        versionName = "0.4.0-native"
+        versionName = "0.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -89,6 +89,14 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    // Track live-server regression env vars so Gradle never serves a stale offline test cache
+    // when running RealServerProtocolRegressionTest against a local dropit server.
+    inputs.property("dropitLiveServerUrl", System.getenv("DROPIT_LIVE_SERVER_URL") ?: "")
+    inputs.property("dropitRequireLiveServer", System.getenv("DROPIT_REQUIRE_LIVE_SERVER") ?: "")
+    inputs.property("dropitLiveExpectedUpdateSha256", System.getenv("DROPIT_LIVE_EXPECTED_UPDATE_SHA256") ?: "")
 }
 
 dependencies {
