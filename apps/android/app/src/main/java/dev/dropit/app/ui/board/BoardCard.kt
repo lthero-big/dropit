@@ -619,10 +619,10 @@ private fun CardMetadataFooter(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
-        itemVerticalAlignment = Alignment.CenterVertically,
     ) {
         if (item.pinned) {
             Row(
+                modifier = Modifier.align(Alignment.CenterVertically),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(3.dp),
             ) {
@@ -644,6 +644,7 @@ private fun CardMetadataFooter(
         item.device?.let { device ->
             val devColor = colors.deviceColor(device.kind)
             Row(
+                modifier = Modifier.align(Alignment.CenterVertically),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
@@ -668,6 +669,7 @@ private fun CardMetadataFooter(
                 text = relativeTime,
                 style = MaterialTheme.typography.labelSmall,
                 color = colors.fg3,
+                modifier = Modifier.align(Alignment.CenterVertically),
             )
         }
 
@@ -676,6 +678,7 @@ private fun CardMetadataFooter(
                 text = "已编辑",
                 style = MaterialTheme.typography.labelSmall,
                 color = colors.fg4,
+                modifier = Modifier.align(Alignment.CenterVertically),
             )
         }
 
@@ -683,6 +686,7 @@ private fun CardMetadataFooter(
         item.group?.takeIf { it.isNotBlank() }?.let { groupName ->
             val dotColor = groupDotColor(groupName, colors.isDark, colors.fg4)
             Surface(
+                modifier = Modifier.align(Alignment.CenterVertically),
                 shape = shapes.pill,
                 color = colors.surface0,
                 border = BorderStroke(1.dp, colors.line2),
@@ -713,6 +717,7 @@ private fun CardMetadataFooter(
         // Tags
         item.tags.take(3).forEach { tag ->
             Surface(
+                modifier = Modifier.align(Alignment.CenterVertically),
                 shape = shapes.pill,
                 color = colors.surface2,
                 tonalElevation = 0.dp,
@@ -731,6 +736,7 @@ private fun CardMetadataFooter(
                 text = expiry.label,
                 style = DropitMonoTypography.meta,
                 color = if (expiry.isExpiringSoon) colors.brand else colors.fg3,
+                modifier = Modifier.align(Alignment.CenterVertically),
             )
         }
     }
