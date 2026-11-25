@@ -359,7 +359,8 @@ private fun DeviceAuthContent(
     val shapes = DropitTheme.shapes
     val context = LocalContext.current
     val fontScale = LocalDensity.current.fontScale
-    var copiedCode by remember { mutableStateOf(false) }
+    val currentUserCode = (state.deviceAuthState as? DeviceAuthState.WaitingForApproval)?.authorization?.userCode
+    var copiedCode by remember(currentUserCode) { mutableStateOf(false) }
 
     Column(
         modifier = Modifier

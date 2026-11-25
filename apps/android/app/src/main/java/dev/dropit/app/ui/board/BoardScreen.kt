@@ -345,6 +345,7 @@ fun BoardScreen(
 
     if (showComposeSheet && !state.isReadOnly) {
         ComposeOrEditTextSheet(
+            draftKey = "compose",
             title = "发送文本",
             submitLabel = "发送",
             initialText = state.composerDraft,
@@ -386,6 +387,7 @@ fun BoardScreen(
 
     editTextItem?.let { item ->
         ComposeOrEditTextSheet(
+            draftKey = item.id,
             title = "编辑文本",
             submitLabel = "保存",
             initialText = item.text.orEmpty(),

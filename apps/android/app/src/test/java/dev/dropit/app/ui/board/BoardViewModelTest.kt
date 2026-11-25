@@ -1,13 +1,8 @@
 package dev.dropit.app.ui.board
 
 import android.net.Uri
-import dev.dropit.app.core.auth.AuthRepository
-import dev.dropit.app.core.auth.AuthSessionState
-import dev.dropit.app.core.auth.DeviceAuthState
-import dev.dropit.app.core.auth.DevicePollOutcome
 import dev.dropit.app.core.network.ApiError
 import dev.dropit.app.core.network.ClipItem
-import dev.dropit.app.core.network.DeviceAuthorizeResponse
 import dev.dropit.app.core.network.GroupInfo
 import dev.dropit.app.core.network.MeResponse
 import dev.dropit.app.core.network.OptionalField
@@ -16,8 +11,6 @@ import dev.dropit.app.core.network.SessionExpiredEvent
 import dev.dropit.app.core.network.Space
 import dev.dropit.app.core.network.TargetScope
 import dev.dropit.app.core.network.User
-import dev.dropit.app.core.network.VerifiedServer
-import dev.dropit.app.core.network.VersionInfo
 import dev.dropit.app.core.network.WsEvent
 import dev.dropit.app.core.realtime.BoardSnapshotState
 import dev.dropit.app.core.realtime.BoardStateReducer
@@ -29,14 +22,15 @@ import dev.dropit.app.core.repository.StagedShareFile
 import dev.dropit.app.core.repository.TransferManager
 import dev.dropit.app.core.repository.TransferTask
 import dev.dropit.app.core.repository.UploadFileRequest
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -51,6 +45,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class BoardViewModelTest {
@@ -61,7 +59,6 @@ class BoardViewModelTest {
     private lateinit var boardRepo: FakeBoardRepository
     private lateinit var realtime: FakeRealtimeBridge
     private lateinit var transferManager: FakeTransferManager
-    private lateinit var authRepo: FakeBoardAuthRepository
     private lateinit var sessionExpiredFlow: MutableSharedFlow<SessionExpiredEvent>
 
     private val personalSpace = Space(
@@ -94,7 +91,6 @@ class BoardViewModelTest {
         boardRepo = FakeBoardRepository()
         realtime = FakeRealtimeBridge()
         transferManager = FakeTransferManager()
-        authRepo = FakeBoardAuthRepository(serverOrigin = "https://dropit.lthero.com")
         sessionExpiredFlow = MutableSharedFlow(extraBufferCapacity = 4)
     }
 
@@ -105,16 +101,16 @@ class BoardViewModelTest {
 
     private fun createViewModel(
         onSessionExpired: () -> Unit = {},
+        ioDispatcher: CoroutineDispatcher = testDispatcher,
         autoLoad: Boolean = true,
     ): BoardViewModel = BoardViewModel(
         spaceRepository = spaceRepo,
         boardRepository = boardRepo,
         realtimeBridge = realtime,
         transferManager = transferManager,
-        authRepository = authRepo,
         sessionExpiredEvents = sessionExpiredFlow,
         onSessionExpired = onSessionExpired,
-        ioDispatcher = testDispatcher,
+        ioDispatcher = ioDispatcher,
         autoLoad = autoLoad,
     )
 
@@ -165,34 +161,27 @@ class BoardViewModelTest {
         val vm = createViewModel()
         advanceUntilIdle()
 
-        // All items
         assertEquals(3, vm.uiState.value.filteredItems.size)
         assertEquals(1, vm.uiState.value.ungroupedCount)
 
-        // Filter by group "工作"
         vm.selectGroupFilter(GroupFilter.Named("工作"))
         assertEquals(listOf("1", "2"), vm.uiState.value.filteredItems.map { it.id })
 
-        // Narrow to Files only
         vm.selectKindFilter(ContentTypeFilter.FILES)
         assertEquals(listOf("2"), vm.uiState.value.filteredItems.map { it.id })
 
-        // Switch to Ungrouped + All kinds
         vm.selectKindFilter(ContentTypeFilter.ALL)
         vm.selectGroupFilter(GroupFilter.Ungrouped)
         assertEquals(listOf("3"), vm.uiState.value.filteredItems.map { it.id })
 
-        // Search by Chinese filename across all groups
         vm.selectGroupFilter(GroupFilter.All)
         vm.setSearchExpanded(true)
         vm.setSearchQuery("纪要")
         assertEquals(listOf("2"), vm.uiState.value.filteredItems.map { it.id })
 
-        // Search by tag
         vm.setSearchQuery("android")
         assertEquals(listOf("1"), vm.uiState.value.filteredItems.map { it.id })
 
-        // Collapsing search clears query
         vm.setSearchExpanded(false)
         assertEquals("", vm.uiState.value.searchQuery)
         assertEquals(3, vm.uiState.value.filteredItems.size)
@@ -207,13 +196,11 @@ class BoardViewModelTest {
         val vm = createViewModel()
         advanceUntilIdle()
 
-        // Switch to invited read-only space
         vm.selectSpace(readOnlySpace.id)
         advanceUntilIdle()
 
         assertTrue(vm.uiState.value.isReadOnly)
 
-        // Every write operation must be blocked before hitting BoardRepository
         vm.sendText("attempt write")
         vm.sendFromClipboard("clipboard write")
         vm.editText("t1", "edited")
@@ -228,7 +215,6 @@ class BoardViewModelTest {
         assertEquals(0, boardRepo.mutationCallCount)
         assertNotNull(vm.uiState.value.snackbar)
 
-        // Read-only download is still permitted
         vm.downloadItem(fileItem)
         advanceUntilIdle()
         assertEquals(1, transferManager.downloadedItems.size)
@@ -241,7 +227,6 @@ class BoardViewModelTest {
         val vm = createViewModel()
         advanceUntilIdle()
 
-        // 1. Send text + clipboard empty rejection + clipboard valid send
         vm.sendFromClipboard("   ")
         assertTrue(vm.uiState.value.snackbar!!.message.contains("剪贴板为空"))
         assertEquals(0, boardRepo.mutationCallCount)
@@ -252,23 +237,19 @@ class BoardViewModelTest {
         val created = vm.uiState.value.allItems.first()
         assertEquals("来自剪贴板的文本", created.text)
 
-        // 2. Edit text
         vm.editText(created.id, "已修改的文本")
         advanceUntilIdle()
         assertEquals("已修改的文本", vm.uiState.value.allItems.first().text)
 
-        // 3. Pin & Unpin
         vm.togglePin(vm.uiState.value.allItems.first())
         advanceUntilIdle()
         assertTrue(vm.uiState.value.allItems.first().pinned)
 
-        // 4. Update group & tags
         vm.updateItemLabels(created.id, OptionalField.Present("工作"), listOf("重点", "评审"))
         advanceUntilIdle()
         assertEquals("工作", vm.uiState.value.allItems.first().group)
         assertEquals(listOf("重点", "评审"), vm.uiState.value.allItems.first().tags)
 
-        // 5. Group CRUD & reserved name validation
         vm.createGroup("全部")
         assertTrue(vm.uiState.value.snackbar!!.message.contains("保留名称"))
 
@@ -287,7 +268,6 @@ class BoardViewModelTest {
         assertFalse("灵感" in vm.uiState.value.groups)
         assertEquals(GroupFilter.All, vm.uiState.value.selectedGroupFilter)
 
-        // 6. Retract item
         vm.retractItem(created.id)
         advanceUntilIdle()
         assertTrue(vm.uiState.value.allItems.isEmpty())
@@ -303,7 +283,6 @@ class BoardViewModelTest {
         assertNotNull(vm.uiState.value.offlineBannerMessage)
         assertNull(vm.uiState.value.activeSpace)
 
-        // Network recovers -> retry succeeds
         spaceRepo.error = null
         vm.reconnectRealtime()
         advanceUntilIdle()
@@ -313,21 +292,88 @@ class BoardViewModelTest {
     }
 
     @Test
-    fun sessionExpired401_disconnectsRealtimePreservesServerAndNotifiesHost() = runTest(testDispatcher) {
+    fun sessionExpired401_thenReLoginSameServer_recoversAndHandlesSubsequent401() = runTest(testDispatcher) {
         var expiredCallbackCount = 0
-        val vm = createViewModel(onSessionExpired = { expiredCallbackCount++ })
-        advanceUntilIdle()
+        val vm = createViewModel(
+            onSessionExpired = { expiredCallbackCount++ },
+            autoLoad = false,
+        )
 
+        // Session generation 1
+        vm.activateSession("https://dropit.lthero.com#1")
+        advanceUntilIdle()
+        assertEquals(1, realtime.connectCount)
+        assertFalse(vm.uiState.value.sessionExpired)
+
+        // First 401 expires session 1
         sessionExpiredFlow.tryEmit(SessionExpiredEvent("https://dropit.lthero.com", "/api/spaces/sp-personal/items"))
         advanceUntilIdle()
-
         assertTrue(vm.uiState.value.sessionExpired)
         assertEquals(1, expiredCallbackCount)
         assertTrue(realtime.disconnected)
-        // Crucial: clearServer MUST be false so serverOrigin is preserved for re-authorization
-        assertEquals(listOf(false), authRepo.logoutClearServerCalls)
-        assertEquals("https://dropit.lthero.com", authRepo.sessionState.value.serverOrigin)
-        assertFalse(authRepo.sessionState.value.isSignedIn)
+
+        // User re-authenticates to the SAME server -> session generation 2
+        vm.activateSession("https://dropit.lthero.com#2")
+        advanceUntilIdle()
+        assertFalse(vm.uiState.value.sessionExpired)
+        assertEquals(2, realtime.connectCount)
+        assertFalse(realtime.disconnected)
+
+        // Foreground resume works again after recovery
+        vm.onBackground()
+        vm.onForeground()
+        assertEquals(ConnectionState.CONNECTED, realtime.connectionState.value)
+
+        // Second 401 on the new session must be handled again (not stuck permanently ignored!)
+        sessionExpiredFlow.tryEmit(SessionExpiredEvent("https://dropit.lthero.com", "/api/spaces/sp-personal/items"))
+        advanceUntilIdle()
+        assertTrue(vm.uiState.value.sessionExpired)
+        assertEquals(2, expiredCallbackCount)
+        assertTrue(realtime.disconnected)
+    }
+
+    @Test
+    fun uiCallbacks_executeOnMainThreadNotIoDispatcher() = runBlocking {
+        val mainExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "test-main-thread") }
+        val ioExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "test-io-thread") }
+        val mainDispatcher = mainExecutor.asCoroutineDispatcher()
+        val ioDispatcher = ioExecutor.asCoroutineDispatcher()
+        try {
+            Dispatchers.setMain(mainDispatcher)
+            val fileItem = ClipItem(id = "f-share", spaceId = "sp-personal", kind = "file", filename = "report.pdf", size = 1024)
+            transferManager.shareResult = Result.success(Uri.EMPTY)
+
+            val vm = createViewModel(ioDispatcher = ioDispatcher, autoLoad = true)
+
+            // Wait until initial load finishes and activeScope is populated
+            val deadline = System.currentTimeMillis() + 3_000L
+            while (vm.uiState.value.activeScope == null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10)
+            }
+            assertNotNull(vm.uiState.value.activeScope)
+
+            val sendThread = AtomicReference<String>()
+            val sendLatch = CountDownLatch(1)
+            vm.sendText("hello thread check") {
+                sendThread.set(Thread.currentThread().name)
+                sendLatch.countDown()
+            }
+            assertTrue(sendLatch.await(3, TimeUnit.SECONDS))
+            assertEquals("test-main-thread", sendThread.get())
+
+            val shareThread = AtomicReference<String>()
+            val shareLatch = CountDownLatch(1)
+            vm.prepareFileForShare(fileItem) { _ ->
+                shareThread.set(Thread.currentThread().name)
+                shareLatch.countDown()
+            }
+            assertTrue(shareLatch.await(3, TimeUnit.SECONDS))
+            assertEquals("test-main-thread", shareThread.get())
+        } finally {
+            Dispatchers.setMain(testDispatcher)
+            mainExecutor.shutdownNow()
+            ioExecutor.shutdownNow()
+        }
     }
 
     // ---- Test Doubles ----
@@ -465,9 +511,11 @@ class BoardViewModelTest {
         override val boardState: StateFlow<BoardSnapshotState> = _boardState.asStateFlow()
 
         var connectedScope: TargetScope? = null
+        var connectCount: Int = 0
         var disconnected: Boolean = false
 
         override fun connect(targetScope: TargetScope) {
+            connectCount++
             connectedScope = targetScope
             disconnected = false
             _boardState.value = BoardSnapshotState(scope = targetScope)
@@ -514,6 +562,7 @@ class BoardViewModelTest {
         override val activeCount: StateFlow<Int> = _activeCount.asStateFlow()
 
         val downloadedItems = mutableListOf<DownloadFileRequest>()
+        var shareResult: Result<Uri> = Result.failure(UnsupportedOperationException("pending"))
 
         override suspend fun enqueueUploads(requests: List<UploadFileRequest>): List<String> =
             requests.indices.map { "up-$it" }
@@ -529,44 +578,11 @@ class BoardViewModelTest {
             return "dl-${downloadedItems.size}"
         }
 
-        override suspend fun downloadForShare(item: ClipItem, targetScope: TargetScope): Result<Uri> =
-            Result.failure(UnsupportedOperationException("pending"))
+        override suspend fun downloadForShare(item: ClipItem, targetScope: TargetScope): Result<Uri> = shareResult
 
         override suspend fun cancel(taskId: String) = Unit
         override suspend fun retry(taskId: String) = Unit
         override suspend fun clearCompleted() = Unit
         override suspend fun clearAllForScopeSwitch() = Unit
-    }
-
-    private class FakeBoardAuthRepository(serverOrigin: String) : AuthRepository {
-        private val _sessionState = MutableStateFlow(AuthSessionState(serverOrigin = serverOrigin, isSignedIn = true))
-        override val sessionState: StateFlow<AuthSessionState> = _sessionState.asStateFlow()
-
-        private val _deviceAuthState = MutableStateFlow<DeviceAuthState>(DeviceAuthState.Idle)
-        override val deviceAuthState: StateFlow<DeviceAuthState> = _deviceAuthState.asStateFlow()
-
-        val logoutClearServerCalls = mutableListOf<Boolean>()
-
-        override suspend fun refreshSessionState(): AuthSessionState = _sessionState.value
-        override suspend fun verifyAndSaveServer(rawUrl: String): VerifiedServer =
-            VerifiedServer(rawUrl, VersionInfo("0.4.0", "dev", null, "docker"))
-        override suspend fun startDeviceAuthorization(serverOrigin: String, scopes: List<String>): DeviceAuthorizeResponse =
-            throw UnsupportedOperationException()
-        override suspend fun pollDeviceTokenOnce(serverOrigin: String, deviceCode: String): DevicePollOutcome =
-            DevicePollOutcome.Pending
-        override fun pollDeviceAuthorization(
-            serverOrigin: String,
-            authorization: DeviceAuthorizeResponse,
-            delayMillis: suspend (Long) -> Unit,
-        ): Flow<DeviceAuthState> = emptyFlow()
-        override suspend fun completeAuthorization(serverOrigin: String, token: String) = Unit
-        override suspend fun logout(clearServer: Boolean) {
-            logoutClearServerCalls.add(clearServer)
-            _sessionState.value = AuthSessionState(
-                serverOrigin = if (clearServer) null else _sessionState.value.serverOrigin,
-                isSignedIn = false,
-            )
-        }
-        override fun resetDeviceAuthState() = Unit
     }
 }

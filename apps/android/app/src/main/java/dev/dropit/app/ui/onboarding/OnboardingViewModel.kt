@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class OnboardingStep {
     SERVER_CONFIG,
@@ -77,26 +78,50 @@ class OnboardingViewModel(
         val cleaned = serverOrigin?.trim()?.takeIf { it.isNotEmpty() }
         val current = _uiState.value
         if (cleaned == null) {
-            if (current.step != OnboardingStep.SERVER_CONFIG) {
-                switchServer()
+            if (current.step != OnboardingStep.SERVER_CONFIG || current.configuredServerOrigin != null) {
+                authJob?.cancel()
+                authJob = null
+                authRepository.resetDeviceAuthState()
+                _uiState.update {
+                    it.copy(
+                        step = OnboardingStep.SERVER_CONFIG,
+                        configuredServerOrigin = null,
+                        verifiedServer = null,
+                        sessionExpiredNotice = false,
+                        deviceAuthState = DeviceAuthState.Idle,
+                        initialPollIntervalSeconds = null,
+                        browserOpened = false,
+                    )
+                }
             }
             return
         }
-        val shouldStart = current.configuredServerOrigin != cleaned ||
-            current.step != OnboardingStep.DEVICE_AUTH ||
-            (sessionExpired && !current.sessionExpiredNotice)
 
+        // If submitServerUrl() is currently verifying this exact server, let it finish and
+        // start device auth once with its VerifiedServer metadata intact.
+        if (current.isVerifyingServer && current.serverUrlInput == cleaned) {
+            return
+        }
+
+        val sameServerAlreadyActive = current.configuredServerOrigin == cleaned &&
+            current.step == OnboardingStep.DEVICE_AUTH &&
+            current.deviceAuthState !is DeviceAuthState.Idle
+
+        if (sameServerAlreadyActive && (!sessionExpired || current.sessionExpiredNotice)) {
+            return
+        }
+
+        val serverChanged = current.configuredServerOrigin != cleaned
         _uiState.update {
             it.copy(
                 step = OnboardingStep.DEVICE_AUTH,
-                serverUrlInput = it.serverUrlInput.ifBlank { cleaned },
+                serverUrlInput = if (serverChanged || it.serverUrlInput.isBlank()) cleaned else it.serverUrlInput,
                 configuredServerOrigin = cleaned,
-                sessionExpiredNotice = sessionExpired || it.sessionExpiredNotice,
+                verifiedServer = if (serverChanged) null else it.verifiedServer,
+                sessionExpiredNotice = sessionExpired || (!serverChanged && it.sessionExpiredNotice),
             )
         }
-        if (shouldStart && (current.deviceAuthState is DeviceAuthState.Idle || current.configuredServerOrigin != cleaned || sessionExpired)) {
-            startDeviceAuth(cleaned)
-        }
+        startDeviceAuth(cleaned)
     }
 
     fun onServerUrlChanged(value: String) {
@@ -132,9 +157,11 @@ class OnboardingViewModel(
             )
         }
 
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                val verified = authRepository.verifyAndSaveServer(normalized)
+                val verified = withContext(ioDispatcher) {
+                    authRepository.verifyAndSaveServer(normalized)
+                }
                 _uiState.update {
                     it.copy(
                         isVerifyingServer = false,
@@ -194,9 +221,11 @@ class OnboardingViewModel(
             )
         }
 
-        authJob = viewModelScope.launch(ioDispatcher) {
+        authJob = viewModelScope.launch {
             try {
-                val authorization = authRepository.startDeviceAuthorization(origin)
+                val authorization = withContext(ioDispatcher) {
+                    authRepository.startDeviceAuthorization(origin)
+                }
                 _uiState.update {
                     it.copy(
                         initialPollIntervalSeconds = authorization.interval.coerceAtLeast(1),
@@ -206,16 +235,18 @@ class OnboardingViewModel(
                         ),
                     )
                 }
-                authRepository.pollDeviceAuthorization(
-                    serverOrigin = origin,
-                    authorization = authorization,
-                    delayMillis = pollDelayMillis,
-                ).collect { state ->
-                    _uiState.update { current ->
-                        current.copy(
-                            deviceAuthState = state,
-                            sessionExpiredNotice = if (state is DeviceAuthState.Approved) false else current.sessionExpiredNotice,
-                        )
+                withContext(ioDispatcher) {
+                    authRepository.pollDeviceAuthorization(
+                        serverOrigin = origin,
+                        authorization = authorization,
+                        delayMillis = pollDelayMillis,
+                    ).collect { state ->
+                        _uiState.update { current ->
+                            current.copy(
+                                deviceAuthState = state,
+                                sessionExpiredNotice = if (state is DeviceAuthState.Approved) false else current.sessionExpiredNotice,
+                            )
+                        }
                     }
                 }
             } catch (e: ApiError) {
@@ -247,6 +278,7 @@ class OnboardingViewModel(
                 serverUrlInput = it.configuredServerOrigin ?: it.serverUrlInput,
                 serverError = null,
                 isServerOffline = false,
+                sessionExpiredNotice = false,
                 deviceAuthState = DeviceAuthState.Idle,
                 initialPollIntervalSeconds = null,
                 browserOpened = false,

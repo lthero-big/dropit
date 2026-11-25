@@ -5,7 +5,6 @@ import dev.dropit.app.core.auth.AuthSessionState
 import dev.dropit.app.core.auth.DeviceAuthState
 import dev.dropit.app.core.auth.DevicePollOutcome
 import dev.dropit.app.core.network.ApiError
-import dev.dropit.app.core.network.ApiErrorCode
 import dev.dropit.app.core.network.DeviceAuthorizeResponse
 import dev.dropit.app.core.network.VerifiedServer
 import dev.dropit.app.core.network.VersionInfo
@@ -66,6 +65,7 @@ class OnboardingViewModelTest {
 
         val state = vm.uiState.value
         assertEquals(listOf("https://dropit.example.com"), fakeAuth.verifiedUrls)
+        assertEquals(1, fakeAuth.startDeviceAuthCallCount)
         assertEquals(OnboardingStep.DEVICE_AUTH, state.step)
         assertEquals("https://dropit.example.com", state.configuredServerOrigin)
         assertNotNull(state.verifiedServer)
@@ -75,6 +75,49 @@ class OnboardingViewModelTest {
             (state.deviceAuthState as DeviceAuthState.WaitingForApproval).authorization.userCode,
         )
     }
+
+    @Test
+    fun submitServerUrl_whenSessionStateTriggersSyncEntry_startsDeviceAuthOnceAndKeepsVerifiedServer() =
+        runTest(testDispatcher) {
+            lateinit var vm: OnboardingViewModel
+            val fakeAuth = FakeAuthRepository(
+                pollStates = listOf(
+                    DeviceAuthState.WaitingForApproval(sampleAuth("ONCE-2026", interval = 5), 5),
+                ),
+                onServerSaved = { origin ->
+                    // Simulate AppViewModel -> DropitApp LaunchedEffect firing syncEntry mid-verification
+                    vm.syncEntry(origin, sessionExpired = false)
+                },
+            )
+            vm = OnboardingViewModel(
+                authRepository = fakeAuth,
+                ioDispatcher = testDispatcher,
+                pollDelayMillis = {},
+                autoStartDeviceAuth = false,
+            )
+
+            vm.onServerUrlChanged("dropit.example.com")
+            vm.submitServerUrl()
+            advanceUntilIdle()
+
+            // Simulate another LaunchedEffect syncEntry after submitServerUrl completes
+            vm.syncEntry("https://dropit.example.com", sessionExpired = false)
+            advanceUntilIdle()
+
+            val state = vm.uiState.value
+            assertEquals(1, fakeAuth.startDeviceAuthCallCount)
+            assertEquals(OnboardingStep.DEVICE_AUTH, state.step)
+            assertNotNull(state.verifiedServer)
+            assertEquals("0.4.0", state.verifiedServer?.versionInfo?.version)
+
+            // Switching server back to SERVER_CONFIG and submitting again starts a fresh authorization once
+            vm.switchServer()
+            assertEquals(OnboardingStep.SERVER_CONFIG, vm.uiState.value.step)
+            vm.submitServerUrl()
+            advanceUntilIdle()
+            assertEquals(2, fakeAuth.startDeviceAuthCallCount)
+            assertNotNull(vm.uiState.value.verifiedServer)
+        }
 
     @Test
     fun submitServerUrl_rejectsInsecureHttpAndCredentialsLocally() = runTest(testDispatcher) {
@@ -212,6 +255,12 @@ class OnboardingViewModelTest {
         assertEquals("https://dropit.lthero.com", state.configuredServerOrigin)
         assertTrue(state.sessionExpiredNotice)
         assertTrue(state.deviceAuthState is DeviceAuthState.WaitingForApproval)
+        assertEquals(1, fakeAuth.startDeviceAuthCallCount)
+
+        // Repeated identical syncEntry does not re-request device code
+        vm.syncEntry(serverOrigin = "https://dropit.lthero.com", sessionExpired = true)
+        advanceUntilIdle()
+        assertEquals(1, fakeAuth.startDeviceAuthCallCount)
     }
 
     private fun sampleAuth(code: String, interval: Int = 5) = DeviceAuthorizeResponse(
@@ -234,6 +283,7 @@ class OnboardingViewModelTest {
             interval = 5,
         ),
         var pollStates: List<DeviceAuthState> = emptyList(),
+        private val onServerSaved: (String) -> Unit = {},
     ) : AuthRepository {
         private val _sessionState = MutableStateFlow(AuthSessionState())
         override val sessionState: StateFlow<AuthSessionState> = _sessionState.asStateFlow()
@@ -242,6 +292,7 @@ class OnboardingViewModelTest {
         override val deviceAuthState: StateFlow<DeviceAuthState> = _deviceAuthState.asStateFlow()
 
         val verifiedUrls = mutableListOf<String>()
+        var startDeviceAuthCallCount = 0
 
         override suspend fun refreshSessionState(): AuthSessionState = _sessionState.value
 
@@ -249,6 +300,7 @@ class OnboardingViewModelTest {
             verifyError?.let { throw it }
             verifiedUrls.add(rawUrl)
             _sessionState.value = _sessionState.value.copy(serverOrigin = rawUrl)
+            onServerSaved(rawUrl)
             return VerifiedServer(
                 serverOrigin = rawUrl,
                 versionInfo = VersionInfo(version = "0.4.0", commit = "8843e66", install = "docker"),
@@ -259,6 +311,7 @@ class OnboardingViewModelTest {
             serverOrigin: String,
             scopes: List<String>,
         ): DeviceAuthorizeResponse {
+            startDeviceAuthCallCount++
             return authResponse
         }
 

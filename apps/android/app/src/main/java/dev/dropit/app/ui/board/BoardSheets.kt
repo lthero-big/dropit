@@ -422,6 +422,7 @@ private fun SheetActionRow(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ComposeOrEditTextSheet(
+    draftKey: Any,
     title: String,
     submitLabel: String,
     initialText: String,
@@ -437,8 +438,8 @@ fun ComposeOrEditTextSheet(
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var text by remember(initialText) { mutableStateOf(initialText) }
-    var selectedGroup by remember(initialGroup) { mutableStateOf(initialGroup) }
+    var text by remember(draftKey) { mutableStateOf(initialText) }
+    var selectedGroup by remember(draftKey) { mutableStateOf(initialGroup) }
     val byteCount = remember(text) { ClipFormatting.utf8ByteCount(text) }
     val isOverLimit = maxTextBytes > 0L && byteCount > maxTextBytes
 

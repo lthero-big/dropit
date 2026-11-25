@@ -4,7 +4,6 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import dev.dropit.app.core.auth.AuthRepository
 import dev.dropit.app.core.network.ApiError
 import dev.dropit.app.core.network.ApiErrorCode
 import dev.dropit.app.core.network.ClipItem
@@ -35,6 +34,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed class GroupFilter {
     data object All : GroupFilter()
@@ -161,11 +161,10 @@ class BoardViewModel(
     private val boardRepository: BoardRepository,
     private val realtimeBridge: BoardRealtimeBridge,
     private val transferManager: TransferManager,
-    private val authRepository: AuthRepository,
     private val sessionExpiredEvents: Flow<SessionExpiredEvent>,
     private val onSessionExpired: () -> Unit = {},
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-    private val autoLoad: Boolean = true,
+    autoLoad: Boolean = true,
 ) : ViewModel() {
 
     constructor(
@@ -173,22 +172,24 @@ class BoardViewModel(
         boardRepository: BoardRepository,
         realtimeClient: RealtimeClient,
         transferManager: TransferManager,
-        authRepository: AuthRepository,
         sessionExpiredEvents: Flow<SessionExpiredEvent>,
         onSessionExpired: () -> Unit = {},
+        autoLoad: Boolean = true,
     ) : this(
         spaceRepository = spaceRepository,
         boardRepository = boardRepository,
         realtimeBridge = RealtimeClientBridge(realtimeClient),
         transferManager = transferManager,
-        authRepository = authRepository,
         sessionExpiredEvents = sessionExpiredEvents,
         onSessionExpired = onSessionExpired,
+        autoLoad = autoLoad,
     )
 
     private val _uiState = MutableStateFlow(BoardUiState())
     val uiState: StateFlow<BoardUiState> = _uiState.asStateFlow()
 
+    private var activeSessionKey: String? = null
+    private var loadJob: Job? = null
     private var copiedClearJob: Job? = null
     private var sessionExpiredHandled = false
 
@@ -200,13 +201,29 @@ class BoardViewModel(
         }
     }
 
+    /**
+     * Activates a fresh authenticated session (identified by `<serverOrigin>#<sessionGeneration>`).
+     * Ensures that re-authenticating to the same server after a 401 or logout cleanly resets
+     * expired state, reloads spaces/snapshot, reconnects WebSocket, and re-arms 401 handling.
+     */
+    fun activateSession(sessionKey: String) {
+        if (activeSessionKey == sessionKey && !_uiState.value.sessionExpired) {
+            return
+        }
+        activeSessionKey = sessionKey
+        sessionExpiredHandled = false
+        loadJob?.cancel()
+        copiedClearJob?.cancel()
+        _uiState.value = BoardUiState()
+        loadInitial()
+    }
+
     private fun observeRealtime() {
         viewModelScope.launch {
             realtimeBridge.connectionState.collect { connState ->
                 _uiState.update { current ->
                     val offlineMsg = when (connState) {
                         ConnectionState.CONNECTED -> null
-                        ConnectionState.RECONNECTING -> current.offlineBannerMessage
                         ConnectionState.UNAUTHORIZED -> null
                         else -> current.offlineBannerMessage
                     }
@@ -221,7 +238,6 @@ class BoardViewModel(
         viewModelScope.launch {
             realtimeBridge.boardState.collect { snap ->
                 _uiState.update { current ->
-                    // Ignore snapshots belonging to a stale scope when switching spaces.
                     val expectedScope = current.activeScope
                     if (expectedScope != null && snap.scope != null && snap.scope != expectedScope) {
                         return@update current
@@ -251,7 +267,8 @@ class BoardViewModel(
     }
 
     fun loadInitial() {
-        viewModelScope.launch(ioDispatcher) {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     isLoadingInitial = it.activeSpace == null,
@@ -260,10 +277,12 @@ class BoardViewModel(
                 )
             }
             try {
-                val (me, spaces) = coroutineScope {
-                    val meDeferred = async { spaceRepository.getMe() }
-                    val spacesDeferred = async { spaceRepository.getSpaces() }
-                    meDeferred.await() to spacesDeferred.await()
+                val (me, spaces) = withContext(ioDispatcher) {
+                    coroutineScope {
+                        val meDeferred = async { spaceRepository.getMe() }
+                        val spacesDeferred = async { spaceRepository.getSpaces() }
+                        meDeferred.await() to spacesDeferred.await()
+                    }
                 }
                 val currentActiveId = _uiState.value.activeSpace?.id
                 val targetSpace = spaces.firstOrNull { it.id == currentActiveId }
@@ -300,7 +319,7 @@ class BoardViewModel(
                         },
                     )
                 }
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 _uiState.update {
                     it.copy(
                         isLoadingInitial = false,
@@ -315,7 +334,9 @@ class BoardViewModel(
     private suspend fun connectAndHydrateScope(scope: TargetScope) {
         realtimeBridge.connect(scope)
         try {
-            val snapshot = boardRepository.fetchSnapshot(scope)
+            val snapshot = withContext(ioDispatcher) {
+                boardRepository.fetchSnapshot(scope)
+            }
             if (_uiState.value.activeScope == scope) {
                 realtimeBridge.applyLocalSnapshot(scope, snapshot)
             }
@@ -348,7 +369,7 @@ class BoardViewModel(
                 offlineBannerMessage = null,
             )
         }
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             connectAndHydrateScope(scope)
         }
     }
@@ -361,9 +382,11 @@ class BoardViewModel(
         }
         _uiState.update { it.copy(offlineBannerMessage = null) }
         realtimeBridge.reconnectNow()
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                val snapshot = boardRepository.fetchSnapshot(scope)
+                val snapshot = withContext(ioDispatcher) {
+                    boardRepository.fetchSnapshot(scope)
+                }
                 if (_uiState.value.activeScope == scope) {
                     realtimeBridge.applyLocalSnapshot(scope, snapshot)
                 }
@@ -442,9 +465,11 @@ class BoardViewModel(
         }
 
         _uiState.update { it.copy(isSendingText = true) }
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                val created = boardRepository.createText(scope, text, group = targetGroup)
+                val created = withContext(ioDispatcher) {
+                    boardRepository.createText(scope, text, group = targetGroup)
+                }
                 _uiState.update { current ->
                     val merged = (current.allItems.filterNot { it.id == created.id } + created)
                         .sortedWith(ITEM_COMPARATOR)
@@ -482,9 +507,11 @@ class BoardViewModel(
     fun enqueueFileUploads(requests: List<UploadFileRequest>) {
         if (!requireWritableScope()) return
         if (requests.isEmpty()) return
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                val ids = transferManager.enqueueUploads(requests)
+                val ids = withContext(ioDispatcher) {
+                    transferManager.enqueueUploads(requests)
+                }
                 val count = if (ids.isNotEmpty()) ids.size else requests.size
                 _uiState.update {
                     it.copy(
@@ -504,15 +531,17 @@ class BoardViewModel(
 
     fun downloadItem(item: ClipItem) {
         val scope = _uiState.value.activeScope ?: return
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                transferManager.enqueueDownload(
-                    DownloadFileRequest(
-                        item = item,
-                        targetScope = scope,
-                        shareAfterDownload = false,
-                    ),
-                )
+                withContext(ioDispatcher) {
+                    transferManager.enqueueDownload(
+                        DownloadFileRequest(
+                            item = item,
+                            targetScope = scope,
+                            shareAfterDownload = false,
+                        ),
+                    )
+                }
                 _uiState.update {
                     it.copy(
                         snackbar = BoardSnackbar(
@@ -531,9 +560,12 @@ class BoardViewModel(
 
     fun prepareFileForShare(item: ClipItem, onReady: (Uri) -> Unit) {
         val scope = _uiState.value.activeScope ?: return
-        viewModelScope.launch(ioDispatcher) {
-            val result = transferManager.downloadForShare(item, scope)
+        viewModelScope.launch {
+            val result = withContext(ioDispatcher) {
+                transferManager.downloadForShare(item, scope)
+            }
             result.onSuccess { uri ->
+                // Runs on Main thread so callers can safely invoke startActivity / Toast.
                 onReady(uri)
             }.onFailure { err ->
                 if (err is ApiError && err.isUnauthorized) {
@@ -560,9 +592,11 @@ class BoardViewModel(
         }
 
         _uiState.update { it.copy(isMutatingItem = true) }
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                val updated = boardRepository.editText(scope, itemId, trimmed)
+                val updated = withContext(ioDispatcher) {
+                    boardRepository.editText(scope, itemId, trimmed)
+                }
                 _uiState.update { current ->
                     val merged = (current.allItems.filterNot { it.id == updated.id } + updated)
                         .sortedWith(ITEM_COMPARATOR)
@@ -588,9 +622,11 @@ class BoardViewModel(
         val scope = _uiState.value.activeScope ?: return
         val nextPinned = !item.pinned
         _uiState.update { it.copy(isMutatingItem = true) }
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                val updated = boardRepository.setPinned(scope, item.id, nextPinned)
+                val updated = withContext(ioDispatcher) {
+                    boardRepository.setPinned(scope, item.id, nextPinned)
+                }
                 _uiState.update { current ->
                     val merged = (current.allItems.filterNot { it.id == updated.id } + updated)
                         .sortedWith(ITEM_COMPARATOR)
@@ -620,14 +656,16 @@ class BoardViewModel(
         val scope = _uiState.value.activeScope ?: return
         val cleanTags = tags.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
         _uiState.update { it.copy(isMutatingItem = true) }
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                val updated = boardRepository.updateLabels(
-                    scope = scope,
-                    itemId = itemId,
-                    tags = cleanTags,
-                    group = group,
-                )
+                val updated = withContext(ioDispatcher) {
+                    boardRepository.updateLabels(
+                        scope = scope,
+                        itemId = itemId,
+                        tags = cleanTags,
+                        group = group,
+                    )
+                }
                 _uiState.update { current ->
                     val merged = (current.allItems.filterNot { it.id == updated.id } + updated)
                         .sortedWith(ITEM_COMPARATOR)
@@ -652,9 +690,11 @@ class BoardViewModel(
         if (!requireWritableScope()) return
         val scope = _uiState.value.activeScope ?: return
         _uiState.update { it.copy(isMutatingItem = true) }
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                boardRepository.retractItem(scope, itemId)
+                withContext(ioDispatcher) {
+                    boardRepository.retractItem(scope, itemId)
+                }
                 _uiState.update { current ->
                     current.copy(
                         isMutatingItem = false,
@@ -682,9 +722,11 @@ class BoardViewModel(
             return
         }
         val cleanName = rawName.trim()
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                val updatedGroups = boardRepository.createGroup(scope, cleanName)
+                val updatedGroups = withContext(ioDispatcher) {
+                    boardRepository.createGroup(scope, cleanName)
+                }
                 _uiState.update {
                     it.copy(
                         groups = updatedGroups,
@@ -714,9 +756,11 @@ class BoardViewModel(
             return
         }
         val cleanName = rawNewName.trim()
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                val updatedGroups = boardRepository.renameGroup(scope, oldName, cleanName)
+                val updatedGroups = withContext(ioDispatcher) {
+                    boardRepository.renameGroup(scope, oldName, cleanName)
+                }
                 _uiState.update { current ->
                     val updatedItems = current.allItems.map { item ->
                         if (item.group == oldName) item.copy(group = cleanName) else item
@@ -745,9 +789,11 @@ class BoardViewModel(
     fun deleteGroup(name: String, onSuccess: () -> Unit = {}) {
         if (!requireWritableScope()) return
         val scope = _uiState.value.activeScope ?: return
-        viewModelScope.launch(ioDispatcher) {
+        viewModelScope.launch {
             try {
-                val updatedGroups = boardRepository.deleteGroup(scope, name)
+                val updatedGroups = withContext(ioDispatcher) {
+                    boardRepository.deleteGroup(scope, name)
+                }
                 _uiState.update { current ->
                     val updatedItems = current.allItems.map { item ->
                         if (item.group == name) item.copy(group = null) else item
@@ -795,7 +841,7 @@ class BoardViewModel(
         return true
     }
 
-    private suspend fun handleMutationError(error: ApiError) {
+    private fun handleMutationError(error: ApiError) {
         if (error.isUnauthorized) {
             handleSessionExpired()
             return
@@ -803,17 +849,17 @@ class BoardViewModel(
         showSnackbar(error.userMessage)
     }
 
-    private suspend fun handleSessionExpired() {
+    private fun handleSessionExpired() {
         if (sessionExpiredHandled) return
         sessionExpiredHandled = true
+        loadJob?.cancel()
         realtimeBridge.disconnect(clearState = false)
-        // Preserve serverOrigin so the user can re-authorize with device code directly.
-        authRepository.logout(clearServer = false)
         _uiState.update { it.copy(sessionExpired = true, offlineBannerMessage = null) }
         onSessionExpired()
     }
 
     override fun onCleared() {
+        loadJob?.cancel()
         copiedClearJob?.cancel()
         super.onCleared()
     }
@@ -829,7 +875,6 @@ class BoardViewModel(
         private val boardRepository: BoardRepository,
         private val realtimeClient: RealtimeClient,
         private val transferManager: TransferManager,
-        private val authRepository: AuthRepository,
         private val sessionExpiredEvents: Flow<SessionExpiredEvent>,
         private val onSessionExpired: () -> Unit,
     ) : ViewModelProvider.Factory {
@@ -840,9 +885,9 @@ class BoardViewModel(
                 boardRepository = boardRepository,
                 realtimeClient = realtimeClient,
                 transferManager = transferManager,
-                authRepository = authRepository,
                 sessionExpiredEvents = sessionExpiredEvents,
                 onSessionExpired = onSessionExpired,
+                autoLoad = false,
             ) as T
         }
     }

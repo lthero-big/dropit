@@ -15,6 +15,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
 sealed class AppRoute {
     data object Initializing : AppRoute()
     data class Onboarding(
@@ -22,7 +25,10 @@ sealed class AppRoute {
         val sessionExpired: Boolean,
     ) : AppRoute()
 
-    data class Main(val serverOrigin: String) : AppRoute()
+    data class Main(
+        val serverOrigin: String,
+        val sessionGeneration: Long,
+    ) : AppRoute()
 }
 
 data class AppRootUiState(
@@ -43,8 +49,12 @@ class AppViewModel(
     private val _uiState = MutableStateFlow(AppRootUiState())
     val uiState: StateFlow<AppRootUiState> = _uiState.asStateFlow()
 
+    private val sessionExpiredMutex = Mutex()
     private var initialized = false
     private var sessionExpiredNotice = false
+    private var sessionGeneration = 0L
+    private var activeMainOrigin: String? = null
+    private var handledGenerationFor401: Long = -1L
 
     init {
         observeSettings()
@@ -112,13 +122,28 @@ class AppViewModel(
         }
     }
 
+    /**
+     * Single owner for global 401 session expiration handling.
+     * Deduplicated per active session generation so concurrent 401 responses never trigger
+     * duplicate logout calls while still handling future 401s after re-authentication.
+     */
     fun markSessionExpired() {
         viewModelScope.launch(ioDispatcher) {
-            sessionExpiredNotice = true
-            container.realtimeClient.disconnect(clearState = false)
-            container.authRepository.logout(clearServer = false)
-            val origin = container.settingsStore.getServerOrigin()
-            updateRouteFromSession(origin, isSignedIn = false)
+            sessionExpiredMutex.withLock {
+                val currentGen = sessionGeneration
+                if (activeMainOrigin == null && handledGenerationFor401 == currentGen) {
+                    return@withLock
+                }
+                if (handledGenerationFor401 == currentGen && currentGen > 0L) {
+                    return@withLock
+                }
+                handledGenerationFor401 = currentGen
+                sessionExpiredNotice = true
+                container.realtimeClient.disconnect(clearState = false)
+                container.authRepository.logout(clearServer = false)
+                val origin = container.settingsStore.getServerOrigin()
+                updateRouteFromSession(origin, isSignedIn = false)
+            }
         }
     }
 
@@ -144,12 +169,25 @@ class AppViewModel(
     }
 
     private fun updateRouteFromSession(serverOrigin: String?, isSignedIn: Boolean) {
+        val cleanedOrigin = serverOrigin?.takeIf { it.isNotBlank() }
         val nextRoute = when {
-            isSignedIn && !serverOrigin.isNullOrBlank() -> AppRoute.Main(serverOrigin)
-            else -> AppRoute.Onboarding(
-                serverOrigin = serverOrigin?.takeIf { it.isNotBlank() },
-                sessionExpired = sessionExpiredNotice && !serverOrigin.isNullOrBlank(),
-            )
+            isSignedIn && cleanedOrigin != null -> {
+                if (activeMainOrigin != cleanedOrigin) {
+                    sessionGeneration += 1L
+                    activeMainOrigin = cleanedOrigin
+                }
+                AppRoute.Main(
+                    serverOrigin = cleanedOrigin,
+                    sessionGeneration = sessionGeneration,
+                )
+            }
+            else -> {
+                activeMainOrigin = null
+                AppRoute.Onboarding(
+                    serverOrigin = cleanedOrigin,
+                    sessionExpired = sessionExpiredNotice && cleanedOrigin != null,
+                )
+            }
         }
         _uiState.update { it.copy(route = nextRoute) }
     }

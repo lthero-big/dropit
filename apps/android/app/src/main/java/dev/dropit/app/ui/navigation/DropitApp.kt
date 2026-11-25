@@ -108,7 +108,7 @@ fun DropitApp(
 
         is AppRoute.Onboarding -> {
             val onboardingViewModel: OnboardingViewModel = viewModel(
-                key = "onboarding-${route.serverOrigin.orEmpty()}-${route.sessionExpired}",
+                key = "onboarding",
                 factory = OnboardingViewModel.Factory(
                     authRepository = container.authRepository,
                     initialServerOrigin = route.serverOrigin,
@@ -122,18 +122,21 @@ fun DropitApp(
         }
 
         is AppRoute.Main -> {
+            val sessionKey = "${route.serverOrigin}#${route.sessionGeneration}"
             val boardViewModel: BoardViewModel = viewModel(
-                key = "board-${route.serverOrigin}",
+                key = "board",
                 factory = BoardViewModel.Factory(
                     spaceRepository = container.spaceRepository,
                     boardRepository = container.boardRepository,
                     realtimeClient = container.realtimeClient,
                     transferManager = container.transferManager,
-                    authRepository = container.authRepository,
                     sessionExpiredEvents = container.apiClient.sessionExpiredEvents,
                     onSessionExpired = appViewModel::markSessionExpired,
                 ),
             )
+            LaunchedEffect(sessionKey) {
+                boardViewModel.activateSession(sessionKey)
+            }
             DropitMainScaffold(
                 serverOrigin = route.serverOrigin,
                 rootState = rootState,
