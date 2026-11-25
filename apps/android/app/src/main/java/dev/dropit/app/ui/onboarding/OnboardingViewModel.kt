@@ -30,6 +30,11 @@ enum class OnboardingStep {
     DEVICE_AUTH,
 }
 
+data class NativeGoogleSignInRequest(
+    val requestId: Long,
+    val clientId: String,
+)
+
 data class OnboardingUiState(
     val step: OnboardingStep = OnboardingStep.SERVER_CONFIG,
     val serverUrlInput: String = "",
@@ -52,7 +57,7 @@ data class OnboardingUiState(
     // OAuth login state (native Google Credential Manager + Custom Tabs fallback)
     val activeOAuthProvider: String? = null,
     val isNativeGoogleSignInInProgress: Boolean = false,
-    val pendingNativeGoogleClientId: String? = null,
+    val pendingNativeGoogleRequest: NativeGoogleSignInRequest? = null,
     val oauthFallbackNotice: String? = null,
     val isExchangingOAuthCode: Boolean = false,
     val pendingOAuthLaunchUrl: String? = null,
@@ -113,6 +118,8 @@ class OnboardingViewModel(
     private var providersJob: Job? = null
     private var deviceAuthJob: Job? = null
     private var lastLoadedProvidersOrigin: String? = null
+    private var nextNativeGoogleRequestId: Long = 0L
+    private var activeNativeGoogleRequestId: Long? = null
 
     init {
         observeOAuthCallbacks()
@@ -170,7 +177,7 @@ class OnboardingViewModel(
                         isPasswordLoginInProgress = false,
                         activeOAuthProvider = null,
                         isNativeGoogleSignInInProgress = false,
-                        pendingNativeGoogleClientId = null,
+                        pendingNativeGoogleRequest = null,
                         oauthFallbackNotice = null,
                         isExchangingOAuthCode = false,
                         pendingOAuthLaunchUrl = null,
@@ -222,7 +229,7 @@ class OnboardingViewModel(
                 isPasswordLoginInProgress = false,
                 activeOAuthProvider = null,
                 isNativeGoogleSignInInProgress = false,
-                pendingNativeGoogleClientId = null,
+                pendingNativeGoogleRequest = null,
                 oauthFallbackNotice = null,
                 isExchangingOAuthCode = false,
                 pendingOAuthLaunchUrl = null,
@@ -483,11 +490,16 @@ class OnboardingViewModel(
         // Prefer Android native Google Credential Manager when server publishes googleClientId.
         val googleClientId = current.googleClientId
         if (normalizedProvider == "google" && googleClientId != null) {
+            val requestId = ++nextNativeGoogleRequestId
+            activeNativeGoogleRequestId = requestId
             _uiState.update {
                 it.copy(
                     activeOAuthProvider = "google",
                     isNativeGoogleSignInInProgress = true,
-                    pendingNativeGoogleClientId = googleClientId,
+                    pendingNativeGoogleRequest = NativeGoogleSignInRequest(
+                        requestId = requestId,
+                        clientId = googleClientId,
+                    ),
                     oauthFallbackNotice = null,
                     authError = null,
                     isAuthOffline = false,
@@ -505,23 +517,40 @@ class OnboardingViewModel(
         )
     }
 
-    fun consumePendingNativeGoogleRequest() {
-        _uiState.update { it.copy(pendingNativeGoogleClientId = null) }
+    fun consumePendingNativeGoogleRequest(requestId: Long? = null) {
+        _uiState.update { current ->
+            val pending = current.pendingNativeGoogleRequest
+            if (pending != null && (requestId == null || pending.requestId == requestId)) {
+                current.copy(pendingNativeGoogleRequest = null)
+            } else {
+                current
+            }
+        }
     }
 
-    fun onNativeGoogleIdTokenResult(result: GoogleIdTokenFetchResult) {
+    fun onNativeGoogleIdTokenResult(
+        result: GoogleIdTokenFetchResult,
+        requestId: Long? = null,
+    ) {
+        val currentActiveId = activeNativeGoogleRequestId
+        if (requestId != null && (currentActiveId == null || requestId != currentActiveId)) {
+            return
+        }
+        activeNativeGoogleRequestId = null
+
         val current = _uiState.value
         val origin = current.configuredServerOrigin
         val invite = current.inviteCodeInput.trim().takeIf { it.isNotEmpty() }
 
         when (result) {
             GoogleIdTokenFetchResult.Cancelled -> {
-                // User dismissed the system Google account picker: silently restore idle button state.
+                // User dismissed the system Google account picker or composition was cancelled:
+                // silently restore idle button state so UI can never get stuck.
                 _uiState.update {
                     it.copy(
                         activeOAuthProvider = null,
                         isNativeGoogleSignInInProgress = false,
-                        pendingNativeGoogleClientId = null,
+                        pendingNativeGoogleRequest = null,
                         oauthFallbackNotice = null,
                     )
                 }
@@ -533,7 +562,7 @@ class OnboardingViewModel(
                         it.copy(
                             activeOAuthProvider = null,
                             isNativeGoogleSignInInProgress = false,
-                            pendingNativeGoogleClientId = null,
+                            pendingNativeGoogleRequest = null,
                         )
                     }
                     return
@@ -552,7 +581,7 @@ class OnboardingViewModel(
                         it.copy(
                             activeOAuthProvider = null,
                             isNativeGoogleSignInInProgress = false,
-                            pendingNativeGoogleClientId = null,
+                            pendingNativeGoogleRequest = null,
                         )
                     }
                     return
@@ -561,7 +590,7 @@ class OnboardingViewModel(
                     it.copy(
                         activeOAuthProvider = "google",
                         isNativeGoogleSignInInProgress = false,
-                        pendingNativeGoogleClientId = null,
+                        pendingNativeGoogleRequest = null,
                         oauthFallbackNotice = null,
                         isExchangingOAuthCode = true,
                         authError = null,
@@ -627,11 +656,12 @@ class OnboardingViewModel(
         invite: String?,
         fallbackNotice: String?,
     ) {
+        activeNativeGoogleRequestId = null
         _uiState.update {
             it.copy(
                 activeOAuthProvider = normalizedProvider,
                 isNativeGoogleSignInInProgress = false,
-                pendingNativeGoogleClientId = null,
+                pendingNativeGoogleRequest = null,
                 oauthFallbackNotice = fallbackNotice,
                 authError = null,
                 isAuthOffline = false,
@@ -681,6 +711,7 @@ class OnboardingViewModel(
     }
 
     fun cancelOAuthLogin() {
+        activeNativeGoogleRequestId = null
         viewModelScope.launch {
             runCatching {
                 withContext(ioDispatcher) { authRepository.clearPendingOAuthFlow() }
@@ -689,7 +720,7 @@ class OnboardingViewModel(
                 it.copy(
                     activeOAuthProvider = null,
                     isNativeGoogleSignInInProgress = false,
-                    pendingNativeGoogleClientId = null,
+                    pendingNativeGoogleRequest = null,
                     oauthFallbackNotice = null,
                     isExchangingOAuthCode = false,
                     pendingOAuthLaunchUrl = null,
@@ -700,10 +731,11 @@ class OnboardingViewModel(
 
     fun handleOAuthCallback(payload: OAuthCallbackPayload) {
         if (payload is OAuthCallbackPayload.Linked) return
+        activeNativeGoogleRequestId = null
         _uiState.update {
             it.copy(
                 isNativeGoogleSignInInProgress = false,
-                pendingNativeGoogleClientId = null,
+                pendingNativeGoogleRequest = null,
                 isExchangingOAuthCode = true,
                 authError = null,
                 isAuthOffline = false,
@@ -868,7 +900,7 @@ class OnboardingViewModel(
                 isPasswordLoginInProgress = false,
                 activeOAuthProvider = null,
                 isNativeGoogleSignInInProgress = false,
-                pendingNativeGoogleClientId = null,
+                pendingNativeGoogleRequest = null,
                 oauthFallbackNotice = null,
                 isExchangingOAuthCode = false,
                 pendingOAuthLaunchUrl = null,
@@ -883,6 +915,7 @@ class OnboardingViewModel(
     }
 
     private fun cancelBackgroundAuthJobs() {
+        activeNativeGoogleRequestId = null
         providersJob?.cancel()
         providersJob = null
         deviceAuthJob?.cancel()

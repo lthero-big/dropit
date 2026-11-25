@@ -408,14 +408,17 @@ class OnboardingViewModelTest {
 
         vm.startOAuthLogin("google")
         // Triggers native Credential Manager picker, NOT Custom Tabs
-        assertEquals("99999.apps.googleusercontent.com", vm.uiState.value.pendingNativeGoogleClientId)
+        val req = vm.uiState.value.pendingNativeGoogleRequest
+        assertNotNull(req)
+        assertEquals("99999.apps.googleusercontent.com", req?.clientId)
+        assertTrue((req?.requestId ?: 0L) > 0L)
         assertTrue(vm.uiState.value.isNativeGoogleSignInInProgress)
         assertNull(vm.uiState.value.pendingOAuthLaunchUrl)
 
-        vm.consumePendingNativeGoogleRequest()
-        assertNull(vm.uiState.value.pendingNativeGoogleClientId)
+        vm.consumePendingNativeGoogleRequest(req!!.requestId)
+        assertNull(vm.uiState.value.pendingNativeGoogleRequest)
 
-        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Success("eyJ.google.idtoken"))
+        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Success("eyJ.google.idtoken"), requestId = req.requestId)
         advanceUntilIdle()
 
         assertEquals(listOf("eyJ.google.idtoken" to null), fakeAuth.googleIdTokenCalls)
@@ -445,8 +448,9 @@ class OnboardingViewModelTest {
         advanceUntilIdle()
 
         vm.startOAuthLogin("google")
-        vm.consumePendingNativeGoogleRequest()
-        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Cancelled)
+        val firstReq = vm.uiState.value.pendingNativeGoogleRequest!!
+        vm.consumePendingNativeGoogleRequest(firstReq.requestId)
+        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Cancelled, requestId = firstReq.requestId)
         advanceUntilIdle()
 
         assertNull(vm.uiState.value.activeOAuthProvider)
@@ -455,6 +459,16 @@ class OnboardingViewModelTest {
         assertNull(vm.uiState.value.authError)
         assertEquals(0, fakeAuth.startOAuthLoginCalls.size)
         assertFalse(fakeAuth.sessionState.value.isSignedIn)
+
+        // Rapid retry with the same clientId must generate a strictly newer requestId
+        vm.startOAuthLogin("google")
+        val secondReq = vm.uiState.value.pendingNativeGoogleRequest!!
+        assertEquals(firstReq.clientId, secondReq.clientId)
+        assertTrue(secondReq.requestId > firstReq.requestId)
+
+        // Stale result from firstReq must be ignored while secondReq is active
+        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Cancelled, requestId = firstReq.requestId)
+        assertTrue(vm.uiState.value.isNativeGoogleSignInInProgress)
     }
 
     @Test

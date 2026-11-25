@@ -139,7 +139,7 @@ class SettingsViewModel(
                     _uiState.update {
                         it.copy(
                             isCheckingUpdate = false,
-                            updateStatusMessage = "服务器尚未发布 Android 安装包",
+                            updateStatusMessage = "暂未检测到已发布的 Android 安装包",
                             updateStatusIsError = false,
                         )
                     }

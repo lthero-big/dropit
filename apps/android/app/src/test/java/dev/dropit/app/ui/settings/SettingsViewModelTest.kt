@@ -146,7 +146,7 @@ class SettingsViewModelTest {
         updater.checkResult = UpdateCheckResult.NoReleasePublished
         vm.checkForUpdateManually()
         advanceUntilIdle()
-        assertTrue(vm.uiState.value.updateStatusMessage!!.contains("尚未发布"))
+        assertEquals("暂未检测到已发布的 Android 安装包", vm.uiState.value.updateStatusMessage)
 
         updater.checkResult = UpdateCheckResult.Error("网络连接失败")
         vm.triggerBackgroundUpdateCheck("https://dropit.lthero.com#offline")

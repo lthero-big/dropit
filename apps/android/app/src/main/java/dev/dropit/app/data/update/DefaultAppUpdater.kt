@@ -535,7 +535,13 @@ class DefaultAppUpdater(
                     if (!UpdateVersionComparator.isNewer(selfHosted.versionName, effectiveCode, currentVersionName, currentVersionCode)) {
                         UpdateCheckResult.UpToDate(currentVersionName)
                     } else {
-                        val ghSha = runCatching { fetchGitHubSha256(github) }.getOrNull()
+                        val ghSha = try {
+                            fetchGitHubSha256(github)
+                        } catch (ce: CancellationException) {
+                            throw ce
+                        } catch (_: Exception) {
+                            null
+                        }
                         val merged = selfHosted.copy(
                             versionCode = effectiveCode,
                             notes = selfHosted.notes.ifBlank { github.notes },
@@ -577,7 +583,13 @@ class DefaultAppUpdater(
         )
 
     private suspend fun buildVerifiedGitHubManifest(candidate: GitHubReleaseCandidate): AppUpdateManifest? {
-        val sha256 = runCatching { fetchGitHubSha256(candidate) }.getOrNull() ?: return null
+        val sha256 = try {
+            fetchGitHubSha256(candidate)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            null
+        } ?: return null
         val manifest = AppUpdateManifest(
             versionCode = candidate.versionCode,
             versionName = candidate.versionName,

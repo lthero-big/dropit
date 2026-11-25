@@ -68,6 +68,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -100,17 +101,23 @@ import dev.dropit.app.ui.theme.DropitElevation
 import dev.dropit.app.ui.theme.DropitMonoTypography
 import dev.dropit.app.ui.theme.DropitMotion
 import dev.dropit.app.ui.theme.DropitTheme
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 @Composable
 fun OnboardingScreen(
     viewModel: OnboardingViewModel,
     modifier: Modifier = Modifier,
     applyStatusBarsPadding: Boolean = true,
+    googleIdTokenFetcher: GoogleIdTokenFetcher = AndroidGoogleIdTokenFetcher,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = DropitTheme.colors
     val reducedMotion = DropitTheme.reducedMotion
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    var activeGoogleSignInJob by remember { mutableStateOf<Job?>(null) }
     val versionLabel = remember {
         ServerUrl.versionLabel(
             version = BuildConfig.VERSION_NAME,
@@ -119,11 +126,26 @@ fun OnboardingScreen(
         )
     }
 
-    LaunchedEffect(state.pendingNativeGoogleClientId) {
-        val clientId = state.pendingNativeGoogleClientId ?: return@LaunchedEffect
-        viewModel.consumePendingNativeGoogleRequest()
-        val result = AndroidGoogleIdTokenFetcher.fetchIdToken(context, clientId)
-        viewModel.onNativeGoogleIdTokenResult(result)
+    // Decouple the suspending Credential Manager picker from LaunchedEffect's key lifecycle:
+    // consuming the pending request clears the key to null on the next frame, so the fetch must run
+    // in rememberCoroutineScope() to avoid immediate self-cancellation, while still resetting VM
+    // busy state if the screen leaves composition or rotates mid-flight.
+    LaunchedEffect(state.pendingNativeGoogleRequest?.requestId) {
+        val request = state.pendingNativeGoogleRequest ?: return@LaunchedEffect
+        viewModel.consumePendingNativeGoogleRequest(request.requestId)
+        activeGoogleSignInJob?.cancel()
+        activeGoogleSignInJob = coroutineScope.launch {
+            try {
+                val result = googleIdTokenFetcher.fetchIdToken(context, request.clientId)
+                viewModel.onNativeGoogleIdTokenResult(result, requestId = request.requestId)
+            } catch (ce: CancellationException) {
+                viewModel.onNativeGoogleIdTokenResult(
+                    GoogleIdTokenFetchResult.Cancelled,
+                    requestId = request.requestId,
+                )
+                throw ce
+            }
+        }
     }
 
     LaunchedEffect(state.pendingOAuthLaunchUrl) {
