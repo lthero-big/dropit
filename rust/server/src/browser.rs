@@ -25,10 +25,40 @@ pub async fn auth_providers(State(app): State<App>) -> ApiResult<Json<Value>> {
                 "open" => "open",
                 _ => "invite",
             };
-            Ok(Json(json!({ "providers": providers(db)?, "password": true,
-            "registration": policy, "setupRequired": db::user_count(db)? == 0 })))
+            let mut payload = serde_json::Map::new();
+            payload.insert("providers".into(), json!(providers(db)?));
+            payload.insert("password".into(), json!(true));
+            payload.insert("registration".into(), json!(policy));
+            payload.insert("setupRequired".into(), json!(db::user_count(db)? == 0));
+            if let Some(google_client_id) = active_google_client_id(db)? {
+                payload.insert("googleClientId".into(), json!(google_client_id));
+            }
+            Ok(Json(Value::Object(payload)))
         })
         .await
+}
+
+fn active_google_client_id(db: &rusqlite::Connection) -> ApiResult<Option<String>> {
+    let saved: Option<(String, bool)> = db
+        .query_row(
+            "SELECT clientId, enabled<>0 FROM oauth_apps WHERE provider='google'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((client_id, enabled)) = saved {
+        return Ok((enabled && !client_id.is_empty()).then_some(client_id));
+    }
+    let client_id = env::var("GOOGLE_CLIENT_ID")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let client_secret = env::var("GOOGLE_CLIENT_SECRET")
+        .ok()
+        .filter(|value| !value.is_empty());
+    Ok(match (client_id, client_secret) {
+        (Some(id), Some(_)) => Some(id),
+        _ => None,
+    })
 }
 
 pub async fn setup(State(app): State<App>) -> ApiResult<Json<Value>> {
