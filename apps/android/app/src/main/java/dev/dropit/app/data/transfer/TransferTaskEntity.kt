@@ -55,9 +55,16 @@ data class TransferTaskEntity(
     fun toDomain(
         speedBytesPerSec: Long = 0L,
         etaSeconds: Long? = null,
+        liveTransferredBytes: Long? = null,
     ): TransferTask {
         val domainStatus = toStatus()
         val isRunning = domainStatus == TransferStatus.RUNNING
+        val effectiveTransferred = if (isRunning && liveTransferredBytes != null) {
+            val merged = maxOf(transferredBytes, liveTransferredBytes)
+            if (totalBytes > 0L) merged.coerceAtMost(totalBytes) else merged
+        } else {
+            transferredBytes
+        }
         return TransferTask(
             id = id,
             serverOrigin = serverOrigin,
@@ -68,7 +75,7 @@ data class TransferTaskEntity(
             fileName = fileName,
             mimeType = mimeType,
             totalBytes = totalBytes,
-            transferredBytes = transferredBytes,
+            transferredBytes = effectiveTransferred,
             speedBytesPerSec = if (isRunning) speedBytesPerSec else 0L,
             etaSeconds = if (isRunning) etaSeconds else null,
             status = domainStatus,

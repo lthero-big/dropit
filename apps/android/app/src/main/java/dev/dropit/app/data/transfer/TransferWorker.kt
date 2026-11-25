@@ -25,6 +25,9 @@ import dev.dropit.app.core.network.ServerUrl
 import dev.dropit.app.core.repository.TransferDirection
 import dev.dropit.app.core.repository.TransferStatus
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 /**
@@ -176,17 +179,31 @@ class TransferWorker(
                 }
             }
         } catch (ce: CancellationException) {
-            // Distinguish user cancel from system stop: if cancelled via notification button,
-            // trigger manager.cancel so remote upload session & staged file are cleaned up.
-            val latest = runCatching { manager.getTaskEntity(taskId) }.getOrNull()
-            if (isStopped && latest != null && latest.toStatus() != TransferStatus.CANCELLED) {
-                val stopReason = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) stopReason else 0
-                if (stopReason == WorkInfo.STOP_REASON_CANCELLED_BY_APP) {
-                    runCatching { manager.cancel(taskId) }
+            // Execute cleanup in NonCancellable so Room updates and DELETE /uploads/:id are not aborted.
+            withContext(NonCancellable) {
+                val latest = runCatching { manager.getTaskEntity(taskId) }.getOrNull()
+                if (isStopped && latest != null && latest.toStatus() != TransferStatus.CANCELLED) {
+                    if (isCancelledByUserOrNotification()) {
+                        runCatching { manager.cancel(taskId) }
+                    }
                 }
+                clearNotification()
             }
-            clearNotification()
             throw ce
+        }
+    }
+
+    private suspend fun isCancelledByUserOrNotification(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            stopReason == WorkInfo.STOP_REASON_CANCELLED_BY_APP
+        ) {
+            return true
+        }
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val info = WorkManager.getInstance(applicationContext).getWorkInfoById(id).get()
+                info?.state == WorkInfo.State.CANCELLED
+            }.getOrDefault(false)
         }
     }
 

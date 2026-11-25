@@ -9,15 +9,21 @@ import dev.dropit.app.core.repository.DownloadFileRequest
 import dev.dropit.app.core.repository.StagedShareFile
 import dev.dropit.app.core.repository.TransferDirection
 import dev.dropit.app.core.repository.TransferStatus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -40,6 +46,8 @@ import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class TransferEngineAndManagerTest {
@@ -644,6 +652,143 @@ class TransferEngineAndManagerTest {
         assertEquals(0L, m2.etaSeconds)
     }
 
+    @Test
+    fun cancellationDuringUpload_persistsPausedStatusEvenWithCancellationAwareDao() = runTest {
+        val chunkPutStarted = CountDownLatch(1)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                return when {
+                    request.method == "POST" && path == "/api/spaces/sp-1/uploads" ->
+                        MockResponse()
+                            .setResponseCode(201)
+                            .setBody("""{"uploadId":"up-cancel-coro","chunkSize":512,"expiresAt":${System.currentTimeMillis() + 60_000},"received":[]}""")
+                    request.method == "PUT" && path.startsWith("/api/spaces/sp-1/uploads/up-cancel-coro/chunks/") -> {
+                        chunkPutStarted.countDown()
+                        // Hold the chunk response long enough for cancellation to occur mid-flight.
+                        MockResponse()
+                            .setResponseCode(204)
+                            .setHeadersDelay(5, TimeUnit.SECONDS)
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        val backingDao = InMemoryTransferDao()
+        val roomLikeDao = CancellationAwareTransferDao(backingDao)
+        val engine = TransferEngine(
+            apiClient = createApiClient(),
+            dao = roomLikeDao,
+            downloadSink = createDownloadSink(),
+            downloadTempDir = downloadTempDir,
+            ownedStagingRoots = listOf(uploadStagingDir, shareStagingDir, downloadTempDir),
+            chunkConcurrency = 1,
+            maxRetries = 0,
+            sleepMs = {},
+        )
+
+        val stagedFile = File(uploadStagingDir, "coro/big.bin").apply {
+            parentFile?.mkdirs()
+            writeBytes(ByteArray(1024) { 3 })
+        }
+        backingDao.upsert(
+            TransferTaskEntity(
+                id = "task-coro-cancel",
+                serverOrigin = baseUrl,
+                accountId = "user-1",
+                targetScopeType = "space",
+                targetScopeId = "sp-1",
+                direction = TransferDirection.UPLOAD.name,
+                fileName = "big.bin",
+                mimeType = "application/octet-stream",
+                totalBytes = 1024L,
+                localStagedPath = stagedFile.absolutePath,
+                status = TransferStatus.QUEUED.name,
+                createdAt = 1L,
+                updatedAt = 1L,
+            ),
+        )
+
+        val job = launch(Dispatchers.IO) {
+            engine.executeTask("task-coro-cancel") {}
+        }
+        assertTrue("Expected chunk PUT to start before cancelling", chunkPutStarted.await(5, TimeUnit.SECONDS))
+        job.cancel()
+        job.join()
+
+        // NonCancellable cleanup must succeed even though roomLikeDao checks coroutineContext.isActive!
+        val updated = backingDao.getById("task-coro-cancel")!!
+        assertEquals(TransferStatus.PAUSED, updated.toStatus())
+        assertEquals("up-cancel-coro", updated.remoteUploadId)
+    }
+
+    @Test
+    fun liveInChunkProgressAndConcurrentMetrics_mergeTransferredBytesWithoutLosingUpdates() = runTest {
+        val harness = createHarness()
+        val taskIds = (1..8).map { "live-task-$it" }
+        harness.dao.upsertAll(
+            taskIds.mapIndexed { idx, id ->
+                TransferTaskEntity(
+                    id = id,
+                    serverOrigin = baseUrl,
+                    accountId = "user-1",
+                    targetScopeType = "space",
+                    targetScopeId = "sp-1",
+                    direction = TransferDirection.UPLOAD.name,
+                    fileName = "chunk-$idx.bin",
+                    mimeType = "application/octet-stream",
+                    totalBytes = 10_000L,
+                    transferredBytes = 0L,
+                    status = TransferStatus.RUNNING.name,
+                    createdAt = idx.toLong(),
+                    updatedAt = idx.toLong(),
+                )
+            },
+        )
+
+        // Update 8 tasks concurrently across threads and verify atomic StateFlow.update loses zero entries.
+        withContext(Dispatchers.Default) {
+            taskIds.mapIndexed { idx, id ->
+                async {
+                    repeat(50) { step ->
+                        val bytes = ((idx + 1) * 100 + step * 10).toLong()
+                        harness.manager.updateMetrics(
+                            id,
+                            TransferRuntimeMetrics(
+                                transferredBytes = bytes,
+                                speedBytesPerSec = 2_000L + idx,
+                                etaSeconds = 5L,
+                            ),
+                        )
+                    }
+                }
+            }.awaitAll()
+        }
+
+        val observed = harness.manager.tasks.first { list ->
+            list.size == taskIds.size && list.all { it.transferredBytes > 0L }
+        }.associateBy { it.id }
+
+        taskIds.forEachIndexed { idx, id ->
+            val task = observed[id]!!
+            val expectedBytes = ((idx + 1) * 100 + 49 * 10).toLong()
+            assertEquals(expectedBytes, task.transferredBytes)
+            assertEquals(2_000L + idx, task.speedBytesPerSec)
+            assertEquals(5L, task.etaSeconds)
+        }
+
+        // Clamps to totalBytes even if live metric slightly exceeds totalBytes.
+        harness.manager.updateMetrics(
+            taskIds.first(),
+            TransferRuntimeMetrics(transferredBytes = 99_999L, speedBytesPerSec = 5_000L, etaSeconds = 0L),
+        )
+        val clamped = harness.manager.tasks.first { list ->
+            list.first { it.id == taskIds.first() }.transferredBytes == 10_000L
+        }.first { it.id == taskIds.first() }
+        assertEquals(10_000L, clamped.transferredBytes)
+    }
+
     private fun sha256Hex(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
         return digest.joinToString("") { String.format(Locale.ROOT, "%02x", it.toInt() and 0xff) }
@@ -829,4 +974,24 @@ internal class InMemoryTransferDao : TransferDao {
     override suspend fun deleteAll() {
         state.value = emptyMap()
     }
+}
+
+/**
+ * Wraps [TransferDao] with `withContext(Dispatchers.IO) { yield(); ... }` to match real Room's
+ * `CoroutinesRoom.execute` behavior that immediately throws [CancellationException] if invoked
+ * from a cancelled coroutine without `NonCancellable`.
+ */
+internal class CancellationAwareTransferDao(
+    private val delegate: TransferDao,
+) : TransferDao by delegate {
+    override suspend fun getById(id: String): TransferTaskEntity? = withContext(Dispatchers.IO) {
+        yield()
+        delegate.getById(id)
+    }
+
+    override suspend fun updateStatus(id: String, status: String, errorMessage: String?, updatedAt: Long) =
+        withContext(Dispatchers.IO) {
+            yield()
+            delegate.updateStatus(id, status, errorMessage, updatedAt)
+        }
 }

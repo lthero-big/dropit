@@ -15,7 +15,9 @@ import dev.dropit.app.core.network.DropitApiClient
 import dev.dropit.app.core.repository.AppUpdater
 import dev.dropit.app.core.repository.UpdateCheckResult
 import dev.dropit.app.core.repository.UpdateInstallState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -206,6 +208,12 @@ class DefaultAppUpdater(
                     installer.launchInstaller(finalApk)
                     _installState.value = UpdateInstallState.ReadyToInstall
                     UpdateInstallState.ReadyToInstall
+                } catch (ce: CancellationException) {
+                    withContext(NonCancellable) {
+                        runCatching { partApk.delete() }
+                        _installState.value = UpdateInstallState.Idle
+                    }
+                    throw ce
                 } catch (e: Exception) {
                     runCatching { partApk.delete() }
                     runCatching { finalApk.delete() }

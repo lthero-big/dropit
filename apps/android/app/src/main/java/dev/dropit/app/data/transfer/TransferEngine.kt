@@ -12,6 +12,7 @@ import dev.dropit.app.core.repository.TransferDirection
 import dev.dropit.app.core.repository.TransferStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -703,8 +704,8 @@ class TransferEngine(
         }
     }
 
-    private suspend fun handleCancellation(taskId: String) {
-        val current = runCatching { dao.getById(taskId) }.getOrNull() ?: return
+    private suspend fun handleCancellation(taskId: String) = withContext(NonCancellable) {
+        val current = runCatching { dao.getById(taskId) }.getOrNull() ?: return@withContext
         val status = current.toStatus()
         if (status == TransferStatus.RUNNING || status == TransferStatus.QUEUED) {
             // System preemption / worker stop (not explicit user cancellation): mark PAUSED for resume.

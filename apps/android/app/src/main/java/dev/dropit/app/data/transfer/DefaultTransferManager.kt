@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -149,18 +150,16 @@ class DefaultTransferScopeProvider(
 ) : TransferScopeProvider {
     private val mutex = Mutex()
     private val resolvedAccountByFingerprint = ConcurrentHashMap<String, String>()
-    private val overrideScope = MutableStateFlow<TransferScopeKey?>(null)
+    private val scopeRevision = MutableStateFlow(0L)
 
     override val activeScope: Flow<TransferScopeKey?> = combine(
         settingsStore.settings.map { it.serverOrigin }.distinctUntilChanged(),
         authRepository.sessionState,
-        overrideScope,
-    ) { origin, session, override ->
+        scopeRevision,
+    ) { origin, session, _ ->
         val effectiveOrigin = origin?.takeIf { it.isNotBlank() } ?: session.serverOrigin?.takeIf { it.isNotBlank() }
         if (effectiveOrigin == null) {
             null
-        } else if (override != null && override.serverOrigin == effectiveOrigin) {
-            override
         } else {
             resolveScopeForOrigin(effectiveOrigin, allowNetwork = false)
         }
@@ -171,14 +170,14 @@ class DefaultTransferScopeProvider(
             ?: authRepository.sessionState.value.serverOrigin?.takeIf { it.isNotBlank() }
             ?: return null
         val resolved = resolveScopeForOrigin(origin, allowNetwork = true)
-        overrideScope.value = resolved
+        scopeRevision.update { it + 1L }
         return resolved
     }
 
     override suspend fun clearCachedAccount() {
         mutex.withLock {
             resolvedAccountByFingerprint.clear()
-            overrideScope.value = null
+            scopeRevision.update { it + 1L }
         }
     }
 
@@ -261,6 +260,7 @@ class DefaultTransferManager(
                 entity.toDomain(
                     speedBytesPerSec = metrics?.speedBytesPerSec ?: 0L,
                     etaSeconds = metrics?.etaSeconds,
+                    liveTransferredBytes = metrics?.transferredBytes,
                 )
             }
         }
@@ -583,13 +583,13 @@ class DefaultTransferManager(
         }
     }
 
-    private fun updateMetrics(taskId: String, metrics: TransferRuntimeMetrics) {
-        runtimeMetrics.value = runtimeMetrics.value + (taskId to metrics)
+    internal fun updateMetrics(taskId: String, metrics: TransferRuntimeMetrics) {
+        runtimeMetrics.update { current -> current + (taskId to metrics) }
     }
 
-    private fun clearMetrics(taskId: String) {
-        if (runtimeMetrics.value.containsKey(taskId)) {
-            runtimeMetrics.value = runtimeMetrics.value - taskId
+    internal fun clearMetrics(taskId: String) {
+        runtimeMetrics.update { current ->
+            if (current.containsKey(taskId)) current - taskId else current
         }
     }
 }

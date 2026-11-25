@@ -8,6 +8,10 @@ import dev.dropit.app.core.network.DropitApiClient
 import dev.dropit.app.core.network.SessionCredentialsProvider
 import dev.dropit.app.core.repository.UpdateCheckResult
 import dev.dropit.app.core.repository.UpdateInstallState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -23,6 +27,7 @@ import org.junit.Test
 import java.io.File
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 
 class DefaultAppUpdaterTest {
 
@@ -235,6 +240,54 @@ class DefaultAppUpdaterTest {
         val httpFail = prodUpdater.downloadAndInstall(manifest.copy(size = actualBytes.size.toLong()))
         assertTrue(httpFail is UpdateInstallState.Failed)
         assertTrue((httpFail as UpdateInstallState.Failed).message.contains("https"))
+    }
+
+    @Test
+    fun downloadAndInstall_cancellationCleansPartFileResetsIdleAndRethrows() = runTest {
+        val apkBytes = ByteArray(256 * 1024) { (it % 251).toByte() }
+        val installer = FakeApkInstaller(canInstall = true)
+        val updater = createUpdater(installer = installer)
+
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(Buffer().write(apkBytes))
+                .throttleBody(4096, 150, TimeUnit.MILLISECONDS),
+        )
+
+        val manifest = AppUpdateManifest(
+            versionCode = 7,
+            versionName = "0.4.1",
+            size = apkBytes.size.toLong(),
+            sha256 = sha256(apkBytes),
+            url = "/api/app/android/download/dropit-0.4.1.apk",
+        )
+
+        var caughtCancellation = false
+        val job = launch(Dispatchers.IO) {
+            try {
+                updater.downloadAndInstall(manifest)
+            } catch (ce: CancellationException) {
+                caughtCancellation = true
+                throw ce
+            }
+        }
+
+        val partApk = File(cacheDir, "${DefaultAppUpdater.UPDATES_DIR_NAME}/${DefaultAppUpdater.APK_FILE_NAME}.part")
+        updater.installState.first { it is UpdateInstallState.Downloading }
+        kotlinx.coroutines.withContext(Dispatchers.IO) {
+            val deadline = System.currentTimeMillis() + 2_000L
+            while (!partApk.exists() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20)
+            }
+        }
+        job.cancel()
+        job.join()
+
+        assertTrue("CancellationException must propagate instead of being swallowed as Failed", caughtCancellation)
+        assertEquals(UpdateInstallState.Idle, updater.installState.value)
+        assertFalse("Partial APK file must be deleted on cancellation", partApk.exists())
+        assertEquals(0, installer.launchCount)
     }
 
     private fun sha256(bytes: ByteArray): String =
