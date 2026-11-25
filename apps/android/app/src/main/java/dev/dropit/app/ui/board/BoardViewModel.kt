@@ -10,6 +10,7 @@ import dev.dropit.app.core.network.ClipItem
 import dev.dropit.app.core.network.GroupInfo
 import dev.dropit.app.core.network.MeResponse
 import dev.dropit.app.core.network.OptionalField
+import dev.dropit.app.core.network.RoomInfo
 import dev.dropit.app.core.network.SessionExpiredEvent
 import dev.dropit.app.core.network.Space
 import dev.dropit.app.core.network.TargetScope
@@ -60,6 +61,8 @@ data class BoardUiState(
     val me: MeResponse? = null,
     val spaces: List<Space> = emptyList(),
     val activeSpace: Space? = null,
+    val activeRoom: RoomInfo? = null,
+    val isRoomOwner: Boolean = false,
     val activeScope: TargetScope? = null,
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     val presenceDevices: Int = 0,
@@ -78,7 +81,7 @@ data class BoardUiState(
     val sessionExpired: Boolean = false,
 ) {
     val isReadOnly: Boolean
-        get() = activeSpace?.isReadOnly == true
+        get() = activeRoom == null && activeSpace?.isReadOnly == true
 
     val groupInfos: List<GroupInfo>
         get() {
@@ -353,11 +356,13 @@ class BoardViewModel(
 
     fun selectSpace(spaceId: String) {
         val target = _uiState.value.spaces.firstOrNull { it.id == spaceId } ?: return
-        if (_uiState.value.activeSpace?.id == target.id) return
+        if (_uiState.value.activeRoom == null && _uiState.value.activeSpace?.id == target.id) return
         val scope = TargetScope.SpaceScope(target.id)
         _uiState.update {
             it.copy(
                 activeSpace = target,
+                activeRoom = null,
+                isRoomOwner = false,
                 activeScope = scope,
                 allItems = emptyList(),
                 groups = emptyList(),
@@ -371,6 +376,79 @@ class BoardViewModel(
         }
         viewModelScope.launch {
             connectAndHydrateScope(scope)
+        }
+    }
+
+    fun enterTemporaryRoom(room: RoomInfo, isOwner: Boolean) {
+        val scope = TargetScope.RoomScope(room.token)
+        _uiState.update {
+            it.copy(
+                activeRoom = room,
+                isRoomOwner = isOwner,
+                activeScope = scope,
+                allItems = emptyList(),
+                groups = emptyList(),
+                hasSnapshot = false,
+                selectedGroupFilter = GroupFilter.All,
+                selectedKindFilter = ContentTypeFilter.ALL,
+                isSearchExpanded = false,
+                searchQuery = "",
+                offlineBannerMessage = null,
+                snackbar = BoardSnackbar("已进入临时房间 ${room.code ?: room.token.take(6)}"),
+            )
+        }
+        viewModelScope.launch {
+            connectAndHydrateScope(scope)
+        }
+    }
+
+    fun updateActiveRoom(room: RoomInfo) {
+        val current = _uiState.value
+        if (current.activeRoom == null) return
+        val nextScope = TargetScope.RoomScope(room.token)
+        val scopeChanged = current.activeScope != nextScope
+        _uiState.update {
+            it.copy(
+                activeRoom = room,
+                activeScope = nextScope,
+            )
+        }
+        if (scopeChanged) {
+            viewModelScope.launch {
+                connectAndHydrateScope(nextScope)
+            }
+        }
+    }
+
+    fun leaveTemporaryRoom() {
+        val current = _uiState.value
+        if (current.activeRoom == null) return
+        val fallbackSpace = current.activeSpace
+            ?: current.me?.let { spaceRepository.pickDefaultSpace(current.spaces, it.user.id) }
+            ?: current.spaces.firstOrNull()
+        val nextScope = fallbackSpace?.let { TargetScope.SpaceScope(it.id) }
+        _uiState.update {
+            it.copy(
+                activeRoom = null,
+                isRoomOwner = false,
+                activeSpace = fallbackSpace,
+                activeScope = nextScope,
+                allItems = emptyList(),
+                groups = emptyList(),
+                hasSnapshot = false,
+                selectedGroupFilter = GroupFilter.All,
+                selectedKindFilter = ContentTypeFilter.ALL,
+                isSearchExpanded = false,
+                searchQuery = "",
+                offlineBannerMessage = null,
+            )
+        }
+        if (nextScope != null) {
+            viewModelScope.launch {
+                connectAndHydrateScope(nextScope)
+            }
+        } else {
+            loadInitial()
         }
     }
 

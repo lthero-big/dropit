@@ -82,10 +82,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil.ImageLoader
 import dev.dropit.app.core.network.ClipItem
 import dev.dropit.app.core.network.TargetScope
 import dev.dropit.app.core.realtime.ConnectionState
+import dev.dropit.app.core.repository.MediaRepository
 import dev.dropit.app.core.repository.UploadFileRequest
+import dev.dropit.app.ui.rooms.ActiveRoomBanner
+import dev.dropit.app.ui.rooms.CreateRoomDialog
+import dev.dropit.app.ui.rooms.EditRoomCodeDialog
+import dev.dropit.app.ui.rooms.JoinRoomDialog
+import dev.dropit.app.ui.rooms.RoomViewModel
+import dev.dropit.app.ui.share.ItemShareSheet
+import dev.dropit.app.ui.share.ItemShareViewModel
 import dev.dropit.app.ui.theme.DropitElevation
 import dev.dropit.app.ui.theme.DropitTheme
 import dev.dropit.app.ui.theme.groupDotColor
@@ -94,10 +103,19 @@ import kotlinx.coroutines.delay
 @Composable
 fun BoardScreen(
     viewModel: BoardViewModel,
+    roomViewModel: RoomViewModel,
+    itemShareViewModel: ItemShareViewModel,
+    mediaRepository: MediaRepository,
+    imageLoader: ImageLoader,
     onNavigateToTransfers: () -> Unit,
+    onOpenImageLightbox: (images: List<ClipItem>, initialIndex: Int, scope: TargetScope) -> Unit,
+    onOpenMediaPlayer: (item: ClipItem, isVideo: Boolean, scope: TargetScope) -> Unit,
+    onOpenTextReader: (item: ClipItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val roomState by roomViewModel.uiState.collectAsStateWithLifecycle()
+    val itemShareState by itemShareViewModel.uiState.collectAsStateWithLifecycle()
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
     val context = LocalContext.current
@@ -122,6 +140,18 @@ fun BoardScreen(
     var showCreateGroupDialog by remember { mutableStateOf(false) }
     var renamingGroup by remember { mutableStateOf<String?>(null) }
     var deletingGroup by remember { mutableStateOf<String?>(null) }
+    var showCreateRoomDialog by remember { mutableStateOf(false) }
+    var showJoinRoomDialog by remember { mutableStateOf(false) }
+    var showEditRoomCodeDialog by remember { mutableStateOf(false) }
+
+    // Surface room quick-create errors when no room dialog is open
+    LaunchedEffect(roomState.errorMessage, showCreateRoomDialog, showJoinRoomDialog, showEditRoomCodeDialog) {
+        val err = roomState.errorMessage ?: return@LaunchedEffect
+        if (!showCreateRoomDialog && !showJoinRoomDialog && !showEditRoomCodeDialog) {
+            viewModel.showSnackbar(err)
+            roomViewModel.clearDialogFeedback()
+        }
+    }
 
     // Multi-file picker (ActivityResultContracts.OpenMultipleDocuments)
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -140,7 +170,14 @@ fun BoardScreen(
         viewModel.enqueueFileUploads(requests)
     }
 
-    // Collapse search on system back press before leaving the board
+    // Back stack priority §2.2: leave temporary room after search is collapsed
+    BackHandler(enabled = !state.isSearchExpanded && state.activeRoom != null) {
+        roomViewModel.leaveRoom {
+            viewModel.leaveTemporaryRoom()
+        }
+    }
+
+    // Collapse search on system back press before leaving room or board
     BackHandler(enabled = state.isSearchExpanded) {
         viewModel.setSearchExpanded(false)
     }
@@ -182,6 +219,34 @@ fun BoardScreen(
                         onRetry = viewModel::reconnectRealtime,
                     )
                 }
+            }
+
+            // Active Temporary Room Banner
+            state.activeRoom?.let { room ->
+                ActiveRoomBanner(
+                    room = room,
+                    isOwner = state.isRoomOwner,
+                    nowMs = nowMs,
+                    onCopyCode = {
+                        room.code?.let { code ->
+                            copyToClipboard(context, code)
+                            viewModel.showSnackbar("房间码已复制")
+                        }
+                    },
+                    onShareRoomLink = {
+                        val url = roomViewModel.shareUrlFor(room)
+                        sharePlainText(context, url)
+                    },
+                    onEditCodeAndPin = {
+                        roomViewModel.clearDialogFeedback()
+                        showEditRoomCodeDialog = true
+                    },
+                    onLeaveRoom = {
+                        roomViewModel.leaveRoom {
+                            viewModel.leaveTemporaryRoom()
+                        }
+                    },
+                )
             }
 
             // Read-Only Space Banner
@@ -270,6 +335,9 @@ fun BoardScreen(
                                 }
                             }
 
+                            val imageItems = state.filteredItems.filter {
+                                ClipFormatting.classifyClip(it) == ClipVisualKind.IMAGE
+                            }
                             items(
                                 items = state.filteredItems,
                                 key = { it.id },
@@ -278,6 +346,9 @@ fun BoardScreen(
                                     item = item,
                                     isCopied = state.copiedItemId == item.id,
                                     nowMs = nowMs,
+                                    activeScope = state.activeScope,
+                                    mediaRepository = mediaRepository,
+                                    imageLoader = imageLoader,
                                     onCopyText = { target ->
                                         copyToClipboard(context, ClipFormatting.copyPayloadForItem(target))
                                         viewModel.markItemCopied(target.id)
@@ -296,6 +367,19 @@ fun BoardScreen(
                                     },
                                     onOpenUrl = { url -> openExternalUrl(context, url) },
                                     onOpenMore = { target -> moreSheetItem = target },
+                                    onPreviewImage = { target ->
+                                        val scope = state.activeScope ?: return@BoardCard
+                                        val idx = imageItems.indexOfFirst { it.id == target.id }.coerceAtLeast(0)
+                                        val list = if (imageItems.isNotEmpty()) imageItems else listOf(target)
+                                        onOpenImageLightbox(list, idx, scope)
+                                    },
+                                    onPlayMedia = { target, isVideo ->
+                                        val scope = state.activeScope ?: return@BoardCard
+                                        onOpenMediaPlayer(target, isVideo, scope)
+                                    },
+                                    onOpenTextReader = { target ->
+                                        onOpenTextReader(target)
+                                    },
                                     modifier = Modifier.animateItem(),
                                 )
                             }
@@ -338,9 +422,103 @@ fun BoardScreen(
             spaces = state.spaces,
             activeSpaceId = state.activeSpace?.id,
             currentUserId = state.me?.user?.id,
-            onSelectSpace = viewModel::selectSpace,
+            activeRoom = state.activeRoom,
+            isRoomBusy = roomState.isSubmitting,
+            onSelectSpace = { spaceId ->
+                if (state.activeRoom != null) {
+                    roomViewModel.leaveRoom {
+                        viewModel.selectSpace(spaceId)
+                    }
+                } else {
+                    viewModel.selectSpace(spaceId)
+                }
+            },
+            onQuickCreateOrReuseRoom = {
+                roomViewModel.clearDialogFeedback()
+                roomViewModel.createOrReuseRoom { room ->
+                    viewModel.enterTemporaryRoom(room = room, isOwner = true)
+                }
+            },
+            onOpenCustomRoomDialog = {
+                roomViewModel.clearDialogFeedback()
+                showCreateRoomDialog = true
+            },
+            onOpenJoinRoomDialog = {
+                roomViewModel.clearDialogFeedback()
+                showJoinRoomDialog = true
+            },
+            onLeaveRoom = {
+                roomViewModel.leaveRoom {
+                    viewModel.leaveTemporaryRoom()
+                }
+            },
             onDismiss = { showSpaceSwitcher = false },
         )
+    }
+
+    if (showCreateRoomDialog) {
+        CreateRoomDialog(
+            state = roomState,
+            onCreate = { customCode, pin ->
+                roomViewModel.createOrReuseRoom(customCode = customCode, pin = pin) { room ->
+                    showCreateRoomDialog = false
+                    viewModel.enterTemporaryRoom(room = room, isOwner = true)
+                }
+            },
+            onDismiss = {
+                showCreateRoomDialog = false
+                roomViewModel.clearDialogFeedback()
+            },
+        )
+    }
+
+    if (showJoinRoomDialog) {
+        JoinRoomDialog(
+            state = roomState,
+            onJoin = { code, pin ->
+                roomViewModel.enterRoom(rawCode = code, rawPin = pin) { room ->
+                    showJoinRoomDialog = false
+                    viewModel.enterTemporaryRoom(room = room, isOwner = false)
+                }
+            },
+            onDismiss = {
+                showJoinRoomDialog = false
+                roomViewModel.clearDialogFeedback()
+            },
+        )
+    }
+
+    if (showEditRoomCodeDialog) {
+        state.activeRoom?.let { activeRoom ->
+            EditRoomCodeDialog(
+                room = activeRoom,
+                state = roomState,
+                onSaveCode = { newCode ->
+                    roomViewModel.updateCustomCode(newCode) { updated ->
+                        viewModel.updateActiveRoom(updated)
+                    }
+                },
+                onRandomizeCode = {
+                    roomViewModel.randomizeCode { updated ->
+                        viewModel.updateActiveRoom(updated)
+                    }
+                },
+                onSavePin = { newPin ->
+                    roomViewModel.updatePin(newPin) { updated ->
+                        viewModel.updateActiveRoom(updated)
+                    }
+                },
+                onRemovePin = {
+                    roomViewModel.removePin { updated ->
+                        viewModel.updateActiveRoom(updated)
+                    }
+                },
+                onDismiss = {
+                    showEditRoomCodeDialog = false
+                    roomViewModel.clearDialogFeedback()
+                },
+            )
+        }
     }
 
     if (showComposeSheet && !state.isReadOnly) {
@@ -365,6 +543,34 @@ fun BoardScreen(
     }
 
     moreSheetItem?.let { item ->
+        val visualKind = ClipFormatting.classifyClip(item)
+        val previewAction: (() -> Unit)? = when (visualKind) {
+            ClipVisualKind.IMAGE -> {
+                {
+                    state.activeScope?.let { scope ->
+                        val imageItems = state.filteredItems.filter {
+                            ClipFormatting.classifyClip(it) == ClipVisualKind.IMAGE
+                        }
+                        val idx = imageItems.indexOfFirst { it.id == item.id }.coerceAtLeast(0)
+                        onOpenImageLightbox(if (imageItems.isNotEmpty()) imageItems else listOf(item), idx, scope)
+                    }
+                }
+            }
+            ClipVisualKind.VIDEO -> {
+                { state.activeScope?.let { scope -> onOpenMediaPlayer(item, true, scope) } }
+            }
+            ClipVisualKind.AUDIO -> {
+                { state.activeScope?.let { scope -> onOpenMediaPlayer(item, false, scope) } }
+            }
+            ClipVisualKind.SHORT_TEXT,
+            ClipVisualKind.LONG_TEXT,
+            ClipVisualKind.CODE,
+            -> {
+                { onOpenTextReader(item) }
+            }
+            else -> null
+        }
+
         ItemMoreActionsSheet(
             item = item,
             isReadOnly = state.isReadOnly,
@@ -377,11 +583,38 @@ fun BoardScreen(
             onEditText = { editTextItem = item },
             onTogglePin = { viewModel.togglePin(item) },
             onEditLabelsAndGroup = { editLabelsItem = item },
-            onShareLinkPlaceholder = {
-                viewModel.showSnackbar("单项分享链接面板将于下一阶段补齐")
+            onOpenItemShare = {
+                state.activeScope?.let { scope ->
+                    itemShareViewModel.openForItem(scope, item)
+                }
             },
+            onOpenPreview = previewAction,
             onRequestRetract = { retractConfirmItem = item },
             onDismiss = { moreSheetItem = null },
+        )
+    }
+
+    if (itemShareState.item != null) {
+        ItemShareSheet(
+            state = itemShareState,
+            nowMs = nowMs,
+            resolveShareUrl = itemShareViewModel::resolveSharePageUrl,
+            resolveDirectUrl = itemShareViewModel::resolveDirectDownloadUrl,
+            onSelectExpiresIn = itemShareViewModel::selectExpiresIn,
+            onSelectMaxViews = itemShareViewModel::selectMaxViews,
+            onCreateShare = itemShareViewModel::createShare,
+            onRevokeShare = itemShareViewModel::revokeShare,
+            onCopyUrl = { url ->
+                copyToClipboard(context, url)
+                viewModel.showSnackbar("分享链接已复制")
+            },
+            onSystemShareUrl = { url ->
+                sharePlainText(context, url)
+            },
+            onOpenPresetsInBrowser = {
+                openExternalUrl(context, itemShareViewModel.sharePresetsSettingsUrl())
+            },
+            onDismiss = itemShareViewModel::close,
         )
     }
 
@@ -515,8 +748,11 @@ private fun BoardTopBar(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    val titleText = state.activeRoom?.let { room ->
+                        "临时房间 · ${room.code ?: room.token.take(6)}"
+                    } ?: state.activeSpace?.name?.ifBlank { "我的空间" } ?: "dropit"
                     Text(
-                        text = state.activeSpace?.name?.ifBlank { "我的空间" } ?: "dropit",
+                        text = titleText,
                         style = MaterialTheme.typography.titleLarge,
                         color = colors.fg,
                         maxLines = 1,
@@ -529,7 +765,20 @@ private fun BoardTopBar(
                         tint = colors.fg3,
                         modifier = Modifier.size(20.dp),
                     )
-                    if (state.isReadOnly) {
+                    if (state.activeRoom != null) {
+                        Surface(
+                            shape = shapes.pill,
+                            color = colors.devPad.copy(alpha = 0.14f),
+                            tonalElevation = 0.dp,
+                        ) {
+                            Text(
+                                text = "临时",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.devPad,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                            )
+                        }
+                    } else if (state.isReadOnly) {
                         Surface(
                             shape = shapes.pill,
                             color = colors.warnSoft,

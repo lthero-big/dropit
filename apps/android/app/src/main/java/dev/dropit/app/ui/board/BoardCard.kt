@@ -33,6 +33,7 @@ import androidx.compose.material.icons.rounded.FolderZip
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.LaptopMac
 import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Smartphone
@@ -44,6 +45,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,13 +56,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil.ImageLoader
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import dev.dropit.app.core.network.ClipItem
 import dev.dropit.app.core.network.ServerUrl
+import dev.dropit.app.core.network.TargetScope
+import dev.dropit.app.core.repository.MediaRepository
 import dev.dropit.app.ui.theme.DropitElevation
 import dev.dropit.app.ui.theme.DropitMonoTypography
 import dev.dropit.app.ui.theme.DropitMotion
@@ -79,6 +88,12 @@ fun BoardCard(
     onOpenUrl: (String) -> Unit,
     onOpenMore: (ClipItem) -> Unit,
     modifier: Modifier = Modifier,
+    activeScope: TargetScope? = null,
+    mediaRepository: MediaRepository? = null,
+    imageLoader: ImageLoader? = null,
+    onPreviewImage: ((ClipItem) -> Unit)? = null,
+    onPlayMedia: ((ClipItem, Boolean) -> Unit)? = null,
+    onOpenTextReader: ((ClipItem) -> Unit)? = null,
 ) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
@@ -114,18 +129,39 @@ fun BoardCard(
                     ClipVisualKind.LONG_TEXT -> LongTextBody(
                         text = item.text.orEmpty(),
                         onOpenUrl = onOpenUrl,
+                        onOpenReader = onOpenTextReader?.let { cb -> { cb(item) } },
                     )
                     ClipVisualKind.LINK -> LinkBody(
                         text = item.text.orEmpty(),
                         onOpenUrl = onOpenUrl,
                     )
-                    ClipVisualKind.CODE -> CodeBody(text = item.text.orEmpty())
+                    ClipVisualKind.CODE -> CodeBody(
+                        text = item.text.orEmpty(),
+                        onOpenReader = onOpenTextReader?.let { cb -> { cb(item) } },
+                    )
                     ClipVisualKind.COLOR -> ColorSwatchBody(text = item.text.orEmpty())
-                    ClipVisualKind.IMAGE -> ImageFilePlaceholderBody(item = item)
-                    ClipVisualKind.VIDEO,
-                    ClipVisualKind.AUDIO,
-                    ClipVisualKind.FILE,
-                    -> GenericFileBody(item = item)
+                    ClipVisualKind.IMAGE -> ImageFileBody(
+                        item = item,
+                        activeScope = activeScope,
+                        mediaRepository = mediaRepository,
+                        imageLoader = imageLoader,
+                        onPreview = onPreviewImage?.let { cb -> { cb(item) } },
+                    )
+                    ClipVisualKind.VIDEO -> GenericFileBody(
+                        item = item,
+                        playableMedia = true,
+                        onPlay = onPlayMedia?.let { cb -> { cb(item, true) } },
+                    )
+                    ClipVisualKind.AUDIO -> GenericFileBody(
+                        item = item,
+                        playableMedia = true,
+                        onPlay = onPlayMedia?.let { cb -> { cb(item, false) } },
+                    )
+                    ClipVisualKind.FILE -> GenericFileBody(
+                        item = item,
+                        playableMedia = false,
+                        onPlay = null,
+                    )
                 }
 
                 // Metadata Footer (FlowRow supports large system font scaling cleanly)
@@ -203,6 +239,7 @@ private fun ShortTextBody(text: String) {
 private fun LongTextBody(
     text: String,
     onOpenUrl: (String) -> Unit,
+    onOpenReader: (() -> Unit)? = null,
 ) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
@@ -257,15 +294,34 @@ private fun LongTextBody(
         }
     }
 
-    if (isLong) {
-        Text(
-            text = if (expanded) "收起" else "展开全文",
-            style = MaterialTheme.typography.labelMedium,
-            color = colors.brand,
-            modifier = Modifier
-                .clickable { expanded = !expanded }
-                .padding(vertical = 4.dp),
-        )
+    if (isLong || onOpenReader != null) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (isLong) {
+                Text(
+                    text = if (expanded) "收起" else "展开预览",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = colors.fg2,
+                    modifier = Modifier
+                        .defaultMinSize(minHeight = 36.dp)
+                        .clickable { expanded = !expanded }
+                        .padding(vertical = 6.dp),
+                )
+            }
+            if (onOpenReader != null) {
+                Text(
+                    text = "阅读全文 / Markdown",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = colors.brand,
+                    modifier = Modifier
+                        .defaultMinSize(minHeight = 36.dp)
+                        .clickable(onClick = onOpenReader)
+                        .padding(vertical = 6.dp),
+                )
+            }
+        }
     }
 }
 
@@ -343,7 +399,10 @@ private fun LinkBody(
 }
 
 @Composable
-private fun CodeBody(text: String) {
+private fun CodeBody(
+    text: String,
+    onOpenReader: (() -> Unit)? = null,
+) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
     val parsed = remember(text) { ClipFormatting.stripCodeFence(text) }
@@ -406,15 +465,31 @@ private fun CodeBody(text: String) {
             }
         }
 
-        if (lines.size > 5) {
-            Text(
-                text = if (expanded) "收起代码" else "展开全部 ${lines.size} 行",
-                style = MaterialTheme.typography.labelMedium,
-                color = colors.brand,
-                modifier = Modifier
-                    .clickable { expanded = !expanded }
-                    .padding(vertical = 2.dp),
-            )
+        if (lines.size > 5 || onOpenReader != null) {
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                if (lines.size > 5) {
+                    Text(
+                        text = if (expanded) "收起代码" else "展开全部 ${lines.size} 行",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.fg2,
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 36.dp)
+                            .clickable { expanded = !expanded }
+                            .padding(vertical = 6.dp),
+                    )
+                }
+                if (onOpenReader != null) {
+                    Text(
+                        text = "全屏阅读",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.brand,
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 36.dp)
+                            .clickable(onClick = onOpenReader)
+                            .padding(vertical = 6.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -465,22 +540,51 @@ private fun ColorSwatchBody(text: String) {
 }
 
 @Composable
-private fun ImageFilePlaceholderBody(item: ClipItem) {
+private fun ImageFileBody(
+    item: ClipItem,
+    activeScope: TargetScope?,
+    mediaRepository: MediaRepository?,
+    imageLoader: ImageLoader?,
+    onPreview: (() -> Unit)?,
+) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
+    val context = LocalContext.current
     val filename = item.filename?.takeIf { it.isNotBlank() } ?: "未命名图片"
     val displayName = remember(filename) { ClipFormatting.middleEllipsizeFilename(filename) }
     val badge = remember(filename, item.mime) { ClipFormatting.resolveFileTypeBadge(filename, item.mime) }
 
+    var thumbnailUrl by remember(item.id, activeScope) { mutableStateOf<String?>(null) }
+    LaunchedEffect(item.id, activeScope, mediaRepository) {
+        if (activeScope != null && mediaRepository != null) {
+            thumbnailUrl = runCatching {
+                if (item.hasThumbnail) {
+                    mediaRepository.thumbnailUrl(activeScope, item.id)
+                } else {
+                    mediaRepository.previewUrl(activeScope, item.id)
+                }
+            }.getOrNull()
+        }
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        // Sunken paper thumbnail slot (Stage 3B binds authenticated Coil image into this slot)
+        // Sunken paper thumbnail slot with authenticated Coil image + lightbox click
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(148.dp)
+                .height(168.dp)
                 .clip(shapes.sm)
                 .background(colors.surfaceSunken)
-                .border(1.dp, colors.line1, shapes.sm),
+                .border(1.dp, colors.line1, shapes.sm)
+                .then(
+                    if (onPreview != null) {
+                        Modifier
+                            .clickable(onClick = onPreview)
+                            .semantics { contentDescription = "预览图片 $filename" }
+                    } else {
+                        Modifier
+                    },
+                ),
             contentAlignment = Alignment.Center,
         ) {
             Column(
@@ -496,7 +600,7 @@ private fun ImageFilePlaceholderBody(item: ClipItem) {
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Image,
-                        contentDescription = "图片缩略图占位",
+                        contentDescription = null,
                         tint = badge.tint,
                         modifier = Modifier.size(24.dp),
                     )
@@ -505,6 +609,19 @@ private fun ImageFilePlaceholderBody(item: ClipItem) {
                     text = "${badge.ext} · ${ServerUrl.formatSize(item.size)}",
                     style = DropitMonoTypography.meta,
                     color = colors.fg3,
+                )
+            }
+
+            if (!thumbnailUrl.isNullOrBlank() && imageLoader != null) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(thumbnailUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = "图片缩略图 $filename",
+                    imageLoader = imageLoader,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxWidth().height(168.dp),
                 )
             }
         }
@@ -534,7 +651,11 @@ private fun ImageFilePlaceholderBody(item: ClipItem) {
 }
 
 @Composable
-private fun GenericFileBody(item: ClipItem) {
+private fun GenericFileBody(
+    item: ClipItem,
+    playableMedia: Boolean = false,
+    onPlay: (() -> Unit)? = null,
+) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
     val filename = item.filename?.takeIf { it.isNotBlank() } ?: "未命名文件"
@@ -542,7 +663,19 @@ private fun GenericFileBody(item: ClipItem) {
     val badge = remember(filename, item.mime) { ClipFormatting.resolveFileTypeBadge(filename, item.mime) }
 
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (playableMedia && onPlay != null) {
+                    Modifier
+                        .clip(shapes.sm)
+                        .clickable(onClick = onPlay)
+                        .semantics { contentDescription = "在线播放 $filename" }
+                        .padding(vertical = 2.dp)
+                } else {
+                    Modifier
+                },
+            ),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -554,10 +687,10 @@ private fun GenericFileBody(item: ClipItem) {
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                imageVector = fileCategoryIcon(badge.category),
+                imageVector = if (playableMedia) Icons.Rounded.PlayArrow else fileCategoryIcon(badge.category),
                 contentDescription = badge.label,
                 tint = badge.tint,
-                modifier = Modifier.size(24.dp),
+                modifier = Modifier.size(if (playableMedia) 28.dp else 24.dp),
             )
         }
 
@@ -590,7 +723,11 @@ private fun GenericFileBody(item: ClipItem) {
                     )
                 }
                 Text(
-                    text = "${badge.label} · ${ServerUrl.formatSize(item.size)}",
+                    text = if (playableMedia) {
+                        "${badge.label} · ${ServerUrl.formatSize(item.size)} · 点按播放"
+                    } else {
+                        "${badge.label} · ${ServerUrl.formatSize(item.size)}"
+                    },
                     style = DropitMonoTypography.meta,
                     color = colors.fg3,
                 )

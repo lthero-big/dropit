@@ -1,5 +1,6 @@
 package dev.dropit.app.ui.navigation
 
+import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -17,6 +18,24 @@ import kotlinx.coroutines.launch
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+
+/**
+ * Pure guard for incoming Android share intents in [dev.dropit.app.MainActivity].
+ * Ignores intents replayed from Android Recents (`FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY`)
+ * and non-share actions so re-opening the app never re-triggers a duplicate share.
+ */
+object ShareIntentGuard {
+    fun shouldCapture(intent: Intent?): Boolean {
+        if (intent == null) return false
+        if ((intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return false
+        return shouldCapture(action = intent.action, flags = intent.flags)
+    }
+
+    fun shouldCapture(action: String?, flags: Int): Boolean {
+        if ((flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return false
+        return action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE
+    }
+}
 
 sealed class AppRoute {
     data object Initializing : AppRoute()
@@ -37,6 +56,7 @@ data class AppRootUiState(
     val activeTransferCount: Int = 0,
     val failedTransferCount: Int = 0,
     val transferTasks: List<TransferTask> = emptyList(),
+    val hasPendingShare: Boolean = false,
     val isLoggingOut: Boolean = false,
 )
 
@@ -60,6 +80,7 @@ class AppViewModel(
         observeSettings()
         observeSession()
         observeTransfers()
+        observePendingShare()
         observeGlobalUnauthorized()
         if (autoInitialize) {
             initialize()
@@ -110,6 +131,14 @@ class AppViewModel(
                         failedTransferCount = failed,
                     )
                 }
+            }
+        }
+    }
+
+    private fun observePendingShare() {
+        viewModelScope.launch {
+            container.shareInbox.pendingShare.collect { pending ->
+                _uiState.update { it.copy(hasPendingShare = pending != null && !pending.isEmpty) }
             }
         }
     }

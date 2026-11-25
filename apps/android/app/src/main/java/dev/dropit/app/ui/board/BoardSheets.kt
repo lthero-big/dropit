@@ -23,17 +23,21 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Label
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MeetingRoom
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -43,6 +47,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -64,6 +69,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.dropit.app.core.network.ClipItem
 import dev.dropit.app.core.network.OptionalField
+import dev.dropit.app.core.network.RoomInfo
 import dev.dropit.app.core.network.ServerUrl
 import dev.dropit.app.core.network.Space
 import dev.dropit.app.ui.theme.DropitMonoTypography
@@ -76,7 +82,13 @@ fun SpaceSwitcherSheet(
     spaces: List<Space>,
     activeSpaceId: String?,
     currentUserId: String?,
+    activeRoom: RoomInfo? = null,
+    isRoomBusy: Boolean = false,
     onSelectSpace: (String) -> Unit,
+    onQuickCreateOrReuseRoom: () -> Unit = {},
+    onOpenCustomRoomDialog: () -> Unit = {},
+    onOpenJoinRoomDialog: () -> Unit = {},
+    onLeaveRoom: () -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     val colors = DropitTheme.colors
@@ -96,6 +108,7 @@ fun SpaceSwitcherSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -115,7 +128,7 @@ fun SpaceSwitcherSheet(
                 )
             } else {
                 spaces.forEach { space ->
-                    val isSelected = space.id == activeSpaceId
+                    val isSelected = activeRoom == null && space.id == activeSpaceId
                     val isPersonal = currentUserId != null && space.isPersonalFor(currentUserId)
                     val roleLabel = when {
                         isPersonal -> "我的"
@@ -187,40 +200,141 @@ fun SpaceSwitcherSheet(
 
             HorizontalDivider(thickness = 1.dp, color = colors.line1, modifier = Modifier.padding(vertical = 4.dp))
 
-            // Stage 3B placeholder section for Temporary Rooms
-            Surface(
+            // Temporary Rooms section (§2.7)
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                shape = shapes.md,
-                color = colors.surface0,
-                border = BorderStroke(1.dp, colors.line1),
-                tonalElevation = 0.dp,
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                Icon(
+                    imageVector = Icons.Rounded.MeetingRoom,
+                    contentDescription = null,
+                    tint = colors.devPad,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    text = "临时房间",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = colors.fg,
+                )
+            }
+            Text(
+                text = "适合跨人临时快传，到期后自动销毁；凭房间码与可选 PIN 即可加入。",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.fg3,
+            )
+
+            if (activeRoom != null) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = shapes.md,
+                    color = colors.surface2,
+                    border = BorderStroke(1.dp, colors.line3),
+                    tonalElevation = 0.dp,
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.MeetingRoom,
-                        contentDescription = null,
-                        tint = colors.fg3,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "临时房间",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = colors.fg2,
-                        )
-                        Text(
-                            text = "创建与加入临时房间将于下一阶段补齐",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = colors.fg4,
-                        )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "当前房间 · ${activeRoom.code ?: activeRoom.token.take(6)}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.fg,
+                            )
+                            Text(
+                                text = if (activeRoom.hasPin) "已设置 PIN 保护" else "无 PIN 保护",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.fg3,
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                onDismiss()
+                                onLeaveRoom()
+                            },
+                            modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                            colors = ButtonDefaults.textButtonColors(contentColor = colors.brand),
+                        ) {
+                            Text("退出房间", fontWeight = FontWeight.SemiBold)
+                        }
                     }
                 }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = {
+                        onDismiss()
+                        onQuickCreateOrReuseRoom()
+                    },
+                    enabled = !isRoomBusy,
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = 48.dp),
+                    shape = shapes.md,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = colors.brand,
+                        contentColor = colors.brandFg,
+                    ),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = null,
+                        modifier = Modifier.size(17.dp),
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text("我的临时房间", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        onDismiss()
+                        onOpenJoinRoomDialog()
+                    },
+                    enabled = !isRoomBusy,
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = 48.dp),
+                    shape = shapes.md,
+                    border = BorderStroke(1.dp, colors.line2),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.fg),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Key,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text("输入房间码", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+
+            TextButton(
+                onClick = {
+                    onDismiss()
+                    onOpenCustomRoomDialog()
+                },
+                enabled = !isRoomBusy,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = 48.dp),
+                colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Tune,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("高级选项：自定义房间码与 PIN 创建", style = MaterialTheme.typography.labelMedium)
             }
         }
     }
@@ -237,7 +351,8 @@ fun ItemMoreActionsSheet(
     onEditText: () -> Unit,
     onTogglePin: () -> Unit,
     onEditLabelsAndGroup: () -> Unit,
-    onShareLinkPlaceholder: () -> Unit,
+    onOpenItemShare: () -> Unit,
+    onOpenPreview: (() -> Unit)? = null,
     onRequestRetract: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -317,6 +432,18 @@ fun ItemMoreActionsSheet(
                 )
             }
 
+            if (onOpenPreview != null) {
+                SheetActionRow(
+                    icon = Icons.Rounded.Visibility,
+                    label = if (item.isText) "全文 / Markdown 阅读" else "在线预览 / 播放",
+                    tint = colors.fg,
+                    onClick = {
+                        onDismiss()
+                        onOpenPreview()
+                    },
+                )
+            }
+
             if (!isReadOnly) {
                 if (item.isText) {
                     SheetActionRow(
@@ -352,12 +479,12 @@ fun ItemMoreActionsSheet(
 
                 SheetActionRow(
                     icon = Icons.Rounded.Link,
-                    label = "生成单项分享链接",
-                    subtitle = "完整分享管理面板将在下一阶段接入",
-                    tint = colors.fg2,
+                    label = "分享链接",
+                    subtitle = "创建有效期/次数受控的只读短链",
+                    tint = colors.fg,
                     onClick = {
                         onDismiss()
-                        onShareLinkPlaceholder()
+                        onOpenItemShare()
                     },
                 )
 
