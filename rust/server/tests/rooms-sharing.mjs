@@ -200,8 +200,14 @@ async function flow(kind, seed, m) {
       { ...empty, hours: Array.from({ length: 10 }, (_, i) => i + 2), days: Array.from({ length: 10 }, (_, i) => i + 2), months: [2] },
     ]) await check('invalid presets', '/api/me/share-presets', { method: 'PUT', cookie: alice, json: invalid }, 400, 'INVALID_INPUT');
     await check('presets unchanged after invalid', '/api/me/share-presets', { cookie: alice }, 200);
-    await check('presets browser required', '/api/me/share-presets', { token: m.pat }, 403, 'BROWSER_SESSION_REQUIRED');
-    await check('presets put browser required', '/api/me/share-presets', { method: 'PUT', token: m.pat, json: empty }, 403, 'BROWSER_SESSION_REQUIRED');
+    if (kind === 'rust') {
+      // RHEA-270: read-scoped PAT may read share presets; writes and managed shares require account scope.
+      expect(await req(s, '/api/me/share-presets', { token: m.pat }), 200);
+      expect(await req(s, '/api/me/share-presets', { method: 'PUT', token: m.pat, json: empty }), 403, 'INSUFFICIENT_SCOPE');
+    } else {
+      expect(await req(s, '/api/me/share-presets', { token: m.pat }), 403, 'BROWSER_SESSION_REQUIRED');
+      expect(await req(s, '/api/me/share-presets', { method: 'PUT', token: m.pat, json: empty }), 403, 'BROWSER_SESSION_REQUIRED');
+    }
     await check('clear presets', '/api/me/share-presets', { method: 'PUT', cookie: alice, json: { days: [], views: [] } }, 200);
     await check('presets cleared', '/api/me/share-presets', { cookie: alice }, 200);
     const rawPresets = [
@@ -217,9 +223,10 @@ async function flow(kind, seed, m) {
       if (saved) assert.deepEqual(result.body, saved, label);
       transcript.push([label, result.status, normalize(result.body), result.headers.get('cache-control'), result.headers.get('content-type')]);
     }
-    await check('history browser required', '/api/shares', { token: m.pat }, 403, 'BROWSER_SESSION_REQUIRED');
-    await check('revoke browser required', `/api/shares/${share.id}/revoke`, {method:'POST', token:m.pat},403,'BROWSER_SESSION_REQUIRED');
-    await check('delete browser required', `/api/shares/${share.id}`, {method:'DELETE', token:m.pat},403,'BROWSER_SESSION_REQUIRED');
+    const shareScopeCode = kind === 'rust' ? 'INSUFFICIENT_SCOPE' : 'BROWSER_SESSION_REQUIRED';
+    expect(await req(s, '/api/shares', { token: m.pat }), 403, shareScopeCode);
+    expect(await req(s, `/api/shares/${share.id}/revoke`, { method: 'POST', token: m.pat }), 403, shareScopeCode);
+    expect(await req(s, `/api/shares/${share.id}`, { method: 'DELETE', token: m.pat }), 403, shareScopeCode);
     await check('invalid cursor', '/api/shares?cursor=invalid', { cookie: alice }, 400, 'INVALID_INPUT');
     const expiring = await create('expiring share', `${base}/items/${item.id}/shares`, { expiresIn: '1h' }, alice);
     sql(data, 'UPDATE shares SET expiresAt=1 WHERE id=?', expiring.id);

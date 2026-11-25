@@ -106,8 +106,9 @@ export interface OAuthApp {
   provider: string; clientId: string; clientSecret: string; enabled: number; updatedAt: number; updatedBy: string | null;
   checkedAt: number | null; checkOk: number | null; checkCode: string | null;
 }
-/** 'web' (RHEA-190 ui): only the Android app asks for it; it may trade the token for a browser session. */
-export type TokenScope = 'read' | 'write' | 'web';
+/** 'web' (RHEA-190 ui): only the Android app asks for it; it may trade the token for a browser session.
+ * 'account' / 'admin' (RHEA-270): issued only by interactive App login; never requestable via PAT/device code. */
+export type TokenScope = 'read' | 'write' | 'web' | 'account' | 'admin';
 export interface AccessToken {
   id: string; userId: string; name: string; scopes: TokenScope[]; createdAt: number;
   lastUsedAt: number | null; expiresAt: number | null; revoked: number;

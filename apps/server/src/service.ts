@@ -23,6 +23,7 @@ export class ClipboardService {
   }
   admin(session: Session | undefined) {
     const auth = this.requireSession(session);
+    if (auth.bearer && !auth.bearer.scopes.includes('admin')) throw new ApiError(403, 'INSUFFICIENT_SCOPE');
     if (auth.user.role !== 'admin') throw new ApiError(403, 'FORBIDDEN');
     return auth;
   }
@@ -274,6 +275,7 @@ export class ClipboardService {
   /** RHEA-192 m17: registration invites are an admin tool; 403 INVITES_ADMIN_ONLY for everyone else. */
   registrationAdmin(session: Session | undefined) {
     const auth = this.requireSession(session);
+    if (auth.bearer && !auth.bearer.scopes.includes('admin')) throw new ApiError(403, 'INSUFFICIENT_SCOPE');
     if (auth.user.role !== 'admin') throw new ApiError(403, 'INVITES_ADMIN_ONLY');
     return auth;
   }

@@ -215,8 +215,8 @@ pub async fn websocket(
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> ApiResult<Response> {
     // Like TS, Origin precedes scope authorization (including for signed-out clients).
-    let (expected, source) = app
-        .config
+    let config = app.config();
+    let (expected, source) = config
         .origin
         .as_ref()
         .map(|(o, s)| (o.as_str(), *s))
@@ -285,8 +285,8 @@ pub async fn room_websocket(
     RawQuery(query): RawQuery,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> ApiResult<Response> {
-    let (expected, source) = app
-        .config
+    let config = app.config();
+    let (expected, source) = config
         .origin
         .as_ref()
         .map(|(origin, source)| (origin.as_str(), *source))

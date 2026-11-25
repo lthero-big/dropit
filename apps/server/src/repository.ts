@@ -65,6 +65,10 @@ export interface Repository {
   linkIdentity(userId: string, identity: Identity, now: number): boolean;
   unlinkIdentity(userId: string, provider: string): void;
   login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number, meta?: SessionMeta, policy?: RegistrationPolicy): User;
+  /** Resolves/creates an OAuth account without creating a browser session (used by App OAuth exchange). */
+  oauthUser(identity: Identity, inviteHash: string | null, admins: string[], now: number, policy?: RegistrationPolicy): User;
+  /** Loads an account by id (including mustChangePassword) for App token exchange / link checks. */
+  userById(userId: string): (User & { mustChangePassword: number }) | undefined;
   /** RHEA-190 auth step 2 — password accounts. */
   userCount(): number;
   /** Account (and its password hash) for a password sign-in; prefers the row that has a password. */
@@ -332,60 +336,72 @@ export class SqliteRepository implements Repository {
       return flow;
     })();
   }
+  private resolveOAuthUser(identity: Identity, inviteHash: string | null, admins: string[], now: number, policy: RegistrationPolicy = 'invite'): User {
+    let row = this.db.prepare('SELECT u.* FROM users u JOIN identities i ON i.userId=u.id WHERE i.provider=? AND i.subject=?')
+      .get(identity.provider, identity.subject) as UserRow | undefined;
+    let created = false;
+    if (row?.disabled) throw new ApiError(403, 'USER_DISABLED');
+    if (row) this.db.prepare('UPDATE identities SET email=? WHERE provider=? AND subject=?').run(identity.email, identity.provider, identity.subject);
+    const invite = inviteHash ? this.invite(inviteHash, now) : undefined;
+    if (!row) {
+      const pending = this.db.prepare('SELECT * FROM users WHERE pending=1 AND lower(email)=lower(?)').get(identity.email) as UserRow | undefined;
+      // A disabled pre-provisioned account must not be bypassed by creating a second user.
+      if (pending?.disabled) throw new ApiError(403, 'USER_DISABLED');
+      if (pending) {
+        this.db.prepare('UPDATE users SET pending=0 WHERE id=?').run(pending.id);
+        this.db.prepare('INSERT INTO identities (provider,subject,userId,email,linkedAt) VALUES (?,?,?,?,?)').run(identity.provider, identity.subject, pending.id, identity.email, now);
+        row = { ...pending, pending: 0 };
+      }
+    }
+    if (!row) {
+      // RHEA-190 m11: an unknown identity whose verified email already belongs to an
+      // account is NOT merged silently and NOT turned into a duplicate account. The
+      // owner signs in the usual way and binds the new provider in 设置 → 登录方式.
+      const existing = this.db.prepare(`SELECT u.disabled FROM users u WHERE u.pending=0 AND (lower(u.email)=lower(?)
+        OR EXISTS (SELECT 1 FROM identities i WHERE i.userId=u.id AND lower(i.email)=lower(?))) LIMIT 1`)
+        .get(identity.email, identity.email) as { disabled: number } | undefined;
+      if (existing?.disabled) throw new ApiError(403, 'USER_DISABLED');
+      if (existing) throw new ApiError(409, 'ACCOUNT_EXISTS');
+    }
+    if (!row) {
+      // BEGIN IMMEDIATE holds the reserved lock across this count and the insert,
+      // so two concurrent sign-ins cannot both observe an empty users table.
+      const first = (this.db.prepare('SELECT count(*) AS n FROM users').get() as { n: number }).n === 0;
+      // A missing or stale invite must not block the empty-database bootstrap.
+      if (inviteHash && !invite && !first) throw new ApiError(403, 'INVITE_INVALID');
+      const listed = admins.includes(identity.email.toLowerCase());
+      // RHEA-190 auth step 2: 管理 → 注册 decides who may create an account. ADMIN_EMAILS and
+      // the empty-database bootstrap are operator decisions and bypass it.
+      if (!first && !listed && policy === 'closed') throw new ApiError(403, 'REGISTRATION_CLOSED');
+      // RHEA-190 m50: only an admin's invite opens registration; a user's space invite is for existing accounts.
+      if (!first && !listed && invite && !invite.creatorAdmin && policy !== 'open') throw new ApiError(403, 'INVITE_NEEDS_ACCOUNT');
+      if (!first && !listed && !invite && policy !== 'open') throw new ApiError(403, 'INVITATION_REQUIRED');
+      const admin = first || listed;
+      row = { id: randomUUID(), email: identity.email, name: identity.name, role: admin ? 'admin' : 'user', disabled: 0, pending: 0, createdAt: now, quotaBytes: null };
+      this.db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt,pending,quotaBytes) VALUES (@id,@email,@name,@role,@disabled,@createdAt,@pending,@quotaBytes)').run(row);
+      this.db.prepare('INSERT INTO identities (provider,subject,userId,email,linkedAt) VALUES (?,?,?,?,?)').run(identity.provider, identity.subject, row.id, identity.email, now);
+      const spaceId = randomUUID();
+      this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt) VALUES (?,?,?,NULL)').run(spaceId, 'Private space', row.id);
+      this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
+      created = true;
+    } else if (inviteHash && !invite) throw new ApiError(403, 'INVITE_INVALID');
+    if (invite) this.spendInvite(invite, row.id, now, created);
+    return toUser(row);
+  }
   login(identity: Identity, inviteHash: string | null, admins: string[], sessionHash: string, expiresAt: number, now: number, meta: SessionMeta = {}, policy: RegistrationPolicy = 'invite') {
     return this.db.transaction(() => {
-      let row = this.db.prepare('SELECT u.* FROM users u JOIN identities i ON i.userId=u.id WHERE i.provider=? AND i.subject=?')
-        .get(identity.provider, identity.subject) as UserRow | undefined;
-      let created = false;
-      if (row?.disabled) throw new ApiError(403, 'USER_DISABLED');
-      if (row) this.db.prepare('UPDATE identities SET email=? WHERE provider=? AND subject=?').run(identity.email, identity.provider, identity.subject);
-      const invite = inviteHash ? this.invite(inviteHash, now) : undefined;
-      if (!row) {
-        const pending = this.db.prepare('SELECT * FROM users WHERE pending=1 AND lower(email)=lower(?)').get(identity.email) as UserRow | undefined;
-        // A disabled pre-provisioned account must not be bypassed by creating a second user.
-        if (pending?.disabled) throw new ApiError(403, 'USER_DISABLED');
-        if (pending) {
-          this.db.prepare('UPDATE users SET pending=0 WHERE id=?').run(pending.id);
-          this.db.prepare('INSERT INTO identities (provider,subject,userId,email,linkedAt) VALUES (?,?,?,?,?)').run(identity.provider, identity.subject, pending.id, identity.email, now);
-          row = { ...pending, pending: 0 };
-        }
-      }
-      if (!row) {
-        // RHEA-190 m11: an unknown identity whose verified email already belongs to an
-        // account is NOT merged silently and NOT turned into a duplicate account. The
-        // owner signs in the usual way and binds the new provider in 设置 → 登录方式.
-        const existing = this.db.prepare(`SELECT u.disabled FROM users u WHERE u.pending=0 AND (lower(u.email)=lower(?)
-          OR EXISTS (SELECT 1 FROM identities i WHERE i.userId=u.id AND lower(i.email)=lower(?))) LIMIT 1`)
-          .get(identity.email, identity.email) as { disabled: number } | undefined;
-        if (existing?.disabled) throw new ApiError(403, 'USER_DISABLED');
-        if (existing) throw new ApiError(409, 'ACCOUNT_EXISTS');
-      }
-      if (!row) {
-        // BEGIN IMMEDIATE holds the reserved lock across this count and the insert,
-        // so two concurrent sign-ins cannot both observe an empty users table.
-        const first = (this.db.prepare('SELECT count(*) AS n FROM users').get() as { n: number }).n === 0;
-        // A missing or stale invite must not block the empty-database bootstrap.
-        if (inviteHash && !invite && !first) throw new ApiError(403, 'INVITE_INVALID');
-        const listed = admins.includes(identity.email.toLowerCase());
-        // RHEA-190 auth step 2: 管理 → 注册 decides who may create an account. ADMIN_EMAILS and
-        // the empty-database bootstrap are operator decisions and bypass it.
-        if (!first && !listed && policy === 'closed') throw new ApiError(403, 'REGISTRATION_CLOSED');
-        // RHEA-190 m50: only an admin's invite opens registration; a user's space invite is for existing accounts.
-        if (!first && !listed && invite && !invite.creatorAdmin && policy !== 'open') throw new ApiError(403, 'INVITE_NEEDS_ACCOUNT');
-        if (!first && !listed && !invite && policy !== 'open') throw new ApiError(403, 'INVITATION_REQUIRED');
-        const admin = first || listed;
-        row = { id: randomUUID(), email: identity.email, name: identity.name, role: admin ? 'admin' : 'user', disabled: 0, pending: 0, createdAt: now, quotaBytes: null };
-        this.db.prepare('INSERT INTO users (id,email,name,role,disabled,createdAt,pending,quotaBytes) VALUES (@id,@email,@name,@role,@disabled,@createdAt,@pending,@quotaBytes)').run(row);
-        this.db.prepare('INSERT INTO identities (provider,subject,userId,email,linkedAt) VALUES (?,?,?,?,?)').run(identity.provider, identity.subject, row.id, identity.email, now);
-        const spaceId = randomUUID();
-        this.db.prepare('INSERT INTO spaces (id,name,ownerId,expiresAt) VALUES (?,?,?,NULL)').run(spaceId, 'Private space', row.id);
-        this.db.prepare('INSERT INTO members (spaceId,userId) VALUES (?,?)').run(spaceId, row.id);
-        created = true;
-      } else if (inviteHash && !invite) throw new ApiError(403, 'INVITE_INVALID');
-      if (invite) this.spendInvite(invite, row.id, now, created);
-      this.createSession(row.id, sessionHash, expiresAt, now, meta);
-      return toUser(row);
+      const user = this.resolveOAuthUser(identity, inviteHash, admins, now, policy);
+      this.createSession(user.id, sessionHash, expiresAt, now, meta);
+      return user;
     }).immediate();
+  }
+  oauthUser(identity: Identity, inviteHash: string | null, admins: string[], now: number, policy: RegistrationPolicy = 'invite') {
+    return this.db.transaction(() => this.resolveOAuthUser(identity, inviteHash, admins, now, policy)).immediate();
+  }
+  userById(userId: string) {
+    const row = this.db.prepare('SELECT * FROM users WHERE id=?').get(userId) as UserRow | undefined;
+    if (!row) return undefined;
+    return { ...toUser(row), mustChangePassword: row.mustChangePassword ? 1 : 0 };
   }
   private spendInvite(invite: Invite, userId: string, now: number, created = false) {
     // A personal invite only opens registration: it never adds anyone to the inviter's space and an existing account never spends it.
@@ -511,6 +527,7 @@ export class SqliteRepository implements Repository {
     if (!row) return undefined;
     if (touch) this.db.prepare('UPDATE access_tokens SET lastUsedAt=? WHERE id=?').run(now, row.tokenId);
     return { user: toUser(row), sessionHash: '', expiresAt: row.expiresAt ?? Infinity,
+      ...(row.mustChangePassword ? { mustChangePassword: true } : {}),
       bearer: { id: row.tokenId, scopes: JSON.parse(row.scopes) as AccessToken['scopes'] } };
   }
   renameAccessToken(id: string, userId: string, name: string) {

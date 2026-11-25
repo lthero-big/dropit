@@ -124,8 +124,12 @@ pub async fn create_invite(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let Path(space_id) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let (auth, _) = owned_space(&app, &context, &space_id).await?;
-    app.limit("invite:ip", &context.ip, app.config.rate_invite)?;
-    app.limit("invite:user", &auth.account.user.id, app.config.rate_invite)?;
+    app.limit("invite:ip", &context.ip, app.config().rate_invite)?;
+    app.limit(
+        "invite:user",
+        &auth.account.user.id,
+        app.config().rate_invite,
+    )?;
     let body = body_if_json(request).await?;
     let max_uses = value_i64(body.get("maxUses"), 1, 1, 100)?;
     let hours = value_i64(body.get("expiresInHours"), 168, 1, 720)?;
@@ -179,7 +183,7 @@ pub async fn revoke_invite(
 ) -> ApiResult<StatusCode> {
     let Path((space_id, invite_id)) = path.map_err(|_| ApiError::NOT_FOUND)?;
     owned_space(&app, &context, &space_id).await?;
-    app.limit("invite:ip", &context.ip, app.config.rate_invite)?;
+    app.limit("invite:ip", &context.ip, app.config().rate_invite)?;
     let changed = app
         .db
         .run(move |db| {
@@ -313,7 +317,7 @@ pub async fn invite_info(
     path: Result<Path<String>, PathRejection>,
 ) -> ApiResult<Json<Value>> {
     let Path(raw) = path.map_err(|_| ApiError::NOT_FOUND)?;
-    app.limit("invite:ip", &context.ip, app.config.rate_invite)?;
+    app.limit("invite:ip", &context.ip, app.config().rate_invite)?;
     let hash = password::hash(&raw);
     let auth_user = context
         .auth
@@ -386,7 +390,7 @@ pub async fn accept_invite(
 ) -> ApiResult<Json<Value>> {
     let Path(raw) = path.map_err(|_| ApiError::NOT_FOUND)?;
     let auth = context.require_auth()?.clone();
-    app.limit("invite:ip", &context.ip, app.config.rate_invite)?;
+    app.limit("invite:ip", &context.ip, app.config().rate_invite)?;
     let token_hash = password::hash(&raw);
     let user_id = auth.account.user.id.clone();
     let result = app.db.run(move |db| {

@@ -84,9 +84,9 @@ async fn target(
     };
     if write {
         let (ip, user, limit) = if target.auth.is_none() {
-            ("room-write:ip", "room-write:user", app.config.rate_room)
+            ("room-write:ip", "room-write:user", app.config().rate_room)
         } else {
-            ("write:ip", "write:user", app.config.rate_upload)
+            ("write:ip", "write:user", app.config().rate_upload)
         };
         app.limit(ip, &context.ip, limit)?;
         if let Some(auth) = &context.auth {
@@ -380,9 +380,9 @@ pub async fn edit(
 ) -> ApiResult<Json<crate::js::ItemResponse>> {
     let (target, mut parameters) = target(&app, &context, parameters, true).await?;
     let id = parameters.remove("id").ok_or(ApiError::NOT_FOUND)?;
-    let body = read_json(request, app.config.max_text * 6 + 1024).await?;
+    let body = read_json(request, app.config().max_text * 6 + 1024).await?;
     let text = body.text("text")?;
-    let config = app.config.clone();
+    let config = app.config();
     let channel = target.id.clone();
     let _gate = app.realtime.gate.lock().await;
     let item = app

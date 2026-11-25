@@ -331,6 +331,12 @@ impl Object {
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.0.keys().filter_map(JsString::as_str)
     }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (&JsString, &Value)> {
+        self.0.iter()
+    }
     pub fn text(&self, key: &str) -> crate::ApiResult<JsString> {
         match self.get(key) {
             Some(Value::String(text)) if !text.is_empty() => Ok(text.clone()),

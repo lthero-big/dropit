@@ -135,7 +135,7 @@ fn guess_blocked(app: &App, context: &RequestContext, code: Option<&str>) -> Api
     for key in keys.into_iter().filter(|(_, key)| !key.is_empty()) {
         if let Some(bucket) = buckets.get(&key)
             && bucket.reset > now()
-            && bucket.count >= app.config.rate_auth
+            && bucket.count >= app.config().rate_auth
         {
             return Err(rate_error((bucket.reset - now() + 999) / 1000));
         }
@@ -143,9 +143,9 @@ fn guess_blocked(app: &App, context: &RequestContext, code: Option<&str>) -> Api
     Ok(())
 }
 fn guess_failed(app: &App, context: &RequestContext, code: Option<&str>) {
-    let _ = app.limit("guess:ip", &context.ip, app.config.rate_auth);
+    let _ = app.limit("guess:ip", &context.ip, app.config().rate_auth);
     if let Some(code) = code {
-        let _ = app.limit("guess:code", &password::hash(code), app.config.rate_auth);
+        let _ = app.limit("guess:code", &password::hash(code), app.config().rate_auth);
     }
 }
 fn caller_limit(
@@ -165,7 +165,7 @@ pub async fn scope(app: &App, context: &RequestContext, raw: &str) -> ApiResult<
         app,
         context,
         ("room-access:ip", "room-access:user"),
-        app.config.rate_upload,
+        app.config().rate_upload,
     )?;
     load_room(app, raw).await
 }
@@ -271,14 +271,14 @@ pub async fn create(
         &app,
         &context,
         ("room-create:ip", "room-create:user"),
-        app.config.rate_room,
+        app.config().rate_room,
     )?;
     let room_id = Uuid::new_v4().to_string();
     let created_by = context
         .auth
         .as_ref()
         .map(|auth| auth.account.user.id.clone());
-    let expires = now() + app.config.room_retention;
+    let expires = now() + app.config().room_retention;
     for _ in 0..12 {
         let key = password::session_token()?;
         let code = custom_code.clone().unwrap_or(random_code()?);
@@ -389,7 +389,7 @@ pub async fn enter(
                 if *until > 0 {
                     *until > time
                 } else {
-                    *since + app.config.pin_lock_ms > time
+                    *since + app.config().pin_lock_ms > time
                 }
             });
             if locks.len() >= 10000
@@ -400,9 +400,9 @@ pub async fn enter(
             }
             let entry = locks.entry(space.id.clone()).or_insert((0, time, 0));
             entry.0 += 1;
-            if entry.0 >= app.config.pin_lock_failures {
-                entry.2 = time + app.config.pin_lock_ms;
-                return Err(rate_error((app.config.pin_lock_ms + 999) / 1000));
+            if entry.0 >= app.config().pin_lock_failures {
+                entry.2 = time + app.config().pin_lock_ms;
+                return Err(rate_error((app.config().pin_lock_ms + 999) / 1000));
             }
             return Err(ApiError::new(403, "PIN_INVALID"));
         }
@@ -437,7 +437,7 @@ pub async fn change_code(
         &app,
         &context,
         ("room-code:ip", "room-code:user"),
-        app.config.rate_room,
+        app.config().rate_room,
     )?;
     guess_blocked(&app, &context, None)?;
     if !body.contains_key("code") && !body.contains_key("pin") {
@@ -496,7 +496,7 @@ pub async fn info(
         json!({ "id": space.id, "name": space.name, "expiresAt": space.expires_at,
         "code": space.room_code, "hasPin": space.pin_hash.is_some(),
         "url": format!("{}/r/{}", origin_for(&app, &context), urlencoding(space.room_code.as_deref().unwrap_or_default())),
-        "maxFileBytes": app.config.room_max_file, "quotaBytes": app.config.room_quota }),
+        "maxFileBytes": app.config().room_max_file, "quotaBytes": app.config().room_quota }),
     ))
 }
 
@@ -522,8 +522,9 @@ pub async fn admin_rooms(
     for row in &mut rows {
         let estimated = row["createdAt"].is_null();
         if estimated {
-            row["createdAt"] =
-                (row["expiresAt"].as_i64().unwrap_or_default() - app.config.room_retention).into();
+            row["createdAt"] = (row["expiresAt"].as_i64().unwrap_or_default()
+                - app.config().room_retention)
+                .into();
         }
         row["createdAtEstimated"] = estimated.into();
         row["lockedFor"] = locked_for(&app, row["id"].as_str().unwrap_or_default())?
@@ -596,7 +597,7 @@ pub async fn admin_delete(
         tx.commit()?; Ok((keys, upload_ids))
     }).await?;
     crate::uploads::abort_sessions(&app, &upload_ids).await;
-    let directory = crate::downloads::files_dir(&app.config.data);
+    let directory = crate::downloads::files_dir(&app.config().data);
     for key in keys {
         let path = crate::downloads::object_path(&directory, &key)?;
         match tokio::fs::remove_file(path).await {
@@ -636,15 +637,15 @@ pub async fn text(
         &app,
         &context,
         ("room-write:ip", "room-write:user"),
-        app.config.rate_room,
+        app.config().rate_room,
     )?;
     let headers = request.headers().clone();
-    let body = read_json(request, app.config.max_text * 6 + 1024).await?;
+    let body = read_json(request, app.config().max_text * 6 + 1024).await?;
     let text = body.text("text")?;
     if text.is_blank() {
         return Err(ApiError::new(400, "EMPTY_TEXT"));
     }
-    if text.len() > app.config.max_text {
+    if text.len() > app.config().max_text {
         return Err(ApiError::new(413, "TEXT_TOO_LARGE"));
     }
     let group = match body.get("group") {
@@ -670,7 +671,7 @@ pub async fn text(
     };
     let channel = space.id.clone();
     let _gate = app.realtime.gate.lock().await;
-    let config = app.config.clone();
+    let config = app.config();
     let db_channel = channel.clone();
     let (item, groups) = app
         .db
@@ -701,7 +702,7 @@ pub async fn delete_item(
         &app,
         &context,
         ("room-write:ip", "room-write:user"),
-        app.config.rate_room,
+        app.config().rate_room,
     )?;
     let channel = space.id.clone();
     let deleted = item_id.clone();
@@ -714,7 +715,7 @@ pub async fn delete_item(
     app.realtime
         .publish(&channel, json!({ "type": "item.deleted", "id": deleted }));
     for key in keys {
-        let directory = crate::downloads::files_dir(&app.config.data);
+        let directory = crate::downloads::files_dir(&app.config().data);
         let path = crate::downloads::object_path(&directory, &key)?;
         let _ = tokio::fs::remove_file(path).await;
         app.db.run(move |db| db::forget_garbage(db, &key)).await?;
@@ -754,7 +755,7 @@ pub async fn download(
     let range = crate::downloads::range_header(request.headers());
     let head = request.method() == Method::HEAD;
     match crate::downloads::prepare_download(
-        &crate::downloads::files_dir(&app.config.data),
+        &crate::downloads::files_dir(&app.config().data),
         &key,
         &filename,
         file.size.max(0) as u64,
@@ -782,7 +783,7 @@ pub async fn thumbnail(
         return ApiError::NOT_FOUND.into_response();
     };
     match crate::downloads::prepare_thumbnail(
-        &crate::downloads::files_dir(&app.config.data),
+        &crate::downloads::files_dir(&app.config().data),
         &key,
         false,
     ) {
@@ -851,7 +852,7 @@ pub async fn media(
     let range = crate::downloads::range_header(request.headers());
     let head = request.method() == Method::HEAD;
     match crate::downloads::prepare_media(
-        &crate::downloads::files_dir(&app.config.data),
+        &crate::downloads::files_dir(&app.config().data),
         &key,
         file.filename.as_deref().unwrap_or("media"),
         file.size.max(0) as u64,
@@ -875,7 +876,7 @@ fn locked_for(app: &App, id: &str) -> ApiResult<Option<i64>> {
         if *until > 0 {
             *until > time
         } else {
-            *since + app.config.pin_lock_ms > time
+            *since + app.config().pin_lock_ms > time
         }
     });
     Ok(locks
