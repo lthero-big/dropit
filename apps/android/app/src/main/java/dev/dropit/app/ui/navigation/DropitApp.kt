@@ -234,6 +234,7 @@ fun DropitApp(
                 mediaRepository = container.mediaRepository,
                 imageLoader = imageLoader,
                 onThemeModeChange = appViewModel::setThemeMode,
+                onSwitchAccount = appViewModel::switchAccount,
                 onLogoutAndSwitchServer = appViewModel::logoutAndSwitchServer,
             )
         }
@@ -253,6 +254,7 @@ private fun DropitMainScaffold(
     mediaRepository: MediaRepository,
     imageLoader: ImageLoader,
     onThemeModeChange: (ThemeMode) -> Unit,
+    onSwitchAccount: () -> Unit,
     onLogoutAndSwitchServer: () -> Unit,
 ) {
     val colors = DropitTheme.colors
@@ -349,6 +351,7 @@ private fun DropitMainScaffold(
                         settingsState = settingsState,
                         onThemeModeChange = onThemeModeChange,
                         onCheckUpdate = settingsViewModel::checkForUpdateManually,
+                        onSwitchAccount = onSwitchAccount,
                         onLogoutAndSwitchServer = onLogoutAndSwitchServer,
                     )
                 }

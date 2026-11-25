@@ -98,6 +98,18 @@ class PaperThemeTokensTest {
         assertTrue("Dark brandFg/brand >= 4.5", contrastRatio(DropitDarkColors.brandFg, DropitDarkColors.brand) >= 4.5)
     }
 
+    @Test
+    fun brandMarkTokens_matchOfficialWebFaviconAndLogoPalette() {
+        assertEquals(Color(0xFF1D1B18), DropitBrandTokens.LightTile)
+        assertEquals(Color(0xFFFAFAF8), DropitBrandTokens.LightGlyph)
+        assertEquals(Color(0xFFD0021B), DropitBrandTokens.LightDot)
+        assertEquals(Color(0xFFF4F2EE), DropitBrandTokens.LightLauncherBg)
+
+        assertEquals(Color(0xFFEEEBE6), DropitBrandTokens.DarkTile)
+        assertEquals(Color(0xFF121110), DropitBrandTokens.DarkGlyph)
+        assertEquals(Color(0xFFF0434F), DropitBrandTokens.DarkDot)
+    }
+
     private fun contrastRatio(foreground: Color, background: Color): Double {
         val l1 = relativeLuminance(foreground)
         val l2 = relativeLuminance(background)

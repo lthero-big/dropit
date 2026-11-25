@@ -103,11 +103,16 @@ class OnboardingViewModel(
             return
         }
 
+        val isAuthInProgress = current.deviceAuthState is DeviceAuthState.RequestingCode ||
+            current.deviceAuthState is DeviceAuthState.WaitingForApproval
         val sameServerAlreadyActive = current.configuredServerOrigin == cleaned &&
             current.step == OnboardingStep.DEVICE_AUTH &&
-            current.deviceAuthState !is DeviceAuthState.Idle
+            isAuthInProgress
 
-        if (sameServerAlreadyActive && (!sessionExpired || current.sessionExpiredNotice)) {
+        if (sameServerAlreadyActive) {
+            if (sessionExpired && !current.sessionExpiredNotice) {
+                _uiState.update { it.copy(sessionExpiredNotice = true) }
+            }
             return
         }
 
@@ -118,7 +123,7 @@ class OnboardingViewModel(
                 serverUrlInput = if (serverChanged || it.serverUrlInput.isBlank()) cleaned else it.serverUrlInput,
                 configuredServerOrigin = cleaned,
                 verifiedServer = if (serverChanged) null else it.verifiedServer,
-                sessionExpiredNotice = sessionExpired || (!serverChanged && it.sessionExpiredNotice),
+                sessionExpiredNotice = sessionExpired,
             )
         }
         startDeviceAuth(cleaned)

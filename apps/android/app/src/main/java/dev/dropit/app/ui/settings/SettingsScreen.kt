@@ -40,6 +40,7 @@ import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Password
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.SwitchAccount
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.AlertDialog
@@ -73,6 +74,7 @@ import dev.dropit.app.BuildConfig
 import dev.dropit.app.core.auth.ThemeMode
 import dev.dropit.app.core.network.MeResponse
 import dev.dropit.app.core.network.ServerUrl
+import dev.dropit.app.ui.theme.DropitBrandMark
 import dev.dropit.app.ui.theme.DropitElevation
 import dev.dropit.app.ui.theme.DropitMonoTypography
 import dev.dropit.app.ui.theme.DropitTheme
@@ -87,6 +89,7 @@ fun SettingsScreen(
     settingsState: SettingsUiState,
     onThemeModeChange: (ThemeMode) -> Unit,
     onCheckUpdate: () -> Unit,
+    onSwitchAccount: () -> Unit,
     onLogoutAndSwitchServer: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -94,7 +97,8 @@ fun SettingsScreen(
     val shapes = DropitTheme.shapes
     val context = LocalContext.current
     val stackThemeOptions = LocalDensity.current.fontScale >= 1.5f
-    var confirmLogout by remember { mutableStateOf(false) }
+    var confirmSwitchAccount by remember { mutableStateOf(false) }
+    var confirmSwitchServer by remember { mutableStateOf(false) }
 
     val user = me?.user
     val isAdmin = user?.isAdmin == true
@@ -446,16 +450,24 @@ fun SettingsScreen(
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text(
-                        text = "应用更新与关于",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = colors.fg,
-                    )
-                    Text(
-                        text = versionLabel,
-                        style = DropitMonoTypography.meta,
-                        color = colors.fg2,
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        DropitBrandMark(size = 36.dp)
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = "dropit",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = colors.fg,
+                            )
+                            Text(
+                                text = versionLabel,
+                                style = DropitMonoTypography.meta,
+                                color = colors.fg3,
+                            )
+                        }
+                    }
 
                     OutlinedButton(
                         onClick = onCheckUpdate,
@@ -496,34 +508,36 @@ fun SettingsScreen(
                 }
             }
 
-            // 5. Sign Out & Switch Server
-            OutlinedButton(
-                onClick = { confirmLogout = true },
-                enabled = !isLoggingOut,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .defaultMinSize(minHeight = 48.dp),
-                shape = shapes.md,
-                border = BorderStroke(1.dp, colors.destructive.copy(alpha = 0.45f)),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.destructive),
+            // 5. Switch Account & Switch Server
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = shapes.lg,
+                color = colors.surface1,
+                border = BorderStroke(1.dp, colors.line1),
+                shadowElevation = DropitElevation.card(colors.isDark),
+                tonalElevation = 0.dp,
             ) {
-                if (isLoggingOut) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                        color = colors.destructive,
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    SettingsSessionActionRow(
+                        title = "切换账号",
+                        subtitle = "保留当前服务器地址，退出当前账号并重新登录",
+                        icon = Icons.Rounded.SwitchAccount,
+                        isDestructive = false,
+                        isBusy = isLoggingOut,
+                        onClick = { confirmSwitchAccount = true },
                     )
-                } else {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.Logout,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
+                    HorizontalDivider(
+                        thickness = 1.dp,
+                        color = colors.line1,
+                        modifier = Modifier.padding(horizontal = 16.dp),
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "退出登录并更换服务器",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
+                    SettingsSessionActionRow(
+                        title = "更换服务器",
+                        subtitle = "退出登录并清除当前服务器配置，返回服务器配置页",
+                        icon = Icons.AutoMirrored.Rounded.Logout,
+                        isDestructive = true,
+                        isBusy = isLoggingOut,
+                        onClick = { confirmSwitchServer = true },
                     )
                 }
             }
@@ -532,38 +546,38 @@ fun SettingsScreen(
         }
     }
 
-    if (confirmLogout) {
+    if (confirmSwitchAccount) {
         AlertDialog(
-            onDismissRequest = { confirmLogout = false },
+            onDismissRequest = { confirmSwitchAccount = false },
             shape = shapes.lg,
             containerColor = colors.surface1,
             titleContentColor = colors.fg,
             textContentColor = colors.fg2,
             tonalElevation = 0.dp,
             title = {
-                Text("确认退出登录？", style = MaterialTheme.typography.titleMedium)
+                Text("确认切换账号？", style = MaterialTheme.typography.titleMedium)
             },
             text = {
                 Text(
-                    text = "将吊销当前设备令牌，并清理本地服务器配置、临时房间状态、图片缓存及未完成的传输队列，之后可重新配置服务器。",
+                    text = "将吊销当前设备令牌，并清理当前账号的临时房间状态、图片缓存、待发分享与传输队列；当前服务器地址（$serverOrigin）将被保留，退出后可直接登录其他账号。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        confirmLogout = false
-                        onLogoutAndSwitchServer()
+                        confirmSwitchAccount = false
+                        onSwitchAccount()
                     },
                     modifier = Modifier.defaultMinSize(minHeight = 48.dp),
-                    colors = ButtonDefaults.textButtonColors(contentColor = colors.destructive),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.brand),
                 ) {
-                    Text("确认退出", fontWeight = FontWeight.SemiBold)
+                    Text("确认切换", fontWeight = FontWeight.SemiBold)
                 }
             },
             dismissButton = {
                 TextButton(
-                    onClick = { confirmLogout = false },
+                    onClick = { confirmSwitchAccount = false },
                     modifier = Modifier.defaultMinSize(minHeight = 48.dp),
                     colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
                 ) {
@@ -571,6 +585,101 @@ fun SettingsScreen(
                 }
             },
         )
+    }
+
+    if (confirmSwitchServer) {
+        AlertDialog(
+            onDismissRequest = { confirmSwitchServer = false },
+            shape = shapes.lg,
+            containerColor = colors.surface1,
+            titleContentColor = colors.fg,
+            textContentColor = colors.fg2,
+            tonalElevation = 0.dp,
+            title = {
+                Text("确认更换服务器？", style = MaterialTheme.typography.titleMedium)
+            },
+            text = {
+                Text(
+                    text = "将吊销当前设备令牌，并清除本地服务器配置、临时房间状态、图片缓存、更新缓存及未完成的传输队列，返回服务器配置页重新连接服务器。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmSwitchServer = false
+                        onLogoutAndSwitchServer()
+                    },
+                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.destructive),
+                ) {
+                    Text("确认更换", fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { confirmSwitchServer = false },
+                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
+                ) {
+                    Text("取消")
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun SettingsSessionActionRow(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    isDestructive: Boolean,
+    isBusy: Boolean,
+    onClick: () -> Unit,
+) {
+    val colors = DropitTheme.colors
+    val accent = if (isDestructive) colors.destructive else colors.fg
+    val iconTint = if (isDestructive) colors.destructive else colors.fg2
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = 56.dp)
+            .clickable(enabled = !isBusy, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .semantics { contentDescription = "$title，$subtitle" },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = iconTint,
+            modifier = Modifier.size(20.dp),
+        )
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = accent,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.fg3,
+            )
+        }
+        if (isBusy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(16.dp),
+                strokeWidth = 2.dp,
+                color = iconTint,
+            )
+        }
     }
 }
 
