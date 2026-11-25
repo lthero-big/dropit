@@ -151,7 +151,7 @@ impl StateData {
             let mut error = ApiError::new(429, "RATE_LIMITED");
             error.header = Some((
                 header::RETRY_AFTER,
-                HeaderValue::from((retry_at - time + 999) / 1000),
+                HeaderValue::from(((retry_at - time + 999) / 1000).max(1)),
             ));
             return Err(error);
         }
@@ -966,7 +966,7 @@ async fn login(
     Extension(context): Extension<RequestContext>,
     request: Request,
 ) -> ApiResult<impl IntoResponse> {
-    app.limit("auth:ip", &context.ip, app.config.rate_auth)?;
+    app.limit("auth", &context.ip, app.config.rate_auth)?;
     let user_agent = header_value(request.headers(), "user-agent").map(|agent| {
         let truncated: Vec<_> = agent.encode_utf16().take(400).collect();
         String::from_utf16_lossy(&truncated)

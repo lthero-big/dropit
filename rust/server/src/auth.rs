@@ -208,11 +208,21 @@ fn oauth_error(app: &crate::StateData, context: &RequestContext, code: &str) -> 
     redirect(format!("{}/login?error={code}", origin(app, context)))
 }
 
+fn retry_after_header(error: &ApiError) -> Option<&HeaderValue> {
+    error
+        .header
+        .as_ref()
+        .filter(|(name, _)| *name == header::RETRY_AFTER)
+        .map(|(_, value)| value)
+}
+
 fn oauth_failure(
     app: &crate::StateData,
     context: &RequestContext,
     linking: bool,
     code: &str,
+    clear_flow: bool,
+    retry_after: Option<&HeaderValue>,
 ) -> Response {
     let mut response = if linking {
         redirect(format!(
@@ -222,9 +232,16 @@ fn oauth_failure(
     } else {
         oauth_error(app, context, code)
     };
-    response
-        .headers_mut()
-        .append(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
+    if clear_flow {
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
+    }
+    if let Some(retry_after) = retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, retry_after.clone());
+    }
     response
 }
 
@@ -512,14 +529,7 @@ pub async fn oauth_start(
     Path(provider): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> ApiResult<Response> {
-    if let Err(error) = app.limit("auth", &context.ip, app.config.rate_auth) {
-        return Ok(oauth_failure(
-            &app,
-            &context,
-            false,
-            oauth_error_code(&error),
-        ));
-    }
+    app.limit("auth", &context.ip, app.config.rate_auth)?;
     let Some(oauth) = oauth_app(&app, &provider).await? else {
         return Err(ApiError::new(404, "PROVIDER_UNAVAILABLE"));
     };
@@ -534,16 +544,19 @@ pub async fn oauth_start(
     } else {
         None
     };
-    let invite_hash = if link_user_id.is_none() {
-        query.get("invite").map(|value| password::hash(value))
+    let raw_invite_hash = if link_user_id.is_none() {
+        query
+            .get("invite")
+            .filter(|value| !value.is_empty())
+            .map(|value| password::hash(value))
     } else {
         None
     };
-    if let Some(hash) = invite_hash.as_deref() {
+    let invite_hash = if let Some(hash) = raw_invite_hash {
         let valid = app
             .db
             .run({
-                let hash = hash.to_owned();
+                let hash = hash.clone();
                 move |db| invite(db, &hash, now()).map(|v| v.is_some())
             })
             .await?;
@@ -551,7 +564,10 @@ pub async fn oauth_start(
         if !valid && count > 0 {
             return Ok(oauth_error(&app, &context, "INVITE_INVALID"));
         }
-    }
+        valid.then_some(hash)
+    } else {
+        None
+    };
     let state = random_token()?;
     let browser_token = random_token()?;
     let verifier = random_token()?;
@@ -589,54 +605,95 @@ pub async fn oauth_callback(
             &context,
             false,
             oauth_error_code(&error),
+            false,
+            retry_after_header(&error),
         ));
     }
     let flow_cookie = flow_cookie_from_request(&context, request.headers());
-    let state = query.get("state").cloned();
-    let Some(oauth) = oauth_app(&app, &provider).await? else {
-        return Ok(oauth_failure(&app, &context, false, "OAUTH_PROVIDER_ERROR"));
+    let state = query
+        .get("state")
+        .filter(|value| !value.is_empty())
+        .cloned();
+    let oauth = match oauth_app(&app, &provider).await {
+        Ok(Some(oauth)) if oauth.enabled => oauth,
+        Ok(_) => {
+            return Ok(oauth_failure(
+                &app,
+                &context,
+                false,
+                "OAUTH_STATE_INVALID",
+                false,
+                None,
+            ));
+        }
+        Err(error) => {
+            return Ok(oauth_failure(
+                &app,
+                &context,
+                false,
+                oauth_error_code(&error),
+                false,
+                retry_after_header(&error),
+            ));
+        }
     };
-    if !oauth.enabled {
-        return Ok(oauth_failure(&app, &context, false, "OAUTH_PROVIDER_ERROR"));
-    }
-    let Some(state) = state else {
-        return Ok(oauth_failure(&app, &context, false, "OAUTH_STATE_INVALID"));
-    };
-    let Some(browser_raw) = flow_cookie else {
-        return Ok(oauth_failure(&app, &context, false, "OAUTH_STATE_INVALID"));
+    let (Some(state), Some(browser_raw)) = (state, flow_cookie) else {
+        return Ok(oauth_failure(
+            &app,
+            &context,
+            false,
+            "OAUTH_STATE_INVALID",
+            false,
+            None,
+        ));
     };
     let state_hash = password::hash(&state);
     let browser_hash = password::hash(&browser_raw);
     let provider_for_db = provider.clone();
-    let flow = app.db.run(move |db| {
+    let flow = match app.db.run(move |db| {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let flow = tx.query_row("SELECT stateHash,browserHash,provider,verifier,inviteHash,expiresAt,linkUserId FROM flows WHERE stateHash=? AND browserHash=? AND provider=? AND expiresAt>?",
             params![state_hash, browser_hash, provider_for_db, now()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, i64>(5)?, row.get::<_, Option<String>>(6)?))).optional()?;
         if flow.is_some() { tx.execute("DELETE FROM flows WHERE stateHash=?", [state_hash])?; }
         tx.commit()?;
         Ok(flow)
-    }).await?;
-    let Some((_, _, _, verifier, invite_hash, _, link_user_id)) = flow else {
-        return Ok(oauth_failure(&app, &context, false, "OAUTH_STATE_INVALID"));
+    }).await {
+        Ok(flow) => flow,
+        Err(error) => {
+            return Ok(oauth_failure(
+                &app,
+                &context,
+                false,
+                oauth_error_code(&error),
+                false,
+                retry_after_header(&error),
+            ));
+        }
     };
-    let mut response = redirect(format!("{}/", origin(&app, &context)));
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
-    if query.contains_key("error") || !query.contains_key("code") {
+    let Some((_, _, _, verifier, invite_hash, _, link_user_id)) = flow else {
         return Ok(oauth_failure(
             &app,
             &context,
-            link_user_id.is_some(),
-            "OAUTH_DENIED",
+            false,
+            "OAUTH_STATE_INVALID",
+            false,
+            None,
         ));
-    }
-    let Some(code) = query.get("code").filter(|v| v.len() <= 4096) else {
+    };
+    let linking = link_user_id.is_some();
+    let has_error = query.get("error").is_some_and(|value| !value.is_empty());
+    let Some(code) = query
+        .get("code")
+        .filter(|value| !value.is_empty() && value.encode_utf16().count() <= 4096)
+        .filter(|_| !has_error)
+    else {
         return Ok(oauth_failure(
             &app,
             &context,
-            link_user_id.is_some(),
+            linking,
             "OAUTH_DENIED",
+            true,
+            None,
         ));
     };
     let identity = match exchange(
@@ -648,22 +705,84 @@ pub async fn oauth_callback(
     .await
     {
         Ok(identity) => identity,
-        Err(_) => {
+        Err(error) => {
             return Ok(oauth_failure(
                 &app,
                 &context,
-                link_user_id.is_some(),
-                "OAUTH_PROVIDER_ERROR",
+                linking,
+                oauth_error_code(&error),
+                true,
+                retry_after_header(&error),
             ));
         }
     };
+    if identity.provider != provider {
+        return Ok(oauth_failure(
+            &app,
+            &context,
+            linking,
+            "OAUTH_PROVIDER_ERROR",
+            true,
+            None,
+        ));
+    }
+    let identity_key = password::hash(&format!("{provider}:{}", identity.subject));
+    if let Err(error) = app.limit("auth:identity", &identity_key, app.config.rate_auth) {
+        return Ok(oauth_failure(
+            &app,
+            &context,
+            linking,
+            oauth_error_code(&error),
+            true,
+            retry_after_header(&error),
+        ));
+    }
+    if oauth.source == "database" {
+        let provider_for_check = provider.clone();
+        if let Err(error) = app
+            .db
+            .run(move |db| {
+                db.execute(
+                    "UPDATE oauth_apps SET checkedAt=?,checkOk=1,checkCode='LOGIN_OK' WHERE provider=?",
+                    params![now(), provider_for_check],
+                )?;
+                Ok(())
+            })
+            .await
+        {
+            return Ok(oauth_failure(
+                &app,
+                &context,
+                linking,
+                oauth_error_code(&error),
+                true,
+                retry_after_header(&error),
+            ));
+        }
+    }
     if let Some(user_id) = link_user_id {
         let current = match browser(&context) {
             Ok(current) => current,
-            Err(_) => return Ok(oauth_failure(&app, &context, true, "UNAUTHENTICATED")),
+            Err(_) => {
+                return Ok(oauth_failure(
+                    &app,
+                    &context,
+                    true,
+                    "UNAUTHENTICATED",
+                    true,
+                    None,
+                ));
+            }
         };
         if current.account.user.id != user_id {
-            return Ok(oauth_failure(&app, &context, true, "UNAUTHENTICATED"));
+            return Ok(oauth_failure(
+                &app,
+                &context,
+                true,
+                "UNAUTHENTICATED",
+                true,
+                None,
+            ));
         }
         let identity_for_db = identity.clone();
         let result = match app
@@ -678,6 +797,8 @@ pub async fn oauth_callback(
                     &context,
                     true,
                     oauth_error_code(&error),
+                    true,
+                    retry_after_header(&error),
                 ));
             }
         };
@@ -697,7 +818,19 @@ pub async fn oauth_callback(
             .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
         return Ok(result);
     }
-    let token = random_token()?;
+    let token = match random_token() {
+        Ok(token) => token,
+        Err(error) => {
+            return Ok(oauth_failure(
+                &app,
+                &context,
+                false,
+                oauth_error_code(&error),
+                true,
+                retry_after_header(&error),
+            ));
+        }
+    };
     let hash = password::hash(&token);
     let user_agent = header_value(request.headers(), "user-agent").map(str::to_owned);
     let ip = context.ip_summary.clone();
@@ -733,9 +866,15 @@ pub async fn oauth_callback(
                 &context,
                 false,
                 oauth_error_code(&error),
+                true,
+                retry_after_header(&error),
             ));
         }
     };
+    let mut response = redirect(format!("{}/", origin(&app, &context)));
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
     let session_cookie = set_cookie(context.secure_cookie, &token, app.config.session / 1000);
     response.headers_mut().append(
         header::SET_COOKIE,
