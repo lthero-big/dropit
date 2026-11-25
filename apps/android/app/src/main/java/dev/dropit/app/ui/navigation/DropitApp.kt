@@ -1,83 +1,76 @@
 package dev.dropit.app.ui.navigation
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.BorderStroke
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.defaultMinSize
-import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.ContentPaste
-import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SwapVert
-import androidx.compose.material.icons.rounded.Upload
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import dev.dropit.app.BuildConfig
+import coil.ImageLoader
 import dev.dropit.app.core.auth.ThemeMode
-import dev.dropit.app.core.network.ServerUrl
-import dev.dropit.app.core.repository.TransferDirection
-import dev.dropit.app.core.repository.TransferStatus
-import dev.dropit.app.core.repository.TransferTask
+import dev.dropit.app.core.network.ClipItem
+import dev.dropit.app.core.network.TargetScope
+import dev.dropit.app.core.repository.MediaRepository
 import dev.dropit.app.di.AppContainer
 import dev.dropit.app.ui.board.BoardScreen
 import dev.dropit.app.ui.board.BoardViewModel
-import dev.dropit.app.ui.board.ClipFormatting
 import dev.dropit.app.ui.onboarding.OnboardingScreen
 import dev.dropit.app.ui.onboarding.OnboardingViewModel
-import dev.dropit.app.ui.theme.DropitElevation
-import dev.dropit.app.ui.theme.DropitMonoTypography
+import dev.dropit.app.ui.rooms.RoomViewModel
+import dev.dropit.app.ui.settings.AppUpdateDialog
+import dev.dropit.app.ui.settings.SettingsScreen
+import dev.dropit.app.ui.settings.SettingsViewModel
+import dev.dropit.app.ui.share.ItemShareViewModel
+import dev.dropit.app.ui.share.ShareTargetSheet
+import dev.dropit.app.ui.share.ShareTargetViewModel
 import dev.dropit.app.ui.theme.DropitTheme
+import dev.dropit.app.ui.transfers.TransfersScreen
+import dev.dropit.app.ui.transfers.TransfersViewModel
+import dev.dropit.app.ui.viewer.ImageLightbox
+import dev.dropit.app.ui.viewer.MediaPlayerViewer
+import dev.dropit.app.ui.viewer.TextMarkdownViewer
+import kotlinx.coroutines.delay
 
 enum class MainTab(
     val label: String,
@@ -86,6 +79,24 @@ enum class MainTab(
     BOARD("内容", Icons.Rounded.ContentPaste),
     TRANSFERS("传输", Icons.Rounded.SwapVert),
     SETTINGS("设置", Icons.Rounded.Settings),
+}
+
+private sealed class ActiveViewer {
+    data class Images(
+        val images: List<ClipItem>,
+        val initialIndex: Int,
+        val scope: TargetScope,
+    ) : ActiveViewer()
+
+    data class Media(
+        val item: ClipItem,
+        val isVideo: Boolean,
+        val scope: TargetScope,
+    ) : ActiveViewer()
+
+    data class TextReader(
+        val item: ClipItem,
+    ) : ActiveViewer()
 }
 
 @Composable
@@ -118,11 +129,35 @@ fun DropitApp(
             LaunchedEffect(route.serverOrigin, route.sessionExpired) {
                 onboardingViewModel.syncEntry(route.serverOrigin, route.sessionExpired)
             }
-            OnboardingScreen(viewModel = onboardingViewModel)
+            Column(modifier = Modifier.fillMaxSize()) {
+                if (rootState.hasPendingShare) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = colors.warnSoft,
+                        tonalElevation = 0.dp,
+                    ) {
+                        Text(
+                            text = "已暂存待发送的分享内容，完成登录后将自动弹出确认面板。",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = colors.warn,
+                            modifier = Modifier
+                                .statusBarsPadding()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        )
+                    }
+                }
+                Box(modifier = Modifier.weight(1f)) {
+                    OnboardingScreen(viewModel = onboardingViewModel)
+                }
+            }
         }
 
         is AppRoute.Main -> {
             val sessionKey = "${route.serverOrigin}#${route.sessionGeneration}"
+            val serverOriginProvider = remember(container) {
+                { container.authRepository.sessionState.value.serverOrigin.orEmpty() }
+            }
+
             val boardViewModel: BoardViewModel = viewModel(
                 key = "board",
                 factory = BoardViewModel.Factory(
@@ -134,13 +169,65 @@ fun DropitApp(
                     onSessionExpired = appViewModel::markSessionExpired,
                 ),
             )
+            val transfersViewModel: TransfersViewModel = viewModel(
+                key = "transfers",
+                factory = TransfersViewModel.Factory(
+                    transferManager = container.transferManager,
+                ),
+            )
+            val roomViewModel: RoomViewModel = viewModel(
+                key = "rooms",
+                factory = RoomViewModel.Factory(
+                    roomRepository = container.roomRepository,
+                    serverOriginProvider = serverOriginProvider,
+                    onSessionExpired = appViewModel::markSessionExpired,
+                ),
+            )
+            val itemShareViewModel: ItemShareViewModel = viewModel(
+                key = "item-share",
+                factory = ItemShareViewModel.Factory(
+                    itemShareRepository = container.itemShareRepository,
+                    serverOriginProvider = serverOriginProvider,
+                    onSessionExpired = appViewModel::markSessionExpired,
+                ),
+            )
+            val shareTargetViewModel: ShareTargetViewModel = viewModel(
+                key = "share-target",
+                factory = ShareTargetViewModel.Factory(
+                    shareInbox = container.shareInbox,
+                    boardRepository = container.boardRepository,
+                    transferManager = container.transferManager,
+                    onSessionExpired = appViewModel::markSessionExpired,
+                ),
+            )
+            val settingsViewModel: SettingsViewModel = viewModel(
+                key = "settings",
+                factory = SettingsViewModel.Factory(
+                    appUpdater = container.appUpdater,
+                ),
+            )
+
+            val imageLoader = remember(container, sessionKey) {
+                container.mediaRepository.createImageLoader()
+            }
+
             LaunchedEffect(sessionKey) {
                 boardViewModel.activateSession(sessionKey)
+                // Asynchronous non-blocking update check once per authenticated session
+                settingsViewModel.triggerBackgroundUpdateCheck(sessionKey)
             }
+
             DropitMainScaffold(
                 serverOrigin = route.serverOrigin,
                 rootState = rootState,
                 boardViewModel = boardViewModel,
+                transfersViewModel = transfersViewModel,
+                roomViewModel = roomViewModel,
+                itemShareViewModel = itemShareViewModel,
+                shareTargetViewModel = shareTargetViewModel,
+                settingsViewModel = settingsViewModel,
+                mediaRepository = container.mediaRepository,
+                imageLoader = imageLoader,
                 onThemeModeChange = appViewModel::setThemeMode,
                 onLogoutAndSwitchServer = appViewModel::logoutAndSwitchServer,
             )
@@ -153,560 +240,315 @@ private fun DropitMainScaffold(
     serverOrigin: String,
     rootState: AppRootUiState,
     boardViewModel: BoardViewModel,
+    transfersViewModel: TransfersViewModel,
+    roomViewModel: RoomViewModel,
+    itemShareViewModel: ItemShareViewModel,
+    shareTargetViewModel: ShareTargetViewModel,
+    settingsViewModel: SettingsViewModel,
+    mediaRepository: MediaRepository,
+    imageLoader: ImageLoader,
     onThemeModeChange: (ThemeMode) -> Unit,
     onLogoutAndSwitchServer: () -> Unit,
 ) {
     val colors = DropitTheme.colors
+    val context = LocalContext.current
     var selectedTab by rememberSaveable { mutableStateOf(MainTab.BOARD) }
+    var activeViewer by remember { mutableStateOf<ActiveViewer?>(null) }
 
-    // Global back stack rule (§2.2): non-home tabs return to Board before exiting app.
-    BackHandler(enabled = selectedTab != MainTab.BOARD) {
+    val boardState by boardViewModel.uiState.collectAsStateWithLifecycle()
+    val shareTargetState by shareTargetViewModel.uiState.collectAsStateWithLifecycle()
+    val settingsState by settingsViewModel.uiState.collectAsStateWithLifecycle()
+
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30_000L)
+            nowMs = System.currentTimeMillis()
+        }
+    }
+
+    // Keep system share confirmation target list aligned with available writable spaces & active room
+    LaunchedEffect(
+        boardState.spaces,
+        boardState.me?.user?.id,
+        boardState.activeRoom,
+        boardState.activeScope,
+        boardState.groups,
+    ) {
+        shareTargetViewModel.syncTargets(
+            spaces = boardState.spaces,
+            currentUserId = boardState.me?.user?.id,
+            activeRoom = boardState.activeRoom,
+            knownScopeGroups = boardState.activeScope to boardState.groups,
+        )
+    }
+
+    val spaceNames = remember(boardState.spaces) {
+        boardState.spaces.associate { it.id to it.name.ifBlank { "我的空间" } }
+    }
+
+    // Global back stack rule (§2.2): non-home tabs return to Board before exiting app
+    // (disabled whenever a fullscreen viewer is open so the viewer consumes Back first).
+    BackHandler(enabled = activeViewer == null && selectedTab != MainTab.BOARD) {
         selectedTab = MainTab.BOARD
     }
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = colors.bg,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        bottomBar = {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                HorizontalDivider(thickness = 1.dp, color = colors.line1)
-                NavigationBar(
-                    containerColor = colors.surface0,
-                    contentColor = colors.fg,
-                    tonalElevation = 0.dp,
-                    modifier = Modifier.navigationBarsPadding(),
-                ) {
-                    MainTab.entries.forEach { tab ->
-                        val selected = selectedTab == tab
-                        NavigationBarItem(
-                            selected = selected,
-                            onClick = { selectedTab = tab },
-                            icon = {
-                                if (tab == MainTab.TRANSFERS && (rootState.activeTransferCount > 0 || rootState.failedTransferCount > 0)) {
-                                    BadgedBox(
-                                        badge = {
-                                            Badge(
-                                                containerColor = colors.brand,
-                                                contentColor = colors.brandFg,
-                                            ) {
-                                                val badgeText = when {
-                                                    rootState.activeTransferCount > 99 -> "99+"
-                                                    rootState.activeTransferCount > 0 -> rootState.activeTransferCount.toString()
-                                                    else -> "!"
-                                                }
-                                                Text(
-                                                    text = badgeText,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                )
-                                            }
-                                        },
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            containerColor = colors.bg,
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            bottomBar = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    HorizontalDivider(thickness = 1.dp, color = colors.line1)
+                    NavigationBar(
+                        containerColor = colors.surface0,
+                        contentColor = colors.fg,
+                        tonalElevation = 0.dp,
+                        modifier = Modifier.navigationBarsPadding(),
+                    ) {
+                        MainTab.entries.forEach { tab ->
+                            val selected = selectedTab == tab
+                            NavigationBarItem(
+                                selected = selected,
+                                onClick = { selectedTab = tab },
+                                icon = {
+                                    if (tab == MainTab.TRANSFERS &&
+                                        (rootState.activeTransferCount > 0 || rootState.failedTransferCount > 0)
                                     ) {
+                                        BadgedBox(
+                                            badge = {
+                                                Badge(
+                                                    containerColor = colors.brand,
+                                                    contentColor = colors.brandFg,
+                                                ) {
+                                                    val badgeText = when {
+                                                        rootState.activeTransferCount > 99 -> "99+"
+                                                        rootState.activeTransferCount > 0 -> rootState.activeTransferCount.toString()
+                                                        else -> "!"
+                                                    }
+                                                    Text(
+                                                        text = badgeText,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                    )
+                                                }
+                                            },
+                                        ) {
+                                            Icon(
+                                                imageVector = tab.icon,
+                                                contentDescription = tab.label,
+                                            )
+                                        }
+                                    } else {
                                         Icon(
                                             imageVector = tab.icon,
                                             contentDescription = tab.label,
                                         )
                                     }
-                                } else {
-                                    Icon(
-                                        imageVector = tab.icon,
-                                        contentDescription = tab.label,
+                                },
+                                label = {
+                                    Text(
+                                        text = tab.label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
                                     )
-                                }
-                            },
-                            label = {
-                                Text(
-                                    text = tab.label,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = colors.brand,
-                                selectedTextColor = colors.fg,
-                                indicatorColor = colors.surface2,
-                                unselectedIconColor = colors.fg3,
-                                unselectedTextColor = colors.fg3,
-                            ),
-                        )
+                                },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = colors.brand,
+                                    selectedTextColor = colors.fg,
+                                    indicatorColor = colors.surface2,
+                                    unselectedIconColor = colors.fg3,
+                                    unselectedTextColor = colors.fg3,
+                                ),
+                            )
+                        }
                     }
                 }
-            }
-        },
-    ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding),
-        ) {
-            when (selectedTab) {
-                MainTab.BOARD -> BoardScreen(
-                    viewModel = boardViewModel,
-                    onNavigateToTransfers = { selectedTab = MainTab.TRANSFERS },
-                )
+            },
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+            ) {
+                when (selectedTab) {
+                    MainTab.BOARD -> BoardScreen(
+                        viewModel = boardViewModel,
+                        roomViewModel = roomViewModel,
+                        itemShareViewModel = itemShareViewModel,
+                        mediaRepository = mediaRepository,
+                        imageLoader = imageLoader,
+                        onNavigateToTransfers = { selectedTab = MainTab.TRANSFERS },
+                        onOpenImageLightbox = { images, index, scope ->
+                            activeViewer = ActiveViewer.Images(images, index, scope)
+                        },
+                        onOpenMediaPlayer = { item, isVideo, scope ->
+                            activeViewer = ActiveViewer.Media(item, isVideo, scope)
+                        },
+                        onOpenTextReader = { item ->
+                            activeViewer = ActiveViewer.TextReader(item)
+                        },
+                    )
 
-                MainTab.TRANSFERS -> TransfersPlaceholderScreen(
-                    tasks = rootState.transferTasks,
-                    activeCount = rootState.activeTransferCount,
-                )
+                    MainTab.TRANSFERS -> TransfersScreen(
+                        viewModel = transfersViewModel,
+                        spaceNames = spaceNames,
+                    )
 
-                MainTab.SETTINGS -> {
-                    val boardState by boardViewModel.uiState.collectAsStateWithLifecycle()
-                    SettingsPlaceholderScreen(
+                    MainTab.SETTINGS -> SettingsScreen(
                         serverOrigin = serverOrigin,
-                        userName = boardState.me?.user?.name,
-                        userEmail = boardState.me?.user?.email,
-                        isAdmin = boardState.me?.user?.isAdmin == true,
+                        me = boardState.me,
                         themeMode = rootState.themeMode,
                         isLoggingOut = rootState.isLoggingOut,
+                        settingsState = settingsState,
                         onThemeModeChange = onThemeModeChange,
+                        onCheckUpdate = settingsViewModel::checkForUpdateManually,
                         onLogoutAndSwitchServer = onLogoutAndSwitchServer,
                     )
                 }
             }
         }
-    }
-}
 
-/**
- * Stage 2B placeholder for Transfers tab; Stage 3B (RHEA-258) replaces this with full queue controls.
- */
-@Composable
-private fun TransfersPlaceholderScreen(
-    tasks: List<TransferTask>,
-    activeCount: Int,
-) {
-    val colors = DropitTheme.colors
-    val shapes = DropitTheme.shapes
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.bg),
-    ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = colors.surface0,
-            tonalElevation = 0.dp,
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .displayCutoutPadding()
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(
-                    text = "传输队列",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = colors.fg,
-                )
-                if (activeCount > 0) {
-                    Text(
-                        text = "$activeCount 项进行中",
-                        style = DropitMonoTypography.meta,
-                        color = colors.brand,
-                    )
-                }
-            }
-        }
-        HorizontalDivider(thickness = 1.dp, color = colors.line1)
-
-        if (tasks.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(32.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.SwapVert,
-                        contentDescription = null,
-                        tint = colors.fg4,
-                        modifier = Modifier.size(44.dp),
-                    )
-                    Text(
-                        text = "暂无传输任务",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = colors.fg,
-                    )
-                    Text(
-                        text = "发送大文件或保存文件时会在这里展示实时进度；完整的暂停、断点续传与历史清理交互将在下一阶段补齐。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.fg3,
-                    )
-                }
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                items(tasks, key = { it.id }) { task ->
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = shapes.md,
-                        color = colors.surface1,
-                        border = BorderStroke(1.dp, colors.line1),
-                        shadowElevation = DropitElevation.card(colors.isDark),
-                        tonalElevation = 0.dp,
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Icon(
-                                    imageVector = if (task.direction == TransferDirection.UPLOAD) {
-                                        Icons.Rounded.Upload
-                                    } else {
-                                        Icons.Rounded.Download
-                                    },
-                                    contentDescription = null,
-                                    tint = if (task.direction == TransferDirection.UPLOAD) colors.brand else colors.ok,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                                Text(
-                                    text = ClipFormatting.middleEllipsizeFilename(task.fileName),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium,
-                                    color = colors.fg,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
-                                )
-                            }
-                            LinearProgressIndicator(
-                                progress = { task.progress },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(4.dp),
-                                color = when (task.status) {
-                                    TransferStatus.SUCCEEDED -> colors.ok
-                                    TransferStatus.FAILED -> colors.destructive
-                                    TransferStatus.PAUSED -> colors.fg4
-                                    else -> colors.brand
-                                },
-                                trackColor = colors.surface2,
-                            )
-                            val statusText = when (task.status) {
-                                TransferStatus.QUEUED -> "等待中 · ${ServerUrl.formatSize(task.totalBytes)}"
-                                TransferStatus.RUNNING -> "${(task.progress * 100).toInt()}% · ${ServerUrl.formatSize(task.transferredBytes)} / ${ServerUrl.formatSize(task.totalBytes)}"
-                                TransferStatus.PAUSED -> "已暂停 · ${(task.progress * 100).toInt()}%"
-                                TransferStatus.FAILED -> "失败 · ${task.errorMessage ?: "传输中断"}"
-                                TransferStatus.SUCCEEDED -> "已完成 · ${ServerUrl.formatSize(task.totalBytes)}"
-                                TransferStatus.CANCELLED -> "已取消"
-                            }
-                            Text(
-                                text = statusText,
-                                style = DropitMonoTypography.meta,
-                                color = if (task.status == TransferStatus.FAILED) colors.destructive else colors.fg3,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
- * Stage 2B placeholder for Settings tab with working theme switcher & sign-out flow.
- * Stage 3B (RHEA-258) expands this with browser-session links and non-blocking app updater.
- */
-@Composable
-private fun SettingsPlaceholderScreen(
-    serverOrigin: String,
-    userName: String?,
-    userEmail: String?,
-    isAdmin: Boolean,
-    themeMode: ThemeMode,
-    isLoggingOut: Boolean,
-    onThemeModeChange: (ThemeMode) -> Unit,
-    onLogoutAndSwitchServer: () -> Unit,
-) {
-    val colors = DropitTheme.colors
-    val shapes = DropitTheme.shapes
-    var confirmLogout by remember { mutableStateOf(false) }
-    val versionLabel = remember {
-        ServerUrl.versionLabel(
-            version = BuildConfig.VERSION_NAME,
-            commit = BuildConfig.BUILD_COMMIT,
-            date = BuildConfig.BUILD_DATE,
-        )
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.bg),
-    ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = colors.surface0,
-            tonalElevation = 0.dp,
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .displayCutoutPadding()
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "设置",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = colors.fg,
-                )
-            }
-        }
-        HorizontalDivider(thickness = 1.dp, color = colors.line1)
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            // Account & Server Card
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = shapes.lg,
-                color = colors.surface1,
-                border = BorderStroke(1.dp, colors.line1),
-                shadowElevation = DropitElevation.card(colors.isDark),
-                tonalElevation = 0.dp,
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            text = userName?.takeIf { it.isNotBlank() } ?: "已登录设备",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = colors.fg,
-                        )
-                        if (isAdmin) {
-                            Surface(
-                                shape = shapes.pill,
-                                color = colors.brandSoft,
-                                tonalElevation = 0.dp,
-                            ) {
-                                Text(
-                                    text = "管理员",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = colors.brand,
-                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
-                                )
-                            }
-                        }
-                    }
-                    if (!userEmail.isNullOrBlank()) {
-                        Text(
-                            text = userEmail,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.fg3,
-                        )
-                    }
-                    HorizontalDivider(thickness = 1.dp, color = colors.line1, modifier = Modifier.padding(vertical = 6.dp))
-                    Text(
-                        text = "当前服务器",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.fg3,
-                    )
-                    Text(
-                        text = serverOrigin,
-                        style = DropitMonoTypography.url,
-                        color = colors.fg2,
-                    )
-                }
-            }
-
-            // Theme Appearance Card
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = shapes.lg,
-                color = colors.surface1,
-                border = BorderStroke(1.dp, colors.line1),
-                shadowElevation = DropitElevation.card(colors.isDark),
-                tonalElevation = 0.dp,
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Text(
-                        text = "外观与纸感主题",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = colors.fg,
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        val options = listOf(
-                            ThemeMode.SYSTEM to "跟随系统",
-                            ThemeMode.LIGHT to "浅色纸感",
-                            ThemeMode.DARK to "深色纸感",
-                        )
-                        options.forEach { (mode, label) ->
-                            val selected = themeMode == mode
-                            Surface(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .defaultMinSize(minHeight = 48.dp)
-                                    .clickable { onThemeModeChange(mode) },
-                                shape = shapes.md,
-                                color = if (selected) colors.fg else colors.surface0,
-                                border = BorderStroke(1.dp, if (selected) colors.fg else colors.line2),
-                                tonalElevation = 0.dp,
-                            ) {
-                                Box(
-                                    contentAlignment = Alignment.Center,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 10.dp),
-                                ) {
-                                    Text(
-                                        text = label,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = if (selected) colors.bg else colors.fg2,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Version & Stage 3B info
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = shapes.lg,
-                color = colors.surface1,
-                border = BorderStroke(1.dp, colors.line1),
-                tonalElevation = 0.dp,
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = "应用信息",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = colors.fg,
-                    )
-                    Text(
-                        text = versionLabel,
-                        style = DropitMonoTypography.meta,
-                        color = colors.fg2,
-                    )
-                    Text(
-                        text = "账户高级入口与应用内检查更新将于下一阶段在此页补齐。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.fg3,
-                    )
-                }
-            }
-
-            // Sign Out & Switch Server
-            OutlinedButton(
-                onClick = { confirmLogout = true },
-                enabled = !isLoggingOut,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .defaultMinSize(minHeight = 48.dp),
-                shape = shapes.md,
-                border = BorderStroke(1.dp, colors.destructive.copy(alpha = 0.45f)),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.destructive),
-            ) {
-                if (isLoggingOut) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                        color = colors.destructive,
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.Logout,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(modifier = Modifier.size(8.dp))
-                    Text(
-                        text = "退出登录并更换服务器",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                    )
-                }
-            }
-        }
-    }
-
-    if (confirmLogout) {
-        AlertDialog(
-            onDismissRequest = { confirmLogout = false },
-            shape = shapes.lg,
-            containerColor = colors.surface1,
-            titleContentColor = colors.fg,
-            textContentColor = colors.fg2,
-            tonalElevation = 0.dp,
-            title = {
-                Text("确认退出登录？", style = MaterialTheme.typography.titleMedium)
-            },
-            text = {
-                Text(
-                    text = "将吊销当前设备令牌并清理本地服务器配置与待传输队列，之后可重新配置服务器。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirmLogout = false
-                        onLogoutAndSwitchServer()
+        // Immersive full-screen viewers (cover bottom navigation bar cleanly)
+        when (val viewer = activeViewer) {
+            is ActiveViewer.Images -> {
+                ImageLightbox(
+                    images = viewer.images,
+                    initialIndex = viewer.initialIndex,
+                    scope = viewer.scope,
+                    mediaRepository = mediaRepository,
+                    imageLoader = imageLoader,
+                    onSaveOriginal = { item ->
+                        boardViewModel.downloadItem(item)
+                        Toast.makeText(context, "已开始保存原图到「下载」", Toast.LENGTH_SHORT).show()
                     },
-                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
-                    colors = ButtonDefaults.textButtonColors(contentColor = colors.destructive),
-                ) {
-                    Text("确认退出", fontWeight = FontWeight.SemiBold)
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = { confirmLogout = false },
-                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
-                    colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
-                ) {
-                    Text("取消")
-                }
-            },
-        )
+                    onShareImage = { item ->
+                        boardViewModel.prepareFileForShare(item) { uri ->
+                            shareUri(context, uri, item.mime ?: "image/*")
+                        }
+                    },
+                    onClose = { activeViewer = null },
+                )
+            }
+
+            is ActiveViewer.Media -> {
+                MediaPlayerViewer(
+                    item = viewer.item,
+                    isVideo = viewer.isVideo,
+                    scope = viewer.scope,
+                    mediaRepository = mediaRepository,
+                    onDownloadFallback = { item ->
+                        boardViewModel.downloadItem(item)
+                        Toast.makeText(context, "已加入下载队列", Toast.LENGTH_SHORT).show()
+                    },
+                    onShareMedia = { item ->
+                        boardViewModel.prepareFileForShare(item) { uri ->
+                            shareUri(context, uri, item.mime ?: "*/*")
+                        }
+                    },
+                    onClose = { activeViewer = null },
+                )
+            }
+
+            is ActiveViewer.TextReader -> {
+                TextMarkdownViewer(
+                    item = viewer.item,
+                    nowMs = nowMs,
+                    onCopyText = { text ->
+                        copyPlainText(context, text)
+                        boardViewModel.markItemCopied(viewer.item.id)
+                    },
+                    onShareText = { text ->
+                        shareText(context, text)
+                    },
+                    onOpenUrl = { url ->
+                        openUrlExternally(context, url)
+                    },
+                    onClose = { activeViewer = null },
+                )
+            }
+
+            null -> Unit
+        }
+
+        // System Share Confirmation Bottom Sheet (shown once authenticated & pending share exists)
+        if (shareTargetState.pendingShare != null) {
+            ShareTargetSheet(
+                state = shareTargetState,
+                onSelectTarget = shareTargetViewModel::selectTarget,
+                onSelectGroup = shareTargetViewModel::selectGroup,
+                onTextChanged = shareTargetViewModel::updateText,
+                onRemoveFile = shareTargetViewModel::removeFile,
+                onConfirmSend = {
+                    shareTargetViewModel.submitShare { feedback, hasFiles ->
+                        boardViewModel.showSnackbar(feedback, showTransfersAction = hasFiles)
+                        if (hasFiles) {
+                            selectedTab = MainTab.TRANSFERS
+                        } else {
+                            selectedTab = MainTab.BOARD
+                        }
+                    }
+                },
+                onCancel = shareTargetViewModel::cancelShare,
+            )
+        }
+
+        // Non-blocking App Update Dialog
+        settingsState.promptManifest?.let { manifest ->
+            AppUpdateDialog(
+                manifest = manifest,
+                isAutoPrompt = settingsState.isAutoPrompt,
+                installState = settingsState.installState,
+                onDownloadAndInstall = settingsViewModel::startDownloadAndInstall,
+                onSkipVersion = settingsViewModel::skipPromptedVersion,
+                onDismiss = settingsViewModel::dismissUpdateDialog,
+            )
+        }
+    }
+}
+
+private fun copyPlainText(context: Context, text: String) {
+    val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
+    manager.setPrimaryClip(ClipData.newPlainText("dropit", text))
+}
+
+private fun shareText(context: Context, text: String) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, text)
+    }
+    runCatching {
+        context.startActivity(Intent.createChooser(intent, "分享文本"))
+    }.onFailure {
+        Toast.makeText(context, "未找到可接收分享的应用", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun shareUri(context: Context, uri: Uri, mimeType: String) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = mimeType.ifBlank { "*/*" }
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    runCatching {
+        context.startActivity(Intent.createChooser(intent, "分享文件"))
+    }.onFailure {
+        Toast.makeText(context, "未找到可接收分享的应用", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun openUrlExternally(context: Context, rawUrl: String) {
+    val uri = runCatching { Uri.parse(rawUrl) }.getOrNull() ?: return
+    val opened = runCatching {
+        CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, uri)
+    }.isSuccess
+    if (!opened) {
+        runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.onFailure {
+            Toast.makeText(context, "无法打开链接", Toast.LENGTH_SHORT).show()
+        }
     }
 }

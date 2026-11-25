@@ -1,5 +1,6 @@
 package dev.dropit.app
 
+import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -9,17 +10,23 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.dropit.app.ui.navigation.AppViewModel
 import dev.dropit.app.ui.navigation.DropitApp
+import dev.dropit.app.ui.navigation.ShareIntentGuard
 import dev.dropit.app.ui.theme.DropitTheme
 import dev.dropit.app.ui.theme.resolveDarkTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * Native Jetpack Compose entry point for dropit Android.
- * Cold-starts directly into local paper UI without blocking on network/update checks,
- * adapts Edge-to-Edge system bars dynamically to Light/Dark Paper theme,
- * and forwards foreground/background lifecycle transitions to [dev.dropit.app.core.realtime.RealtimeClient].
+ * - Cold-starts directly into local paper UI without blocking on network/update checks.
+ * - Adapts Edge-to-Edge system bars dynamically to Light/Dark Paper theme.
+ * - Captures `ACTION_SEND` / `ACTION_SEND_MULTIPLE` on cold start and `onNewIntent`
+ *   (ignoring `FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY` to prevent duplicate submissions).
+ * - Forwards foreground/background lifecycle transitions to [dev.dropit.app.core.realtime.RealtimeClient].
  */
 class MainActivity : ComponentActivity() {
 
@@ -28,6 +35,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        if (savedInstanceState == null) {
+            captureShareIntentIfNeeded(intent)
+        }
+
         setContent {
             val appViewModel: AppViewModel = viewModel(
                 factory = AppViewModel.Factory(appContainer),
@@ -63,6 +75,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureShareIntentIfNeeded(intent)
+    }
+
     override fun onStart() {
         super.onStart()
         if (appContainer.authRepository.sessionState.value.isSignedIn) {
@@ -73,5 +91,15 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         appContainer.realtimeClient.onAppBackground()
         super.onStop()
+    }
+
+    private fun captureShareIntentIfNeeded(incomingIntent: Intent?) {
+        if (!ShareIntentGuard.shouldCapture(incomingIntent)) return
+        val snapshotIntent = Intent(incomingIntent)
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                appContainer.shareInbox.captureIntent(snapshotIntent)
+            }
+        }
     }
 }

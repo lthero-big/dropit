@@ -6,6 +6,7 @@ import dev.dropit.app.core.network.ClipItem
 import dev.dropit.app.core.network.GroupInfo
 import dev.dropit.app.core.network.MeResponse
 import dev.dropit.app.core.network.OptionalField
+import dev.dropit.app.core.network.RoomInfo
 import dev.dropit.app.core.network.ScopeDetails
 import dev.dropit.app.core.network.SessionExpiredEvent
 import dev.dropit.app.core.network.Space
@@ -330,6 +331,38 @@ class BoardViewModelTest {
         assertTrue(vm.uiState.value.sessionExpired)
         assertEquals(2, expiredCallbackCount)
         assertTrue(realtime.disconnected)
+    }
+
+    @Test
+    fun temporaryRoom_switchesScopeWritableEvenFromReadOnlySpaceAndRestoresOnLeave() = runTest(testDispatcher) {
+        val vm = createViewModel()
+        advanceUntilIdle()
+
+        vm.selectSpace(readOnlySpace.id)
+        advanceUntilIdle()
+        assertTrue(vm.uiState.value.isReadOnly)
+
+        val room = RoomInfo(token = "rm-secret-1", code = "k7Rm2x", hasPin = true, expiresAt = 9_999_999L, url = "/r/k7Rm2x")
+        vm.enterTemporaryRoom(room = room, isOwner = true)
+        advanceUntilIdle()
+
+        assertEquals(TargetScope.RoomScope("rm-secret-1"), vm.uiState.value.activeScope)
+        assertEquals(TargetScope.RoomScope("rm-secret-1"), realtime.connectedScope)
+        assertFalse(vm.uiState.value.isReadOnly)
+        assertTrue(vm.uiState.value.isRoomOwner)
+
+        // Updating room code keeps room active
+        vm.updateActiveRoom(room.copy(code = "New999", hasPin = false))
+        assertEquals("New999", vm.uiState.value.activeRoom?.code)
+        assertFalse(vm.uiState.value.activeRoom?.hasPin == true)
+
+        // Leaving room restores previous space scope
+        vm.leaveTemporaryRoom()
+        advanceUntilIdle()
+
+        assertNull(vm.uiState.value.activeRoom)
+        assertEquals(TargetScope.SpaceScope(readOnlySpace.id), vm.uiState.value.activeScope)
+        assertTrue(vm.uiState.value.isReadOnly)
     }
 
     @Test
