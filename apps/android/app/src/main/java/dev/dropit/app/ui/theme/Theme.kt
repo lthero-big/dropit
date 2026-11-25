@@ -56,7 +56,7 @@ fun DropitTheme(
     ) {
         MaterialTheme(
             colorScheme = materialScheme,
-            typography = DropitTypography,
+            typography = resolveDropitTypography(),
             shapes = DropitMaterialShapes,
             content = content,
         )
