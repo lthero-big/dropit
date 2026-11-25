@@ -1,7 +1,8 @@
 // Headless Chrome smoke against a local dropit origin. Saves PNG evidence next to the report.
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,18 +20,32 @@ function record(id, pass, detail) {
   console.log(`${pass ? 'PASS' : 'FAIL'} ${id} ${detail}`);
 }
 
+async function freePort() {
+  const server = createServer();
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  await new Promise((resolve) => server.close(resolve));
+  if (!port) throw new Error('unable to allocate ephemeral chrome debug port');
+  return port;
+}
+
+const debugPort = Number(process.env.DROPIT_CHROME_DEBUG_PORT) || await freePort();
 const profile = await mkdtemp(join(tmpdir(), 'dropit-chrome-'));
+const files = await mkdtemp(join(tmpdir(), 'dropit-files-'));
 const chrome = spawn('google-chrome', [
   '--headless=new',
   '--disable-gpu',
   '--no-sandbox',
   '--disable-dev-shm-usage',
-  '--remote-debugging-port=9333',
+  `--remote-debugging-port=${debugPort}`,
   '--remote-allow-origins=*',
   `--user-data-dir=${profile}`,
   'about:blank',
 ], { stdio: ['ignore', 'pipe', 'pipe'] });
 let chromeLog = '';
+chrome.on('error', error => { chromeLog += String(error); });
 chrome.stderr.on('data', (chunk) => { chromeLog += chunk; });
 chrome.stdout.on('data', (chunk) => { chromeLog += chunk; });
 
@@ -38,7 +53,7 @@ async function waitForDebugger() {
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch('http://127.0.0.1:9333/json/version');
+      const response = await fetch(`http://127.0.0.1:${debugPort}/json/version`);
       if (response.ok) return response.json();
     } catch { /* chrome still starting */ }
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -74,69 +89,80 @@ class Cdp {
   }
 }
 
-const version = await waitForDebugger();
-const browser = new WebSocket(version.webSocketDebuggerUrl);
-await once(browser, 'open');
-const cdp = new Cdp(browser);
-const created = await cdp.send('Target.createTarget', { url: 'about:blank' });
-const attached = await cdp.send('Target.attachToTarget', { targetId: created.targetId, flatten: true });
-const session = attached.sessionId;
-await cdp.send('Page.enable', {}, session);
-await cdp.send('Runtime.enable', {}, session);
-await cdp.send('Network.enable', {}, session);
-
-async function evaluate(expression) {
-  const result = await cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, session);
-  if (result.exceptionDetails) {
-    const details = result.exceptionDetails;
-    throw new Error(details.exception?.description || details.text || 'evaluate failed');
-  }
-  return result.result?.value;
-}
-async function goto(url) {
-  await cdp.send('Page.navigate', { url }, session);
-  const deadline = Date.now() + 8000;
-  while (Date.now() < deadline) {
-    const ready = await evaluate('document.readyState');
-    const text = await evaluate('document.body ? document.body.innerText.slice(0, 80) : ""');
-    if (ready === 'complete' && text) return;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-}
-async function shot(name) {
-  const image = await cdp.send('Page.captureScreenshot', { format: 'png' }, session);
-  const path = join(outDir, `${label}-${name}.png`);
-  await writeFile(path, Buffer.from(image.data, 'base64'));
-  return path;
-}
-async function setViewport(width, height) {
-  await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 700 }, session);
-}
-async function clickBox(x, y) {
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }, session);
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }, session);
-}
-async function boxFor(selector, text) {
-  return evaluate(`(() => {
-    const node = [...document.querySelectorAll(${JSON.stringify(selector)})].find((item) => item.textContent.includes(${JSON.stringify(text)}));
-    if (!node) return null;
-    const rect = node.getBoundingClientRect();
-    if (rect.width < 1 || rect.height < 1) return null;
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  })()`);
-}
-
-const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
-const files = await mkdtemp(join(tmpdir(), 'dropit-files-'));
-await writeFile(join(files, 'evil.svg'), '<svg xmlns="http://www.w3.org/2000/svg" onload="window.__xss=1"><script>window.__xss=1</script></svg>');
-await writeFile(join(files, 'page.html'), '<html><body><script>window.__xss=1</script><h1>owned</h1></body></html>');
-await writeFile(join(files, 'shot.png'), png);
-
+let browser;
 try {
+  const version = await waitForDebugger();
+  browser = new WebSocket(version.webSocketDebuggerUrl);
+  await once(browser, 'open');
+  const cdp = new Cdp(browser);
+  const created = await cdp.send('Target.createTarget', { url: 'about:blank' });
+  const attached = await cdp.send('Target.attachToTarget', { targetId: created.targetId, flatten: true });
+  const session = attached.sessionId;
+  await cdp.send('Page.enable', {}, session);
+  await cdp.send('Runtime.enable', {}, session);
+  await cdp.send('Network.enable', {}, session);
+
+  async function evaluate(expression) {
+    const result = await cdp.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, session);
+    if (result.exceptionDetails) {
+      const details = result.exceptionDetails;
+      throw new Error(details.exception?.description || details.text || 'evaluate failed');
+    }
+    return result.result?.value;
+  }
+  async function goto(url) {
+    await cdp.send('Page.navigate', { url }, session);
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const ready = await evaluate('document.readyState');
+      const text = await evaluate('document.body ? document.body.innerText.slice(0, 80) : ""');
+      if (ready === 'complete' && text) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+  async function shot(name) {
+    const image = await cdp.send('Page.captureScreenshot', { format: 'png' }, session);
+    const path = join(outDir, `${label}-${name}.png`);
+    await writeFile(path, Buffer.from(image.data, 'base64'));
+    return path;
+  }
+  async function setViewport(width, height) {
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 700 }, session);
+  }
+  async function clickBox(x, y) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }, session);
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }, session);
+  }
+  async function boxFor(selector, text) {
+    return evaluate(`(() => {
+      const node = [...document.querySelectorAll(${JSON.stringify(selector)})].find((item) => item.textContent.includes(${JSON.stringify(text)}));
+      if (!node) return null;
+      const rect = node.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) return null;
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    })()`);
+  }
+
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  await writeFile(join(files, 'evil.svg'), '<svg xmlns="http://www.w3.org/2000/svg" onload="window.__xss=1"><script>window.__xss=1</script></svg>');
+  await writeFile(join(files, 'page.html'), '<html><body><script>window.__xss=1</script><h1>owned</h1></body></html>');
+  await writeFile(join(files, 'shot.png'), png);
+
   await setViewport(1280, 800);
   await goto(`${target}/login`);
+  if (process.env.DROPIT_BROWSER_SETUP_ONLY === '1') {
+    const deadline = Date.now() + 8000;
+    let setup = false;
+    while (Date.now() < deadline) {
+      setup = await evaluate(`location.pathname === '/setup' && Boolean(document.querySelector('form[aria-label="创建管理员"]'))`);
+      if (setup) break;
+      await new Promise(done => setTimeout(done, 100));
+    }
+    record('AC-A1 empty installation setup', setup, 'login redirects to /setup with administrator form');
+    await shot('setup');
+  } else {
   const loginText = await evaluate('document.body.innerText');
-  record('AC-I1 login', loginText.includes('dropit') && loginText.includes('没有密码'), loginText.slice(0, 120).replaceAll('\n', ' '));
+  record('AC-I1 login', loginText.includes('dropit') && loginText.includes('用密码登录') && loginText.includes('进入临时房间'), loginText.slice(0, 120).replaceAll('\n', ' '));
   await shot('login-desktop');
 
   await setViewport(1280, 800);
@@ -160,10 +186,10 @@ try {
   let roomUrl = '';
   while (Date.now() < deadline) {
     roomUrl = await evaluate('location.pathname');
-    if (roomUrl.startsWith('/rooms/')) break;
+    if (/^\/r\/[23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz]{6}$/.test(roomUrl)) break;
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  record('AC-E1 browser room', roomUrl.startsWith('/rooms/') && roomUrl.length > '/rooms/'.length + 20, roomUrl);
+  record('AC-E1 browser room', /^\/r\/[23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz]{6}$/.test(roomUrl), roomUrl);
   const shell = await evaluate(`Boolean([...document.querySelectorAll('button')].find((node) => node.textContent.trim() === '登录'))`);
   record('AC-I1 room shell', shell === true, `login button ${shell}`);
   await setViewport(390, 844);
@@ -314,10 +340,19 @@ try {
     record('AC-I1 dark theme', Boolean(trigger) && Boolean(themeItem) && dark === true, `trigger=${Boolean(trigger)} item=${Boolean(themeItem)} dark=${dark}`);
     await shot('dark');
   }
+  }
 } finally {
   await writeFile(join(outDir, `${label}.json`), JSON.stringify(results, null, 2));
-  chrome.kill('SIGTERM');
-  await once(chrome, 'close').catch(() => {});
+  browser?.close();
+  if (chrome.exitCode === null && chrome.signalCode === null) {
+    if (process.env.MULTICA_CLI_PATH) {
+      const daemon = JSON.parse(execFileSync(process.env.MULTICA_CLI_PATH, ['daemon', 'status', '--output', 'json'], { encoding: 'utf8' }));
+      if (chrome.pid === daemon.pid) throw new Error('refusing to terminate daemon PID');
+    }
+    const closed = once(chrome, 'close');
+    chrome.kill('SIGTERM');
+    await closed;
+  }
   await rm(profile, { recursive: true, force: true });
   await rm(files, { recursive: true, force: true });
 }

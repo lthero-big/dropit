@@ -39,6 +39,12 @@ volumes:
 
 镜像自带 `HEALTHCHECK`（请求 `/healthz`），以非 root 用户 `node` 运行。
 
+Rust 迁移候选使用独立的 `Dockerfile.rust` 和 `compose.rust.yml`。它把
+React 静态产物与 Rust 二进制分阶段构建，使用非 root 的 `dropit` 用户和
+独立的 `dropit-rust-data` 卷。验收时用合成 schema-19 数据和独立项目运行，
+不要把它指向生产 `dropit-data`；具体命令与未迁移管理边界见
+[Rust migration runtime boundary](../rust-migration.md)。
+
 ## nginx
 
 ```nginx

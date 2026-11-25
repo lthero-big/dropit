@@ -1,7 +1,9 @@
 // Black-box checks against the local dropit image. Nothing is published beyond loopback.
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -10,7 +12,21 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(fileURLToPath(import.meta.url));
 const WebSocket = require('../apps/server/node_modules/ws');
 const image = process.env.DROPIT_IMAGE ?? 'dropit:acceptance';
+const expectedImageId = process.env.DROPIT_EXPECTED_IMAGE_ID?.trim() || '';
+const expectedCommit = process.env.DROPIT_EXPECTED_COMMIT?.trim() || '';
 const results = [];
+const ownedContainers = new Map();
+
+async function freePort() {
+  const server = createServer();
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  await new Promise((resolve) => server.close(resolve));
+  if (!port) throw new Error('unable to allocate ephemeral loopback port');
+  return port;
+}
 
 function record(id, pass, detail) {
   results.push({ id, pass, detail });
@@ -77,19 +93,31 @@ function containerEnv(origin, extra, tight) {
 }
 
 async function startContainer(name, port, origin, extra, tight) {
-  await run('docker', ['rm', '-f', name]);
-  const started = await run('docker', [
-    'run', '-d', '--name', name,
+  const created = await run('docker', [
+    'create', '--name', name,
     '-p', `127.0.0.1:${port}:8787`,
     ...containerEnv(origin, extra, tight),
     image,
   ]);
+  const id = created.stdout.trim();
+  if (created.code !== 0 || !/^[a-f0-9]{64}$/.test(id)) throw new Error(created.stderr || created.stdout);
+  ownedContainers.set(name, id);
+  console.log(`CONTAINER ${name} ${id}`);
+  const started = await run('docker', ['start', id]);
   if (started.code !== 0) throw new Error(started.stderr || started.stdout);
+  if (expectedImageId) {
+    const actualImage = await run('docker', ['inspect', '--format', '{{.Image}}', name]);
+    if (actualImage.code !== 0 || actualImage.stdout.trim() !== expectedImageId) {
+      throw new Error(`image drift for ${name}: expected ${expectedImageId}, got ${actualImage.stdout.trim()}`);
+    }
+  }
   return `http://127.0.0.1:${port}`;
 }
 
 async function stop(name) {
-  await run('docker', ['rm', '-f', name]);
+  if (!ownedContainers.has(name)) return;
+  const removed = await run('docker', ['rm', '-fv', ownedContainers.get(name)]);
+  if (removed.code !== 0) throw new Error(removed.stderr);
 }
 async function mkdirReport(dir) {
   await mkdir(dir, { recursive: true });
@@ -100,10 +128,16 @@ async function codeOf(response) {
   return body?.error?.code ?? '';
 }
 
-async function checkProduction(base, origin) {
+async function checkProduction(base, origin, containerName) {
   const health = await fetch(`${base}/healthz`);
   const healthBody = await health.json();
   record('AC-H1 healthz', health.status === 200 && healthBody.status === 'ok', `status ${health.status}`);
+  if (expectedCommit) {
+    const versionRes = await fetch(`${base}/api/version`);
+    const versionBody = await versionRes.json().catch(() => ({}));
+    record('AC-H1 build commit binding', versionRes.status === 200 && versionBody.commit === expectedCommit.slice(0, 7) && versionBody.install === 'docker',
+      `status ${versionRes.status} commit=${versionBody.commit ?? 'missing'} install=${versionBody.install ?? 'missing'}`);
+  }
   const headers = health.headers;
   const csp = headers.get('content-security-policy') ?? '';
   record('AC-G4 headers', headers.get('x-content-type-options') === 'nosniff'
@@ -149,9 +183,13 @@ async function checkProduction(base, origin) {
   record('AC-G1 missing origin', missingOrigin.status === 403, `status ${missingOrigin.status}`);
   const roomResponse = await fetch(`${base}/api/rooms`, { method: 'POST', headers: { origin } });
   const room = await roomResponse.json();
-  const entropy = typeof room.token === 'string' ? Buffer.from(room.token, 'base64url').length : 0;
-  record('AC-E1 room token', roomResponse.status === 201 && entropy === 32 && room.expiresAt - Date.now() <= 24 * 3600 * 1000 + 5000,
-    `status ${roomResponse.status} bytes ${entropy}`);
+  const capability = typeof room.token === 'string' ? room.token : '';
+  const capabilityShape = /^[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$/.test(capability);
+  const roomCode = typeof room.code === 'string' ? room.code : '';
+  record('AC-E1 room capability', roomResponse.status === 201 && capabilityShape
+    && /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz]{6}$/.test(roomCode)
+    && room.expiresAt - Date.now() <= 24 * 3600 * 1000 + 5000,
+    `status ${roomResponse.status} capability ${capabilityShape ? 'UUID.proof' : 'invalid'} code ${roomCode}`);
   const list = await fetch(`${base}/api/rooms`);
   record('AC-E1 no room list', list.status === 404, `status ${list.status}`);
   const unknown = await fetch(`${base}/api/rooms/not-a-real-room/items`);
@@ -183,9 +221,10 @@ async function checkProduction(base, origin) {
   record('AC-G3 html sniffed away', htmlUpload.status === 201 && htmlMedia.status === 404, `upload ${htmlUpload.status} media ${htmlMedia.status}`);
   const tooBig = await upload('big.bin', 'application/octet-stream', 'x'.repeat(80));
   record('AC-F2 room file limit', tooBig.status === 413 && await codeOf(tooBig) === 'FILE_TOO_LARGE', `status ${tooBig.status}`);
-  const names = await run('docker', ['exec', 'dropit-accept-prod', 'node', '-e', "const fs=require('fs'); const path='/data/files'; const names=fs.existsSync(path)?fs.readdirSync(path):[]; console.log(names.join('\\n'))"]);
+  const names = await run('docker', ['exec', containerName, 'sh', '-ec', 'ls -1 /data/files 2>/dev/null || true']);
   const stored = names.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
-  record('AC-G5 storage keys', stored.length > 0 && stored.every((name) => /^[0-9a-f-]{36}$/.test(name)), stored.join(',') || 'no files');
+  record('AC-G5 storage keys', names.code === 0 && stored.length > 0 && stored.every((name) => /^[0-9a-f-]{36}$/.test(name)),
+    names.code !== 0 ? `exec exit ${names.code}: ${names.stderr.trim()}` : (stored.join(',') || 'no files'));
 
   const text = await fetch(`${base}/api/rooms/${room.token}/items/text`, {
     method: 'POST',
@@ -250,9 +289,10 @@ async function checkProduction(base, origin) {
   }
   record('AC-D1 docker realtime', delivered === true, realtimeDetail);
 
-  const env = await run('docker', ['exec', 'dropit-accept-prod', 'node', '-e', 'console.log(process.env.GITHUB_CLIENT_SECRET||""); console.log(process.env.GOOGLE_CLIENT_SECRET||"")']);
-  record('AC-A4 empty secrets in container', env.stdout.trim() === '', JSON.stringify(env.stdout));
-  const inspected = await run('docker', ['inspect', '--format', '{{.HostConfig.PortBindings}}', 'dropit-accept-prod']);
+  const env = await run('docker', ['exec', containerName, 'sh', '-ec', 'printf "%s\\n%s\\n" "${GITHUB_CLIENT_SECRET:-}" "${GOOGLE_CLIENT_SECRET:-}"']);
+  record('AC-A4 empty secrets in container', env.code === 0 && env.stdout.trim() === '',
+    env.code !== 0 ? `exec exit ${env.code}: ${env.stderr.trim()}` : JSON.stringify(env.stdout));
+  const inspected = await run('docker', ['inspect', '--format', '{{.HostConfig.PortBindings}}', containerName]);
   record('AC-H1 loopback publish', inspected.stdout.includes('127.0.0.1'), inspected.stdout.trim());
 }
 
@@ -265,26 +305,46 @@ async function checkDevelopment(base) {
   record('AC-I1 spa fallback', page.ok && html.includes('id="root"'), `status ${page.status}`);
 }
 
-const prodName = 'dropit-accept-prod';
-const devName = 'dropit-accept-http';
+const prefix = `dropit-accept-${process.pid}-${randomBytes(4).toString('hex')}`;
+const prodName = `${prefix}-prod`;
+const devName = `${prefix}-http`;
+const prodPort = Number(process.env.DROPIT_ACCEPT_PROD_PORT) || await freePort();
+const devPort = Number(process.env.DROPIT_ACCEPT_DEV_PORT) || await freePort();
+let failure;
 try {
-  const prodOrigin = 'https://127.0.0.1:18787';
-  const prod = await startContainer(prodName, 18787, prodOrigin, ['NODE_ENV=production'], true);
+  const prodOrigin = `https://127.0.0.1:${prodPort}`;
+  const prod = await startContainer(prodName, prodPort, prodOrigin, ['NODE_ENV=production'], true);
   await waitFor(prod);
-  await checkProduction(prod, prodOrigin);
-  const devOrigin = 'http://127.0.0.1:18788';
-  const dev = await startContainer(devName, 18788, devOrigin, ['NODE_ENV=development'], false);
+  await checkProduction(prod, prodOrigin, prodName);
+  const devOrigin = `http://127.0.0.1:${devPort}`;
+  const dev = await startContainer(devName, devPort, devOrigin, ['NODE_ENV=development'], false);
   await waitFor(dev);
   await checkDevelopment(dev);
-  const dir = process.argv[2] ?? join(tmpdir(), 'dropit-report');
-  await mkdirReport(dir);
-  await writeFile(join(dir, 'docker.json'), JSON.stringify(results, null, 2));
   console.log(`DEV_READY ${dev}`);
-  console.log(`REPORT ${join(dir, 'docker.json')}`);
+} catch (error) {
+  failure = error;
 } finally {
-  await stop(prodName);
-  if (process.env.KEEP_DEV !== '1') await stop(devName);
+  // Always attempt every owned ID before writing reports; neither failure may
+  // prevent other containers (and their anonymous volumes) from being removed.
+  const cleanup = await Promise.allSettled([...ownedContainers].map(async ([name, id]) => {
+    await stop(name);
+    return { name, id, removed: true };
+  }));
+  const errors = cleanup.filter(result => result.status === 'rejected').map(result => result.reason);
+  const entries = [...ownedContainers];
+  const cleanupReport = cleanup.map((result, index) => result.status === 'fulfilled'
+    ? result.value : { name: entries[index][0], id: entries[index][1], removed: false, error: String(result.reason) });
+  console.log(`CLEANUP ${JSON.stringify(cleanupReport)}`);
+  try {
+    const dir = process.argv[2] ?? join(tmpdir(), 'dropit-report');
+    await mkdirReport(dir);
+    await writeFile(join(dir, 'docker.json'), JSON.stringify(results, null, 2));
+    await writeFile(join(dir, 'docker-cleanup.json'), JSON.stringify(cleanupReport, null, 2));
+    console.log(`REPORT ${join(dir, 'docker.json')}`);
+  } catch (error) { errors.push(error); }
+  if (errors.length) failure = new AggregateError([...(failure ? [failure] : []), ...errors], 'acceptance cleanup/report failed');
 }
+if (failure) throw failure;
 
 const failed = results.filter((item) => !item.pass);
 if (failed.length) {

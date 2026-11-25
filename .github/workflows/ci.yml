@@ -28,8 +28,64 @@ jobs:
       - run: pnpm test
       - run: pnpm build
 
+  rust:
+    name: Rust fmt, clippy, build, HTTP compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # fetch-depth: 0 is required because the compatibility harness archives
+      # the fixed TS reference commit from the local Git object database.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/server -> target
+          cache-on-failure: true
+      - name: install dav1d
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdav1d-dev
+          pkg-config --exists 'dav1d >= 1.3.0'
+          pkg-config --modversion dav1d
+      - name: verify compatibility inputs
+        working-directory: rust/server
+        run: |
+          test "$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)" = "1.94.0"
+          git cat-file -e 37ce06ebfab2cd98b81e49ce54fb24ec5daeec68^{commit}
+          command -v cc
+          command -v pkg-config
+          pkg-config --exists 'dav1d >= 1.3.0'
+          command -v git
+          command -v tar
+          node --version
+          pnpm --version
+          rustc --version
+      - name: cargo fmt
+        working-directory: rust/server
+        run: cargo fmt --check
+      - name: cargo clippy
+        working-directory: rust/server
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: cargo build
+        working-directory: rust/server
+        run: cargo build --locked
+      - name: TS/Rust HTTP compatibility
+        working-directory: rust/server
+        run: cargo test --locked -- --nocapture
+
   image:
     name: docker image
+    needs: [verify, rust]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,9 +101,7 @@ jobs:
           --build-arg DROPIT_COMMIT --build-arg DROPIT_BUILD_DATE --build-arg DROPIT_VERSION .
       - name: image reports its build
         run: |
-          docker image inspect dropit:ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -qx "$DROPIT_COMMIT"
-          docker image inspect dropit:ci --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' | grep -qxF "$DROPIT_VERSION"
-          docker run --rm dropit:ci node -e "import('./dist/version.js').then(m=>{const b=m.loadBuildInfo(process.env,null);console.log(JSON.stringify(b));if(b.commit!==process.env.DROPIT_COMMIT||b.version!==process.env.DROPIT_VERSION||b.install!=='docker')process.exit(1)})"
+          sh scripts/check-rust-image.sh dropit:ci
 
   publish:
     name: publish image

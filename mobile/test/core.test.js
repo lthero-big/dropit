@@ -98,6 +98,9 @@ test('RHEA-190 au: update offer from /api/app/android/latest', async () => {
   assert.ok(!shouldPrompt({ kind: 'latest' }, null));
   assert.equal(formatSize(5_400_000), '5.1 MB');
   assert.equal(formatSize(2048), '2 KB');
+  const forced = updateOffer('https://d.x', 4, 200, { ...body, minVersionCode: 5 });
+  assert.equal(forced.force, true);
+  assert.equal(updateOffer('https://d.x', 4, 200, { ...body, minVersionCode: 6 }).kind, 'error');
 });
 
 test('RHEA-190 au: build info carries the versionCode that matches build.gradle', async () => {

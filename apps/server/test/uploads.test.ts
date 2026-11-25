@@ -401,7 +401,7 @@ test('AC-U4: session/account/global concurrency caps reject excess work and canc
 });
 
 test('AC-U5: per-chunk timeout on a real HTTP server frees resources and permits retransmission', async t => {
-  const f = await fixture({ uploadChunkTimeoutMs: 20 }); t.after(() => f.dispose());
+  const f = await fixture({ uploadChunkTimeoutMs: 20, uploadChunksPerSession: 1, uploadChunksPerUser: 1, uploadChunksGlobal: 1 }); t.after(() => f.dispose());
   const server = serve({ fetch: f.backend.app.fetch, port: 0, hostname: '127.0.0.1' }) as Server;
   await once(server, 'listening');
   t.after(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
@@ -411,6 +411,10 @@ test('AC-U5: per-chunk timeout on a real HTTP server frees resources and permits
   } as RequestInit);
   await error(response, 400, 'UPLOAD_TIMEOUT');
   assert.deepEqual(await f.stored(), []);
+  assert.deepEqual((await ok(await f.request(`${f.admin.base}/uploads/${uploadId}`))).received, []);
+  // Only the stalled request needs a short deadline. Restore the normal runtime
+  // limit before disk I/O on the retry, which can exceed 20ms on a busy runner.
+  await ok(await f.json('/api/admin/limits', { uploadChunkTimeoutMs: loadConfig({}).uploadChunkTimeoutMs }, f.admin.cookie, 'PATCH'));
   assert.equal((await f.part(uploadId, 0, 'x')).status, 204);
   await ok(await f.complete(uploadId), 201);
   const key = (await f.stored())[0];

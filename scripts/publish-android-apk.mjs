@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // RHEA-190 au: publish an Android APK on this dropit server, so the app's 「检查更新」 finds it.
-//   node scripts/publish-android-apk.mjs <apk> --code 5 --name 0.3.2 [--notes "…"] [--dir DATA_DIR/app/android]
+//   node scripts/publish-android-apk.mjs <apk> --code 5 --name 0.3.2 [--notes "…"] [--min-code 5] [--force true] [--dir DATA_DIR/app/android]
 // Copies the APK to <dir>/dropit-android-<name>.apk, writes <dir>/latest.json atomically (temp + rename)
 // and removes older APKs from <dir>. --dir defaults to $DATA_DIR/app/android, else ./data/app/android.
 // Docker: publish into a local directory, then copy it into the volume, e.g.
@@ -27,6 +27,10 @@ const name = String(opts.name ?? '');
 if (!/^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$/.test(name)) fail('--name must be the APK versionName, e.g. 0.3.2');
 const notes = String(opts.notes ?? '');
 if (notes.length > 4000) fail('--notes is longer than 4000 characters');
+const minVersionCode = opts['min-code'] === undefined ? undefined : Number(opts['min-code']);
+if (minVersionCode !== undefined && (!Number.isSafeInteger(minVersionCode) || minVersionCode < 1 || minVersionCode > code)) fail('--min-code must be a positive versionCode no greater than --code');
+const force = opts.force === undefined ? undefined : String(opts.force).toLowerCase();
+if (force !== undefined && !['true', 'false', '1', '0'].includes(force)) fail('--force must be true or false');
 const dir = resolve(opts.dir ?? join(process.env.DATA_DIR || 'data', 'app', 'android'));
 const info = await stat(apk).catch(() => fail(`cannot read ${apk}`));
 if (!info.isFile() || info.size < 1 || info.size > 200 * 1024 * 1024) fail('the APK must be a file of at most 200 MB');
@@ -37,7 +41,8 @@ await copyFile(apk, join(dir, `${file}.tmp`));
 await rename(join(dir, `${file}.tmp`), join(dir, file));
 const digest = createHash('sha256');
 for await (const chunk of createReadStream(join(dir, file))) digest.update(chunk);
-const manifest = { versionCode: code, versionName: name, notes, file, sha256: digest.digest('hex'), size: info.size, publishedAt: new Date().toISOString() };
+const manifest = { versionCode: code, versionName: name, notes, file, sha256: digest.digest('hex'), size: info.size, publishedAt: new Date().toISOString(),
+  ...(minVersionCode === undefined ? {} : { minVersionCode }), ...(force === undefined ? {} : { force: force === 'true' || force === '1' }) };
 await writeFile(join(dir, 'latest.json.tmp'), `${JSON.stringify(manifest, null, 2)}\n`);
 await rename(join(dir, 'latest.json.tmp'), join(dir, 'latest.json'));
 for (const old of await readdir(dir)) if (old.endsWith('.apk') && old !== file) await unlink(join(dir, old));
