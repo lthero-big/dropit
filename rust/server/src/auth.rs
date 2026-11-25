@@ -32,6 +32,7 @@ const PASSWORD_MIN: usize = 8;
 const PASSWORD_MAX: usize = 256;
 const FLOW_MAX_AGE: i64 = 600;
 const APP_OAUTH_REDIRECT: &str = "dropit://auth/callback";
+const APP_ANDROID_PACKAGE: &str = "dev.dropit.app";
 const APP_TOKEN_MS: i64 = 365 * 86_400_000;
 const SETUP_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const TEMP_ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
@@ -218,7 +219,97 @@ fn optional_device_name_str(value: Option<&str>) -> ApiResult<crate::js::JsStrin
     }
 }
 
-fn app_redirect_url(pairs: &[(&str, &str)]) -> String {
+#[derive(Clone, Copy)]
+enum AppBridgeKind {
+    Login,
+    Link,
+    Error,
+}
+
+fn accepts_html(headers: &HeaderMap) -> bool {
+    header_value(headers, "accept")
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
+}
+
+fn html_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn render_app_oauth_bridge_html(dropit_url: &str, intent_url: &str, kind: AppBridgeKind) -> String {
+    let safe_dropit = html_escape(dropit_url);
+    let safe_intent = html_escape(intent_url);
+    let is_error = matches!(kind, AppBridgeKind::Error);
+    let title = if is_error {
+        "授权未完成 · dropit"
+    } else {
+        "返回 dropit"
+    };
+    let heading = if is_error {
+        "授权未完成，请返回 dropit 查看原因"
+    } else {
+        "授权已完成，正在返回 dropit…"
+    };
+    let description = if is_error {
+        "请点击下方按钮返回 dropit 查看详情或重新登录。"
+    } else {
+        "如果系统未自动切换回 dropit，请点击下方按钮继续。"
+    };
+    let cta_label = match kind {
+        AppBridgeKind::Login => "打开 dropit 完成登录",
+        AppBridgeKind::Link | AppBridgeKind::Error => "返回 dropit",
+    };
+    format!(
+        "<!doctype html>\n\
+<html lang=\"zh-CN\">\n\
+<head>\n\
+<meta charset=\"utf-8\">\n\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n\
+<meta name=\"referrer\" content=\"no-referrer\">\n\
+<meta http-equiv=\"refresh\" content=\"0;url={safe_dropit}\">\n\
+<title>{title}</title>\n\
+<style>\n\
+:root{{--bg:#f6f4ef;--card:#fffdf9;--ink:#1d1b18;--muted:#6c665d;--line:#e2ddd3;--accent:#d0021b;--btn-bg:#1d1b18;--btn-ink:#f6f4ef}}\n\
+@media (prefers-color-scheme:dark){{:root{{--bg:#151412;--card:#1e1c19;--ink:#f3efe7;--muted:#a8a095;--line:#312d28;--accent:#e53935;--btn-bg:#f3efe7;--btn-ink:#151412}}}}\n\
+*{{box-sizing:border-box}}\n\
+body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"PingFang SC\",\"Noto Sans SC\",sans-serif}}\n\
+main{{width:100%;max-width:420px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:32px 28px;text-align:center}}\n\
+.brand{{display:inline-flex;align-items:baseline;gap:3px;font-size:24px;font-weight:700;letter-spacing:-0.03em;margin-bottom:20px}}\n\
+.dot{{width:7px;height:7px;border-radius:50%;background:var(--accent);display:inline-block}}\n\
+h1{{margin:0 0 10px;font-size:19px;font-weight:600;line-height:1.4}}\n\
+p{{margin:0 0 24px;font-size:14px;line-height:1.6;color:var(--muted)}}\n\
+.btn{{display:block;width:100%;padding:13px 18px;border-radius:10px;background:var(--btn-bg);color:var(--btn-ink);text-decoration:none;font-size:15px;font-weight:600}}\n\
+.fallback{{display:inline-block;margin-top:16px;color:var(--muted);font-size:13px;text-decoration:underline;text-underline-offset:3px}}\n\
+</style>\n\
+</head>\n\
+<body>\n\
+<main>\n\
+<div class=\"brand\">dropit<span class=\"dot\" aria-hidden=\"true\"></span></div>\n\
+<h1>{heading}</h1>\n\
+<p>{description}</p>\n\
+<a class=\"btn\" href=\"{safe_intent}\">{cta_label}</a>\n\
+<a class=\"fallback\" href=\"{safe_dropit}\">如果未自动跳转，点此使用协议唤起</a>\n\
+</main>\n\
+</body>\n\
+</html>"
+    )
+}
+
+fn app_redirect_response(
+    accept_html: bool,
+    pairs: &[(&str, &str)],
+    kind: AppBridgeKind,
+) -> Response {
     let mut url = Url::parse(APP_OAUTH_REDIRECT).expect("valid app redirect");
     {
         let mut query = url.query_pairs_mut();
@@ -226,7 +317,28 @@ fn app_redirect_url(pairs: &[(&str, &str)]) -> String {
             query.append_pair(key, value);
         }
     }
-    url.into()
+    let query = url.query().unwrap_or_default().to_owned();
+    let dropit_url: String = url.into();
+    if accept_html {
+        let intent_url = format!(
+            "intent://auth/callback?{query}#Intent;scheme=dropit;package={APP_ANDROID_PACKAGE};end"
+        );
+        let html = render_app_oauth_bridge_html(&dropit_url, &intent_url, kind);
+        let mut response = (StatusCode::OK, html).into_response();
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        );
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response.headers_mut().insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        );
+        return response;
+    }
+    redirect(dropit_url)
 }
 
 fn app_scopes(role: &str) -> Vec<String> {
@@ -311,17 +423,23 @@ fn retry_after_header(error: &ApiError) -> Option<&HeaderValue> {
         .map(|(_, value)| value)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn oauth_failure(
     app: &crate::StateData,
     context: &RequestContext,
     linking: bool,
     app_state: Option<&str>,
+    accept_html: bool,
     code: &str,
     clear_flow: bool,
     retry_after: Option<&HeaderValue>,
 ) -> Response {
     let mut response = if let Some(state) = app_state {
-        redirect(app_redirect_url(&[("error", code), ("state", state)]))
+        app_redirect_response(
+            accept_html,
+            &[("error", code), ("state", state)],
+            AppBridgeKind::Error,
+        )
     } else if linking {
         redirect(format!(
             "{}/settings?link_error={code}#login-methods",
@@ -784,6 +902,79 @@ pub async fn app_oauth_exchange(
     )))
 }
 
+pub async fn app_google_id_token(
+    State(app): State<App>,
+    Extension(context): Extension<RequestContext>,
+    request: axum::extract::Request,
+) -> ApiResult<Json<Value>> {
+    app.limit("auth", &context.ip, app.config().rate_auth)?;
+    let Some(oauth) = oauth_app(&app, "google").await? else {
+        return Err(ApiError::new(404, "PROVIDER_UNAVAILABLE"));
+    };
+    if !oauth.enabled || oauth.client_id.is_empty() {
+        return Err(ApiError::new(404, "PROVIDER_UNAVAILABLE"));
+    }
+    let body = read_json(request, 8192).await?;
+    let id_token = input_string(body.get("idToken"), 8192)?;
+    let device_name = optional_device_name(body.get("deviceName"))?;
+    let invite_hash = optional_invite(body.get("invite"))?;
+    let verified = app
+        .google_jwks
+        .verify_id_token(id_token, &oauth.client_id)
+        .await?;
+    let identity = Identity {
+        provider: "google".into(),
+        subject: verified.subject,
+        email: verified.email,
+        name: verified.name,
+    };
+    let identity_key = password::hash(&format!("google:{}", identity.subject));
+    app.limit("auth:identity", &identity_key, app.config().rate_auth)?;
+    let admin_emails = env::var("ADMIN_EMAILS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|v| v.trim().to_lowercase())
+        .filter(|v| !v.is_empty())
+        .collect::<Vec<_>>();
+    let raw_token = crate::machine::raw_token()?;
+    let raw_for_db = raw_token.clone();
+    let token_id = Uuid::new_v4().to_string();
+    let (account, scopes) = app
+        .db
+        .run(move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let time = now();
+            let account = resolve_oauth_user_in_tx(
+                &tx,
+                &identity,
+                invite_hash.as_deref(),
+                &admin_emails,
+                time,
+            )?;
+            let scopes = app_scopes(&account.user.role);
+            let record = crate::machine::AccessToken {
+                id: token_id,
+                user_id: account.user.id.clone(),
+                name: device_name,
+                scopes: scopes.clone(),
+                created_at: time,
+                last_used_at: None,
+                expires_at: Some(time + APP_TOKEN_MS),
+                revoked: 0,
+            };
+            crate::machine::create_token(&tx, &record, &raw_for_db)?;
+            tx.commit()?;
+            Ok((account, scopes))
+        })
+        .await?;
+    Ok(Json(app_token_response(
+        raw_token,
+        &scopes,
+        &account.user,
+        account.must_change_password,
+    )))
+}
+
 pub async fn app_oauth_link(
     State(app): State<App>,
     Extension(context): Extension<RequestContext>,
@@ -862,8 +1053,10 @@ pub async fn oauth_start(
     Extension(context): Extension<RequestContext>,
     Path(provider): Path<String>,
     Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> ApiResult<Response> {
     app.limit("auth", &context.ip, app.config().rate_auth)?;
+    let accept_html = accepts_html(&headers);
     let Some(oauth) = oauth_app(&app, &provider).await? else {
         return Err(ApiError::new(404, "PROVIDER_UNAVAILABLE"));
     };
@@ -908,10 +1101,11 @@ pub async fn oauth_start(
         let Some(entry) =
             entry.filter(|entry| entry.expires_at > now() && entry.provider == provider)
         else {
-            return Ok(redirect(app_redirect_url(&[
-                ("error", "UNAUTHENTICATED"),
-                ("state", &state_ref),
-            ])));
+            return Ok(app_redirect_response(
+                accept_html,
+                &[("error", "UNAUTHENTICATED"), ("state", &state_ref)],
+                AppBridgeKind::Error,
+            ));
         };
         let check_user_id = entry.user_id.clone();
         let check_token_id = entry.token_id.clone();
@@ -939,10 +1133,11 @@ pub async fn oauth_start(
             })
             .await?;
         if !valid {
-            return Ok(redirect(app_redirect_url(&[
-                ("error", "UNAUTHENTICATED"),
-                ("state", &state_ref),
-            ])));
+            return Ok(app_redirect_response(
+                accept_html,
+                &[("error", "UNAUTHENTICATED"), ("state", &state_ref)],
+                AppBridgeKind::Error,
+            ));
         }
         if let Some((_, _, ref mut link_token)) = app_mode {
             *link_token = entry.token_id;
@@ -953,10 +1148,11 @@ pub async fn oauth_start(
             Ok(auth) => Some(auth.account.user.id.clone()),
             Err(_) => {
                 if let Some((ref state, _, _)) = app_mode {
-                    return Ok(redirect(app_redirect_url(&[
-                        ("error", "UNAUTHENTICATED"),
-                        ("state", state),
-                    ])));
+                    return Ok(app_redirect_response(
+                        accept_html,
+                        &[("error", "UNAUTHENTICATED"), ("state", state)],
+                        AppBridgeKind::Error,
+                    ));
                 }
                 return Ok(oauth_error(&app, &context, "UNAUTHENTICATED"));
             }
@@ -983,10 +1179,11 @@ pub async fn oauth_start(
         let count = app.db.run(|db| Ok(db::user_count(&*db)?)).await?;
         if !valid && count > 0 {
             if let Some((ref state, _, _)) = app_mode {
-                return Ok(redirect(app_redirect_url(&[
-                    ("error", "INVITE_INVALID"),
-                    ("state", state),
-                ])));
+                return Ok(app_redirect_response(
+                    accept_html,
+                    &[("error", "INVITE_INVALID"), ("state", state)],
+                    AppBridgeKind::Error,
+                ));
             }
             return Ok(oauth_error(&app, &context, "INVITE_INVALID"));
         }
@@ -1043,12 +1240,14 @@ pub async fn oauth_callback(
     Query(query): Query<HashMap<String, String>>,
     request: axum::extract::Request,
 ) -> ApiResult<Response> {
+    let accept_html = accepts_html(request.headers());
     if let Err(error) = app.limit("auth", &context.ip, app.config().rate_auth) {
         return Ok(oauth_failure(
             &app,
             &context,
             false,
             None,
+            accept_html,
             oauth_error_code(&error),
             false,
             retry_after_header(&error),
@@ -1067,6 +1266,7 @@ pub async fn oauth_callback(
                 &context,
                 false,
                 None,
+                accept_html,
                 "OAUTH_STATE_INVALID",
                 false,
                 None,
@@ -1078,6 +1278,7 @@ pub async fn oauth_callback(
                 &context,
                 false,
                 None,
+                accept_html,
                 oauth_error_code(&error),
                 false,
                 retry_after_header(&error),
@@ -1090,6 +1291,7 @@ pub async fn oauth_callback(
             &context,
             false,
             None,
+            accept_html,
             "OAUTH_STATE_INVALID",
             false,
             None,
@@ -1114,6 +1316,7 @@ pub async fn oauth_callback(
                 &context,
                 false,
                 None,
+                accept_html,
                 oauth_error_code(&error),
                 false,
                 retry_after_header(&error),
@@ -1126,6 +1329,7 @@ pub async fn oauth_callback(
             &context,
             false,
             None,
+            accept_html,
             "OAUTH_STATE_INVALID",
             false,
             None,
@@ -1149,6 +1353,7 @@ pub async fn oauth_callback(
             &context,
             linking,
             app_state,
+            accept_html,
             "OAUTH_DENIED",
             true,
             None,
@@ -1169,6 +1374,7 @@ pub async fn oauth_callback(
                 &context,
                 linking,
                 app_state,
+                accept_html,
                 oauth_error_code(&error),
                 true,
                 retry_after_header(&error),
@@ -1181,6 +1387,7 @@ pub async fn oauth_callback(
             &context,
             linking,
             app_state,
+            accept_html,
             "OAUTH_PROVIDER_ERROR",
             true,
             None,
@@ -1193,6 +1400,7 @@ pub async fn oauth_callback(
             &context,
             linking,
             app_state,
+            accept_html,
             oauth_error_code(&error),
             true,
             retry_after_header(&error),
@@ -1216,6 +1424,7 @@ pub async fn oauth_callback(
                 &context,
                 linking,
                 app_state,
+                accept_html,
                 oauth_error_code(&error),
                 true,
                 retry_after_header(&error),
@@ -1230,6 +1439,7 @@ pub async fn oauth_callback(
                     &context,
                     true,
                     Some(&flow_meta.app_state),
+                    accept_html,
                     "UNAUTHENTICATED",
                     true,
                     None,
@@ -1250,6 +1460,7 @@ pub async fn oauth_callback(
                         &context,
                         true,
                         Some(&flow_meta.app_state),
+                        accept_html,
                         "UNAUTHENTICATED",
                         true,
                         None,
@@ -1269,6 +1480,7 @@ pub async fn oauth_callback(
                         &context,
                         true,
                         Some(&flow_meta.app_state),
+                        accept_html,
                         oauth_error_code(&error),
                         true,
                         retry_after_header(&error),
@@ -1282,7 +1494,7 @@ pub async fn oauth_callback(
             if !added {
                 pairs.push(("already", "1"));
             }
-            let mut result = redirect(app_redirect_url(&pairs));
+            let mut result = app_redirect_response(accept_html, &pairs, AppBridgeKind::Link);
             result
                 .headers_mut()
                 .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
@@ -1296,6 +1508,7 @@ pub async fn oauth_callback(
                     &context,
                     true,
                     None,
+                    accept_html,
                     "UNAUTHENTICATED",
                     true,
                     None,
@@ -1308,6 +1521,7 @@ pub async fn oauth_callback(
                 &context,
                 true,
                 None,
+                accept_html,
                 "UNAUTHENTICATED",
                 true,
                 None,
@@ -1326,6 +1540,7 @@ pub async fn oauth_callback(
                     &context,
                     true,
                     None,
+                    accept_html,
                     oauth_error_code(&error),
                     true,
                     retry_after_header(&error),
@@ -1376,6 +1591,7 @@ pub async fn oauth_callback(
                     &context,
                     false,
                     Some(&flow_meta.app_state),
+                    accept_html,
                     oauth_error_code(&error),
                     true,
                     retry_after_header(&error),
@@ -1390,6 +1606,7 @@ pub async fn oauth_callback(
                     &context,
                     false,
                     Some(&flow_meta.app_state),
+                    accept_html,
                     oauth_error_code(&error),
                     true,
                     retry_after_header(&error),
@@ -1404,6 +1621,7 @@ pub async fn oauth_callback(
                     &context,
                     false,
                     Some(&flow_meta.app_state),
+                    accept_html,
                     "INTERNAL_ERROR",
                     true,
                     None,
@@ -1416,6 +1634,7 @@ pub async fn oauth_callback(
                     &context,
                     false,
                     Some(&flow_meta.app_state),
+                    accept_html,
                     "RATE_LIMITED",
                     true,
                     None,
@@ -1430,10 +1649,11 @@ pub async fn oauth_callback(
                 },
             );
         }
-        let mut response = redirect(app_redirect_url(&[
-            ("code", &exchange_code),
-            ("state", &flow_meta.app_state),
-        ]));
+        let mut response = app_redirect_response(
+            accept_html,
+            &[("code", &exchange_code), ("state", &flow_meta.app_state)],
+            AppBridgeKind::Login,
+        );
         response
             .headers_mut()
             .insert(header::SET_COOKIE, clear_flow_cookie(context.secure_cookie));
@@ -1447,6 +1667,7 @@ pub async fn oauth_callback(
                 &context,
                 false,
                 None,
+                accept_html,
                 oauth_error_code(&error),
                 true,
                 retry_after_header(&error),
@@ -1482,6 +1703,7 @@ pub async fn oauth_callback(
                 &context,
                 false,
                 None,
+                accept_html,
                 oauth_error_code(&error),
                 true,
                 retry_after_header(&error),

@@ -344,6 +344,7 @@ dependencies = [
  "mp4parse",
  "percent-encoding",
  "reqwest",
+ "ring",
  "rusqlite",
  "scrypt",
  "serde",

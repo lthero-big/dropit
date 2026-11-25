@@ -31,3 +31,4 @@ kamadak-exif = "0.6"
 dav1d = "0.11"
 mp4parse = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ring = "0.17"

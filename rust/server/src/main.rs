@@ -4,6 +4,7 @@ mod browser;
 mod config;
 mod db;
 mod downloads;
+mod google_id_token;
 mod images;
 mod items;
 mod js;
@@ -119,6 +120,7 @@ struct StateData {
     app_oauth_flows: Mutex<HashMap<String, auth::AppOAuthFlow>>,
     app_oauth_codes: Mutex<HashMap<String, auth::AppOAuthCode>>,
     app_link_tickets: Mutex<HashMap<String, auth::AppLinkTicket>>,
+    google_jwks: google_id_token::GoogleJwksCache,
     chunk_work: uploads::ChunkWork,
     pin_lockouts: Mutex<HashMap<String, (u32, i64, i64)>>,
     setup_code: Mutex<Option<String>>,
@@ -263,6 +265,7 @@ async fn main() -> StartupResult<()> {
         app_oauth_flows: Mutex::new(HashMap::new()),
         app_oauth_codes: Mutex::new(HashMap::new()),
         app_link_tickets: Mutex::new(HashMap::new()),
+        google_jwks: google_id_token::GoogleJwksCache::new(),
         chunk_work: uploads::ChunkWork::default(),
         pin_lockouts: Mutex::new(HashMap::new()),
         setup_code: Mutex::new(setup_code),
@@ -278,6 +281,10 @@ async fn main() -> StartupResult<()> {
         .route(
             "/api/auth/app/oauth/exchange",
             post(auth::app_oauth_exchange),
+        )
+        .route(
+            "/api/auth/app/google/id-token",
+            post(auth::app_google_id_token),
         )
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/{provider}", get(auth::oauth_start))
@@ -836,6 +843,7 @@ async fn api_context(
                 | "/api/auth/device/token"
                 | "/api/auth/app/password/login"
                 | "/api/auth/app/oauth/exchange"
+                | "/api/auth/app/google/id-token"
         )
         && raw_session.is_none()
         && header_value(headers, "origin")

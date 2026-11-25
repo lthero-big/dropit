@@ -198,7 +198,10 @@ async function emptySetup(kind) {
     const setup=await request(server,'/api/setup');
     assert.deepEqual(setup.body,{required:true,providers:['google']});
     const providers=await request(server,'/api/auth/providers');
-    assert.deepEqual(providers.body,{setupRequired:true,providers:['google'],registration:'invite',password:true});
+    const expectedProviders = kind === 'rust'
+      ? {setupRequired:true,providers:['google'],registration:'invite',password:true,googleClientId:'synthetic'}
+      : {setupRequired:true,providers:['google'],registration:'invite',password:true};
+    assert.deepEqual(providers.body, expectedProviders);
   } finally { await stop(server.child); }
 }
 

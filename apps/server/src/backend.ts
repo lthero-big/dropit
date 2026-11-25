@@ -13,6 +13,7 @@ import { SqliteRepository, type Repository } from './repository.js';
 import { DiskFileStorage, apkStream, jsonFileStore, readAndroidRelease, readJsonFile, type FileStorage } from './files.js';
 import { MemoryBroadcaster, type Broadcaster } from './events.js';
 import { checkOAuthCredentials, createOAuthProvider, envOAuthApps, isSupportedProvider, providerInfo, supportedProviders, type OAuthProvider } from './oauth.js';
+import { GoogleIdTokenVerifier } from './google-id-token.js';
 import { ClipboardService, deviceRoomHash, inviteStatus, roomCodeInfo, roomUrl } from './service.js';
 import { clientIpResolver, PinLockout, RateLimiter } from './rate-limit.js';
 import { limitRanges, RuntimeLimits } from './limits.js';
@@ -33,6 +34,8 @@ export interface BackendOptions {
   oauthEnv?: NodeJS.ProcessEnv;
   /** fetch used by OAuth adapters and the credential check (tests inject a mock). */
   oauthFetch?: typeof fetch;
+  /** Override Google JWKS URL (defaults to GOOGLE_JWKS_URL env or Google's official certs URL). */
+  googleJwksUrl?: string;
   update?: UpdateChecker;
 }
 
@@ -75,9 +78,56 @@ const oauthBrowserErrors = new Set([
   'ACCOUNT_EXISTS', 'IDENTITY_IN_USE', 'PROVIDER_ALREADY_LINKED', 'UNAUTHENTICATED', 'REGISTRATION_CLOSED',
 ]);
 const APP_OAUTH_REDIRECT = 'dropit://auth/callback';
+const APP_ANDROID_PACKAGE = 'dev.dropit.app';
 const APP_STATE_PATTERN = /^[A-Za-z0-9._~-]{8,128}$/;
 const APP_TOKEN_MS = 365 * 86400000;
 const RAW_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]!));
+}
+function renderAppOAuthBridgeHtml(dropitUrl: string, intentUrl: string, kind: 'login' | 'link' | 'error') {
+  const safeDropit = escapeHtml(dropitUrl);
+  const safeIntent = escapeHtml(intentUrl);
+  const isError = kind === 'error';
+  const title = isError ? '授权未完成 · dropit' : '返回 dropit';
+  const heading = isError ? '授权未完成，请返回 dropit 查看原因' : '授权已完成，正在返回 dropit…';
+  const description = isError
+    ? '请点击下方按钮返回 dropit 查看详情或重新登录。'
+    : '如果系统未自动切换回 dropit，请点击下方按钮继续。';
+  const ctaLabel = kind === 'login' ? '打开 dropit 完成登录' : '返回 dropit';
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="refresh" content="0;url=${safeDropit}">
+<title>${escapeHtml(title)}</title>
+<style>
+:root{--bg:#f6f4ef;--card:#fffdf9;--ink:#1d1b18;--muted:#6c665d;--line:#e2ddd3;--accent:#d0021b;--btn-bg:#1d1b18;--btn-ink:#f6f4ef}
+@media (prefers-color-scheme:dark){:root{--bg:#151412;--card:#1e1c19;--ink:#f3efe7;--muted:#a8a095;--line:#312d28;--accent:#e53935;--btn-bg:#f3efe7;--btn-ink:#151412}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Noto Sans SC",sans-serif}
+main{width:100%;max-width:420px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:32px 28px;text-align:center}
+.brand{display:inline-flex;align-items:baseline;gap:3px;font-size:24px;font-weight:700;letter-spacing:-0.03em;margin-bottom:20px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);display:inline-block}
+h1{margin:0 0 10px;font-size:19px;font-weight:600;line-height:1.4}
+p{margin:0 0 24px;font-size:14px;line-height:1.6;color:var(--muted)}
+.btn{display:block;width:100%;padding:13px 18px;border-radius:10px;background:var(--btn-bg);color:var(--btn-ink);text-decoration:none;font-size:15px;font-weight:600}
+.fallback{display:inline-block;margin-top:16px;color:var(--muted);font-size:13px;text-decoration:underline;text-underline-offset:3px}
+</style>
+</head>
+<body>
+<main>
+<div class="brand">dropit<span class="dot" aria-hidden="true"></span></div>
+<h1>${escapeHtml(heading)}</h1>
+<p>${escapeHtml(description)}</p>
+<a class="btn" href="${safeIntent}">${escapeHtml(ctaLabel)}</a>
+<a class="fallback" href="${safeDropit}">如果未自动跳转，点此使用协议唤起</a>
+</main>
+</body>
+</html>`;
+}
 // RHEA-190 auth step 2: while a temporary password is in use, a browser session may only
 // read who it is, change the password or sign out.
 const openWhileChangingPassword = new Set(['/api/me', '/api/me/password', '/api/auth/logout', '/api/auth/providers', '/api/site', '/api/version', '/api/setup', '/api/app-session']);
@@ -158,6 +208,11 @@ export function createBackend(options: BackendOptions = {}) {
   const events = options.events ?? new MemoryBroadcaster();
   const oauthEnv = options.oauthEnv ?? process.env;
   const oauthFetch = options.oauthFetch ?? fetch;
+  const googleIdTokenVerifier = new GoogleIdTokenVerifier({
+    jwksUrl: options.googleJwksUrl ?? oauthEnv.GOOGLE_JWKS_URL,
+    request: oauthFetch,
+    now,
+  });
   // RHEA-190 m11: credentials saved in 设置 override the environment; a saved but
   // disabled app turns that provider off. Resolved per request so saving needs no restart.
   const oauthApps = () => {
@@ -176,6 +231,17 @@ export function createBackend(options: BackendOptions = {}) {
     for (const app of oauthApps()) if (app.enabled && app.credentials)
       result[app.provider] = createOAuthProvider(app.provider, app.credentials.clientId, app.credentials.clientSecret, oauthFetch);
     return result;
+  };
+  const activeGoogleClientId = (): string | null => {
+    if (options.providers) {
+      if (!Object.hasOwn(options.providers, 'google')) return null;
+      const configured = oauthApps().find(app => app.provider === 'google');
+      if (configured?.enabled && configured.credentials?.clientId) return configured.credentials.clientId;
+      const envId = oauthEnv.GOOGLE_CLIENT_ID?.trim();
+      return envId || null;
+    }
+    const google = oauthApps().find(app => app.provider === 'google');
+    return google?.enabled && google.credentials?.clientId ? google.credentials.clientId : null;
   };
   // RHEA-190 auth step 2 — first run. ADMIN_EMAIL + ADMIN_PASSWORD create the first admin;
   // otherwise, while no account exists, /setup needs the one-time code printed in the log.
@@ -302,7 +368,7 @@ export function createBackend(options: BackendOptions = {}) {
     const safe = ['GET', 'HEAD', 'OPTIONS'].includes(c.req.method);
     const bearer = c.get('session')?.bearer;
     if (bearer && !bearer.scopes.includes(safe ? 'read' : 'write')) throw new ApiError(403, 'INSUFFICIENT_SCOPE');
-    const publicDevice = c.req.method === 'POST' && ['/api/auth/device/authorize', '/api/auth/device/token', '/api/auth/app/password/login', '/api/auth/app/oauth/exchange'].includes(c.req.path) &&
+    const publicDevice = c.req.method === 'POST' && ['/api/auth/device/authorize', '/api/auth/device/token', '/api/auth/app/password/login', '/api/auth/app/oauth/exchange', '/api/auth/app/google/id-token'].includes(c.req.path) &&
       !rawSession && (!c.req.header('origin') || originAllowed(c, c.req.header('origin')));
     if (!safe && !bearer && !publicDevice && !originAllowed(c, c.req.header('origin'))) throw originRejected(c);
     if (auth && auth.mustChangePassword && !openWhileChangingPassword.has(c.req.path)) throw new ApiError(403, 'PASSWORD_CHANGE_REQUIRED');
@@ -354,8 +420,16 @@ export function createBackend(options: BackendOptions = {}) {
     return c.json(update.report());
   });
   // providers: OAuth buttons. password: email + password sign-in is always available.
-  app.get('/api/auth/providers', c => c.json({ providers: Object.keys(activeProviders()), password: true,
-    registration: registrationPolicy(), setupRequired: setupRequired() }));
+  app.get('/api/auth/providers', c => {
+    const googleClientId = activeGoogleClientId();
+    return c.json({
+      providers: Object.keys(activeProviders()),
+      password: true,
+      registration: registrationPolicy(),
+      setupRequired: setupRequired(),
+      ...(googleClientId ? { googleClientId } : {}),
+    });
+  });
   // Public: the login page compares this with the address bar to explain a mismatch
   // ("change APP_ORIGIN to X") before the user hits a 403. The address is in every link anyway.
   app.get('/api/site', c => c.json({ origin: siteOrigin() || null, source: originSource(), requestOrigin: requestOrigin(c) }));
@@ -489,9 +563,20 @@ export function createBackend(options: BackendOptions = {}) {
   };
   const liveAccountToken = (userId: string, tokenId: string) =>
     repo.accessTokens(userId).some(t => t.id === tokenId && !t.revoked && t.scopes.includes('account') && (t.expiresAt === null || t.expiresAt > now()));
+  const appRedirectResponse = (c: Ctx, params: Record<string, string>, kind: 'login' | 'link' | 'error') => {
+    const query = new URLSearchParams(params).toString();
+    const dropitUrl = `${APP_OAUTH_REDIRECT}?${query}`;
+    if (c.req.header('accept')?.toLowerCase().includes('text/html')) {
+      const intentUrl = `intent://auth/callback?${query}#Intent;scheme=dropit;package=${APP_ANDROID_PACKAGE};end`;
+      c.header('Cache-Control', 'no-store');
+      c.header('Referrer-Policy', 'no-referrer');
+      return c.html(renderAppOAuthBridgeHtml(dropitUrl, intentUrl, kind), 200);
+    }
+    return c.redirect(dropitUrl);
+  };
   const oauthFailure = (c: Ctx, error: unknown, appState?: string) => {
     const code = error instanceof ApiError && oauthBrowserErrors.has(error.code) ? error.code : 'INTERNAL_ERROR';
-    if (appState) return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ error: code, state: appState })}`);
+    if (appState) return appRedirectResponse(c, { error: code, state: appState }, 'error');
     return c.redirect(`${originFor(c)}/login?error=${code}`);
   };
   app.post('/api/auth/app/password/login', async c => {
@@ -524,6 +609,22 @@ export function createBackend(options: BackendOptions = {}) {
     if (!user || user.pending) throw new ApiError(401, 'OAUTH_CODE_INVALID');
     if (user.disabled) throw new ApiError(403, 'USER_DISABLED');
     return c.json(issueAppToken(user, overrideName ?? entry.deviceName, Boolean(user.mustChangePassword)));
+  });
+  app.post('/api/auth/app/google/id-token', async c => {
+    limit(c, 'auth', config.rateAuth, false);
+    const googleClientId = activeGoogleClientId();
+    if (!googleClientId) throw new ApiError(404, 'PROVIDER_UNAVAILABLE');
+    const body = await json(c, 8192);
+    const idToken = string(body.idToken, 8192);
+    const deviceName = optionalDeviceName(body.deviceName);
+    const inviteHash = optionalInvite(body.invite);
+    const identity = await googleIdTokenVerifier.verify(idToken, googleClientId);
+    consume(c, `auth:identity:${hash(`google:${identity.subject}`)}`, config.rateAuth);
+    const resolved = repo.oauthUser(identity, inviteHash, config.adminEmails, now(), registrationPolicy());
+    const user = repo.userById(resolved.id);
+    if (!user || user.pending) throw new ApiError(401, 'UNAUTHENTICATED');
+    if (user.disabled) throw new ApiError(403, 'USER_DISABLED');
+    return c.json(issueAppToken(user, deviceName, Boolean(user.mustChangePassword)));
   });
   app.post('/api/me/identities/:provider/app-link', async c => {
     const auth = accountSession(c);
@@ -575,14 +676,14 @@ export function createBackend(options: BackendOptions = {}) {
       const user = entry ? repo.userById(entry.userId) : undefined;
       const tokenOk = !entry?.tokenId || liveAccountToken(entry.userId, entry.tokenId);
       if (!entry || entry.expiresAt <= now() || entry.provider !== providerName || !user || user.disabled || user.pending || !tokenOk) {
-        return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ error: 'UNAUTHENTICATED', state: appMode!.appState })}`);
+        return appRedirectResponse(c, { error: 'UNAUTHENTICATED', state: appMode!.appState }, 'error');
       }
       linkUserId = entry.userId;
       appMode!.linkTokenId = entry.tokenId;
     } else if (c.req.query('link') !== undefined) {
       const auth = c.get('session');
       if (!auth || auth.bearer) {
-        if (appMode) return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ error: 'UNAUTHENTICATED', state: appMode.appState })}`);
+        if (appMode) return appRedirectResponse(c, { error: 'UNAUTHENTICATED', state: appMode.appState }, 'error');
         return c.redirect(`${originFor(c)}/login?error=UNAUTHENTICATED`);
       }
       linkUserId = auth.user.id;
@@ -593,7 +694,7 @@ export function createBackend(options: BackendOptions = {}) {
     // Invite-first applies after the installation has an account. An unknown
     // token must not stop the first sign-up while the users table is empty.
     if (inviteHash && !liveInvite && repo.users().length > 0) {
-      if (appMode) return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ error: 'INVITE_INVALID', state: appMode.appState })}`);
+      if (appMode) return appRedirectResponse(c, { error: 'INVITE_INVALID', state: appMode.appState }, 'error');
       return c.redirect(`${originFor(c)}/login?error=INVITE_INVALID`);
     }
     const state = token();
@@ -641,7 +742,7 @@ export function createBackend(options: BackendOptions = {}) {
           if (appFlow.linkUserId !== flow.linkUserId) throw new ApiError(401, 'UNAUTHENTICATED');
           if (appFlow.linkTokenId && !liveAccountToken(flow.linkUserId, appFlow.linkTokenId)) throw new ApiError(401, 'UNAUTHENTICATED');
           const added = repo.linkIdentity(flow.linkUserId, identity, now());
-          return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ linked: providerName, state: appFlow.appState, ...(added ? {} : { already: '1' }) })}`);
+          return appRedirectResponse(c, { linked: providerName, state: appFlow.appState, ...(added ? {} : { already: '1' }) }, 'link');
         }
         const auth = c.get('session');
         // The browser that started the bind must still be signed in as the same user.
@@ -654,7 +755,7 @@ export function createBackend(options: BackendOptions = {}) {
         pruneMap(appOAuthCodes);
         const exchangeCode = token();
         appOAuthCodes.set(hash(exchangeCode), { userId: user.id, deviceName: appFlow.deviceName, expiresAt: now() + 60000 });
-        return c.redirect(`${APP_OAUTH_REDIRECT}?${new URLSearchParams({ code: exchangeCode, state: appFlow.appState })}`);
+        return appRedirectResponse(c, { code: exchangeCode, state: appFlow.appState }, 'login');
       }
       const session = token();
       repo.login(identity, flow.inviteHash, config.adminEmails, hash(session), now() + config.sessionMs, now(),
