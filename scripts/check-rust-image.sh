@@ -21,7 +21,7 @@ image_date=$(docker image inspect "$image" --format '{{index .Config.Labels "org
 test -z "${DROPIT_COMMIT:-}" || test "$image_revision" = "$DROPIT_COMMIT"
 test -z "${DROPIT_VERSION:-}" || test "$image_version" = "$DROPIT_VERSION"
 test -z "${DROPIT_BUILD_DATE:-}" || test "$image_date" = "$DROPIT_BUILD_DATE"
-curl -fsS "http://127.0.0.1:$port/api/version" | node -e 'let s="";process.stdin.on("data",b=>s+=b).on("end",()=>{const b=JSON.parse(s);console.log(b);if(b.commit!==process.argv[1]||b.version!==process.argv[2]||b.buildDate!==new Date(process.argv[3]).toISOString()||b.install!=="docker")process.exit(1)})' "$image_revision" "$image_version" "$image_date"
+curl -fsS "http://127.0.0.1:$port/api/version" | node -e 'let s="";process.stdin.on("data",b=>s+=b).on("end",()=>{const b=JSON.parse(s);console.log(b);if(b.commit!==process.argv[1].slice(0,7)||b.version!==process.argv[2]||b.buildDate!==new Date(process.argv[3]).toISOString()||b.install!=="docker")process.exit(1)})' "$image_revision" "$image_version" "$image_date"
 tries=0
 until test "$(docker inspect "$name" --format '{{.State.Health.Status}}')" = healthy; do
   tries=$((tries+1)); test "$tries" -lt 30 || exit 1

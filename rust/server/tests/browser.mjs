@@ -1,20 +1,33 @@
 // Run the existing Web smoke against only Rust, using a TS-created schema-19 fixture.
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fixture, NORMALIZED_PASSWORD } from './fixture.mjs';
+async function freePort() {
+  const server = createServer();
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  await new Promise((done) => server.close(done));
+  if (!port) throw new Error('unable to allocate ephemeral loopback port');
+  return port;
+}
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 await mkdir(resolve(root, 'rust/server/data'), { recursive: true });
 const data = await mkdtemp(resolve(root, 'rust/server/data/browser-'));
+const backendPort = Number(process.env.DROPIT_RUST_PORT) || await freePort();
+const webPort = Number(process.env.DROPIT_WEB_PORT) || await freePort();
 let backend;
 try {
   await fixture(data);
   backend = spawn(process.env.RUST_SERVER_BIN || resolve(root, 'rust/server/target/debug/dropit-server'), [], {
     cwd: root, stdio: ['ignore', 'pipe', 'inherit'], env: {
-      PATH: process.env.PATH, NODE_ENV: 'test', HOST: '127.0.0.1', PORT: '18878',
-      DATA_DIR: data, APP_ORIGIN: 'http://127.0.0.1:15173',
+      PATH: process.env.PATH, NODE_ENV: 'test', HOST: '127.0.0.1', PORT: String(backendPort),
+      DATA_DIR: data, APP_ORIGIN: `http://127.0.0.1:${webPort}`,
     },
   });
   await new Promise((done, fail) => {
@@ -23,14 +36,20 @@ try {
     backend.once('exit', code => { clearTimeout(timeout); fail(new Error('Rust exited '+code)); });
     backend.once('error', fail);
   });
-  console.log('Browser HTTP/WS target: Rust process pid=' + backend.pid + ' at http://127.0.0.1:18878; no TS server started');
+  console.log(`Browser HTTP/WS target: Rust process pid=${backend.pid} at http://127.0.0.1:${backendPort}; no TS server started`);
   const smoke = spawn('pnpm', ['--filter', '@dropit/web', 'smoke'], {cwd: root, stdio: 'inherit', env: {
-    ...process.env, DROPIT_DEV_BACKEND_ORIGIN: 'http://127.0.0.1:18878',
+    ...process.env, DROPIT_DEV_BACKEND_ORIGIN: `http://127.0.0.1:${backendPort}`,
+    DROPIT_WEB_PORT: String(webPort),
     DROPIT_SMOKE_EMAIL: 'alice@example.test', DROPIT_SMOKE_PASSWORD: NORMALIZED_PASSWORD,
   }});
   const [code] = await once(smoke, 'exit');
   if (code !== 0) throw new Error('Rust browser smoke failed, exit=' + code);
 } finally {
-  if (backend && backend.exitCode === null && backend.signalCode === null) { const exit = once(backend, 'exit'); backend.kill('SIGTERM'); await exit; }
+  if (backend && backend.exitCode === null && backend.signalCode === null) {
+    if (process.env.MULTICA_CLI_PATH) {
+      const daemon = JSON.parse(execFileSync(process.env.MULTICA_CLI_PATH, ['daemon', 'status', '--output', 'json'], {encoding: 'utf8'}));
+      if (backend.pid === daemon.pid) throw new Error('refusing to terminate daemon PID');
+    }
+    const exit = once(backend, 'exit'); backend.kill('SIGTERM'); await exit; }
   await rm(data, {recursive: true, force: true});
 }
