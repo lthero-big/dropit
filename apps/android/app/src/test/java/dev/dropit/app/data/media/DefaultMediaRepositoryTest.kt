@@ -10,13 +10,17 @@ import dev.dropit.app.core.network.DropitApiClient
 import dev.dropit.app.core.network.SessionCredentialsProvider
 import dev.dropit.app.core.network.TargetScope
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.mockwebserver.MockResponse
@@ -51,6 +55,7 @@ class DefaultMediaRepositoryTest {
     private var activeOrigin: String? = null
     private var activeToken: String? = "tok_media_test_0123456789012345678901234567890"
     private val cacheClearCount = AtomicInteger(0)
+    private lateinit var cacheClearedSignals: Channel<Unit>
 
     @Before
     fun setUp() {
@@ -79,6 +84,8 @@ class DefaultMediaRepositoryTest {
             credentialsProvider = creds,
             allowInsecureHttpForTest = true,
         )
+        cacheClearCount.set(0)
+        cacheClearedSignals = Channel(Channel.UNLIMITED)
         mediaRepository = DefaultMediaRepository(
             context = null,
             baseOkHttpClient = okHttpClient,
@@ -87,7 +94,10 @@ class DefaultMediaRepositoryTest {
             imageCacheDir = tempCacheDir,
             sessionStateFlow = sessionFlow,
             coroutineScope = observerScope,
-            onCachesCleared = { cacheClearCount.incrementAndGet() },
+            onCachesCleared = {
+                cacheClearCount.incrementAndGet()
+                cacheClearedSignals.trySend(Unit)
+            },
         )
     }
 
@@ -179,11 +189,15 @@ class DefaultMediaRepositoryTest {
                 .setResponseCode(401)
                 .setBody("""{"error":{"code":"UNAUTHENTICATED"}}"""),
         )
-        val expiredDeferred = async { apiClient.sessionExpiredEvents.first() }
+        val expiredDeferred = async(start = CoroutineStart.UNDISPATCHED) {
+            apiClient.sessionExpiredEvents.first()
+        }
 
         val previewUrl = mediaRepository.previewUrl(TargetScope.SpaceScope("sp-1"), "img-1")
-        mediaRepository.mediaOkHttpClient.newCall(Request.Builder().url(previewUrl).build()).execute().use { res ->
-            assertEquals(401, res.code)
+        withContext(Dispatchers.IO) {
+            mediaRepository.mediaOkHttpClient.newCall(Request.Builder().url(previewUrl).build()).execute().use { res ->
+                assertEquals(401, res.code)
+            }
         }
 
         val event = expiredDeferred.await()
@@ -279,6 +293,7 @@ class DefaultMediaRepositoryTest {
 
         // Logout on same server triggers automatic cache clear
         sessionFlow.value = AuthSessionState(serverOrigin = baseUrl, isSignedIn = false)
+        withTimeout(5_000L) { cacheClearedSignals.receive() }
         assertEquals(1, cacheClearCount.get())
         assertTrue(tempCacheDir.listFiles().isNullOrEmpty())
 
@@ -288,6 +303,7 @@ class DefaultMediaRepositoryTest {
         assertTrue(cachedFile2.isFile)
 
         sessionFlow.value = AuthSessionState(serverOrigin = otherBaseUrl, isSignedIn = true)
+        withTimeout(5_000L) { cacheClearedSignals.receive() }
         assertEquals(2, cacheClearCount.get())
         assertTrue(tempCacheDir.listFiles().isNullOrEmpty())
     }

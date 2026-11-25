@@ -10,6 +10,7 @@ import dev.dropit.app.core.network.SessionCredentialsProvider
 import dev.dropit.app.core.network.SessionExpiredEvent
 import dev.dropit.app.core.network.TargetScope
 import dev.dropit.app.core.repository.DefaultBoardRepository
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
@@ -158,7 +159,7 @@ class DefaultRoomRepositoryTest {
                 ),
         )
 
-        val expiredCollector = async {
+        val expiredCollector = async(start = CoroutineStart.UNDISPATCHED) {
             withTimeoutOrNull(150L) { apiClient.sessionExpiredEvents.first() }
         }
 
@@ -201,7 +202,7 @@ class DefaultRoomRepositoryTest {
                 .setBody("""{"error":{"code":"UNAUTHENTICATED"}}"""),
         )
 
-        val expiredEvent = async { apiClient.sessionExpiredEvents.first() }
+        val expiredEvent = async(start = CoroutineStart.UNDISPATCHED) { apiClient.sessionExpiredEvents.first() }
 
         try {
             repository.enterRoom(code = "Rm4kQ2")

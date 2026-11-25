@@ -39,10 +39,12 @@ import dev.dropit.app.data.transfer.TransferWorkScheduler
 import dev.dropit.app.data.transfer.UploadUriStager
 import dev.dropit.app.di.performServerSwitchReset
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -50,6 +52,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.mockwebserver.Dispatcher
@@ -505,6 +508,7 @@ class UpgradeMigrationAndIsolationTest {
         val downloadTempDir = File(tempRoot, "download_temp").apply { mkdirs() }
         val updateCacheDir = File(tempRoot, "update_cache").apply { mkdirs() }
 
+        val cacheClearedSignals = Channel<Unit>(Channel.UNLIMITED)
         val mediaRepo = DefaultMediaRepository(
             context = null,
             baseOkHttpClient = okHttpClient,
@@ -513,6 +517,7 @@ class UpgradeMigrationAndIsolationTest {
             imageCacheDir = imageCacheDir,
             sessionStateFlow = authRepo.sessionState,
             coroutineScope = scope,
+            onCachesCleared = { cacheClearedSignals.trySend(Unit) },
         )
 
         val dao = InMemoryDao()
@@ -592,7 +597,7 @@ class UpgradeMigrationAndIsolationTest {
 
         // 2. Revoke legacy token -> 401 emits sessionExpiredEvents -> smooth same-server re-auth preserves serverOrigin
         revokedA.set(true)
-        val expiredEvent = async { apiClient.sessionExpiredEvents.first() }
+        val expiredEvent = async(start = CoroutineStart.UNDISPATCHED) { apiClient.sessionExpiredEvents.first() }
         try {
             spaceRepo.getMe()
             fail("Expected 401 UNAUTHENTICATED after legacy token revocation")
@@ -604,6 +609,7 @@ class UpgradeMigrationAndIsolationTest {
 
         // Smooth re-login flow: logout(clearServer = false) keeps serverOrigin, wipes old token & image cache
         authRepo.logout(clearServer = false)
+        withTimeout(5_000L) { cacheClearedSignals.receive() }
         assertEquals(originA, settingsStore.getServerOrigin())
         assertNull(tokenVault.getToken())
         assertFalse(authRepo.sessionState.value.isSignedIn)

@@ -230,7 +230,7 @@ class DefaultMediaRepository(
         )
     }
 
-    @OptIn(ExperimentalCoilApi::class)
+    @kotlin.OptIn(ExperimentalCoilApi::class)
     override suspend fun clearCaches() {
         val loader = synchronized(loaderLock) { cachedImageLoader }
         if (loader != null) {
