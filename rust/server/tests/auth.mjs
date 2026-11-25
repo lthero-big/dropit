@@ -17,9 +17,12 @@ const mock = createServer(async (request, response) => {
   response.setHeader('content-type', 'application/json');
   if (path === '/token' || path === '/google/token') {
     const form = new URLSearchParams(body);
-    if (form.get('code') === 'provider-error') { response.statusCode = 500; response.end(JSON.stringify({error: 'server_error'})); return; }
-    if (form.get('code') === 'dropit-credential-check') { response.end(JSON.stringify({error: 'invalid_grant'})); return; }
-    response.end(JSON.stringify({access_token: form.get('code') || 'first'})); return;
+    const code = form.get('code') || '';
+    if (code === 'provider-error') { response.statusCode = 500; response.end(JSON.stringify({error: 'server_error'})); return; }
+    if (code === 'dropit-credential-check') { response.end(JSON.stringify({error: 'invalid_grant'})); return; }
+    const known = new Set(['first', 'conflict', 'pending', 'linked', 'unverified', 'google-link', 'google-unverified']);
+    const fallback = path === '/google/token' ? 'google-link' : 'first';
+    response.end(JSON.stringify({access_token: known.has(code) ? code : fallback})); return;
   }
   const access = request.headers.authorization?.replace(/^Bearer /, '') || 'first';
   if (path === '/google/userinfo') {
@@ -206,6 +209,41 @@ try {
   assert.equal(afterDeniedReplay.headers.get('location'), `${server.url}/login?error=OAUTH_STATE_INVALID`);
   assert.equal(hasAnyFlowCookie(afterDeniedReplay.response), false);
 
+  // OAuth callback code length uses JS UTF-16 code units (<= 4096), not UTF-8 bytes or scalar count.
+  const emptyCodeStart = await request(server, '/api/auth/github');
+  assert.equal(emptyCodeStart.status, 302);
+  const emptyCodeState = new URL(emptyCodeStart.headers.get('location')).searchParams.get('state');
+  const emptyCodeFlow = cookieFor(emptyCodeStart.response, 'dropit_oauth');
+  const emptyCodeCb = await request(server, `/api/auth/github/callback?state=${encodeURIComponent(emptyCodeState)}&code=`, {cookie: emptyCodeFlow});
+  assert.equal(emptyCodeCb.status, 302);
+  assert.equal(emptyCodeCb.headers.get('location'), `${server.url}/login?error=OAUTH_DENIED`);
+  assert.ok(hasFlowCookieClear(emptyCodeCb.response));
+
+  for (const [label, code, shouldAccept] of [
+    ['ascii-4096', 'a'.repeat(4096), true],
+    ['ascii-4097', 'a'.repeat(4097), false],
+    ['bmp-1366', '界'.repeat(1366), true],
+    ['bmp-4096-units', '界'.repeat(1366) + 'a'.repeat(2730), true],
+    ['bmp-4097-units', '界'.repeat(1366) + 'a'.repeat(2731), false],
+    ['supplementary-4096-units', 'a'.repeat(4094) + '😀', true],
+    ['supplementary-4097-units', 'a'.repeat(4095) + '😀', false],
+  ]) {
+    const res = await oauth(server, code);
+    assert.equal(res.callback.status, 302, label);
+    assert.ok(hasFlowCookieClear(res.callback.response), `${label} must clear flow cookie`);
+    if (shouldAccept) {
+      assert.equal(res.callback.headers.get('location'), `${server.url}/`, `${label} should succeed`);
+      assert.ok(cookieFor(res.callback.response, 'dropit_session'), `${label} should set session`);
+    } else {
+      assert.equal(res.callback.headers.get('location'), `${server.url}/login?error=OAUTH_DENIED`, `${label} should fail with OAUTH_DENIED`);
+      assert.equal(cookieFor(res.callback.response, 'dropit_session'), undefined, `${label} must not set session`);
+    }
+    const replayCode = await request(server, `/api/auth/github/callback?state=${encodeURIComponent(res.state)}&code=first`, {cookie: res.flow});
+    assert.equal(replayCode.status, 302, `${label} replay`);
+    assert.equal(replayCode.headers.get('location'), `${server.url}/login?error=OAUTH_STATE_INVALID`, `${label} replay must see consumed flow`);
+    assert.equal(hasAnyFlowCookie(replayCode.response), false, `${label} replay must not clear cookie`);
+  }
+
   result = await request(server, '/api/admin/oauth', {cookie: adminCookie});
   assert.equal(result.body.providers.length, 2);
   result = await request(server, '/api/admin/oauth/github', {method: 'PUT', cookie: adminCookie, json: {clientId: 'mock-id', clientSecret: '秘密秘密秘密秘密秘密'}});
@@ -278,6 +316,14 @@ try {
   assert.equal(linkDeniedCb.status, 302);
   assert.equal(linkDeniedCb.headers.get('location'), `${server.url}/settings?link_error=OAUTH_DENIED#login-methods`);
   assert.ok(hasFlowCookieClear(linkDeniedCb.response));
+  const linkTooLong = await oauth(server, 'a'.repeat(4095) + '😀', {provider: 'google', link: true, cookie: linkedAdminCookie});
+  assert.equal(linkTooLong.callback.status, 302);
+  assert.equal(linkTooLong.callback.headers.get('location'), `${server.url}/settings?link_error=OAUTH_DENIED#login-methods`);
+  assert.ok(hasFlowCookieClear(linkTooLong.callback.response));
+  const linkTooLongReplay = await request(server, `/api/auth/google/callback?state=${encodeURIComponent(linkTooLong.state)}&code=google-link`, {cookie: `${linkedAdminCookie}; ${linkTooLong.flow}`});
+  assert.equal(linkTooLongReplay.status, 302);
+  assert.equal(linkTooLongReplay.headers.get('location'), `${server.url}/login?error=OAUTH_STATE_INVALID`);
+  assert.equal(hasAnyFlowCookie(linkTooLongReplay.response), false);
   const googleLinked = await oauth(server, 'google-link', {provider: 'google', link: true, cookie: linkedAdminCookie});
   assert.equal(googleLinked.callback.status, 302);
   assert.equal(googleLinked.callback.headers.get('location'), `${server.url}/settings?linked=google#login-methods`);
@@ -296,13 +342,13 @@ try {
   result = await request(server, '/api/me', {cookie: linkedAdminCookie});
   assert.equal(result.status, 200);
 
-  // Rate limiting: start returns 429 JSON + Retry-After (no Location / no Set-Cookie);
-  // X-Forwarded-For does not bypass the bucket when untrusted; existing sessions stay valid; window recovers.
+  // Rate limiting: shared auth bucket across password login + OAuth start/callback uses a generous window
+  // so debug scrypt verification cannot race the bucket reset on slower CI runners.
   await stop(server);
   server = await start({
     GITHUB_CLIENT_ID: '', GITHUB_CLIENT_SECRET: '',
     ADMIN_EMAIL: 'rate@example.test', ADMIN_PASSWORD: 'Password-123',
-    RATE_AUTH: '3', RATE_WINDOW_MS: '1500',
+    RATE_AUTH: '3', RATE_WINDOW_MS: '60000',
   });
   const loginRes = await request(server, '/api/auth/password/login', {method: 'POST', json: {email: 'rate@example.test', password: 'Password-123'}});
   assert.equal(loginRes.status, 200);
@@ -326,11 +372,40 @@ try {
   assert.equal(limitedCb.headers.get('location'), `${server.url}/login?error=RATE_LIMITED`);
   assert.ok(positiveRetryAfter(limitedCb.headers), 'callback 302 RATE_LIMITED must include positive Retry-After');
   assert.equal(hasAnyFlowCookie(limitedCb.response), false);
-  // Window recovery restores normal responses.
-  await new Promise(resolve => setTimeout(resolve, 1650));
+
+  // Separate lightweight window-recovery scenario without expensive password hashing:
+  // verifies both start (429 JSON) and callback (302 RATE_LIMITED) recover after the window expires.
+  await stop(server);
+  server = await start({GITHUB_CLIENT_ID: '', GITHUB_CLIENT_SECRET: '', RATE_AUTH: '2', RATE_WINDOW_MS: '1500'});
+  const fastStart = [];
+  for (let i = 0; i < 3; i++) {
+    fastStart.push(await request(server, '/api/auth/github', {headers: {'x-forwarded-for': `203.0.113.${10 + i}`}}));
+  }
+  assert.deepEqual(fastStart.map(item => item.status), [404, 404, 429]);
+  assert.equal(fastStart[2].body?.error?.code, 'RATE_LIMITED');
+  assert.ok(positiveRetryAfter(fastStart[2].headers), 'fast start 429 must include positive Retry-After');
+  assert.equal(fastStart[2].headers.get('location'), null);
+  assert.equal(hasAnyFlowCookie(fastStart[2].response), false);
+  const startRetryMs = Number(fastStart[2].headers.get('retry-after')) * 1000;
+  await new Promise(resolve => setTimeout(resolve, Math.max(1700, startRetryMs + 250)));
   const recoveredStart = await request(server, '/api/auth/github');
   assert.equal(recoveredStart.status, 404);
   assert.equal(recoveredStart.body?.error?.code, 'PROVIDER_UNAVAILABLE');
+  const cbSecond = await request(server, '/api/auth/github/callback');
+  assert.equal(cbSecond.status, 302);
+  assert.equal(cbSecond.headers.get('location'), `${server.url}/login?error=OAUTH_STATE_INVALID`);
+  assert.equal(hasAnyFlowCookie(cbSecond.response), false);
+  const cbBlocked = await request(server, '/api/auth/github/callback');
+  assert.equal(cbBlocked.status, 302);
+  assert.equal(cbBlocked.headers.get('location'), `${server.url}/login?error=RATE_LIMITED`);
+  assert.ok(positiveRetryAfter(cbBlocked.headers));
+  assert.equal(hasAnyFlowCookie(cbBlocked.response), false);
+  const cbRetryMs = Number(cbBlocked.headers.get('retry-after')) * 1000;
+  await new Promise(resolve => setTimeout(resolve, Math.max(1700, cbRetryMs + 250)));
+  const recoveredCb = await request(server, '/api/auth/github/callback');
+  assert.equal(recoveredCb.status, 302);
+  assert.equal(recoveredCb.headers.get('location'), `${server.url}/login?error=OAUTH_STATE_INVALID`);
+  assert.equal(hasAnyFlowCookie(recoveredCb.response), false);
 
   // Callback-only rate limit sequence (without provider credentials) matches TS exactly.
   await stop(server);

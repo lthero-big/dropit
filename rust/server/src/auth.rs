@@ -684,7 +684,7 @@ pub async fn oauth_callback(
     let has_error = query.get("error").is_some_and(|value| !value.is_empty());
     let Some(code) = query
         .get("code")
-        .filter(|value| !value.is_empty() && value.len() <= 4096)
+        .filter(|value| !value.is_empty() && value.encode_utf16().count() <= 4096)
         .filter(|_| !has_error)
     else {
         return Ok(oauth_failure(
