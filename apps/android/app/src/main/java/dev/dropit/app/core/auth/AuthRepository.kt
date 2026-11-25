@@ -2,20 +2,28 @@ package dev.dropit.app.core.auth
 
 import dev.dropit.app.core.network.ApiError
 import dev.dropit.app.core.network.ApiErrorCode
+import dev.dropit.app.core.network.AppAuthTokenResponse
+import dev.dropit.app.core.network.AuthProvidersInfo
 import dev.dropit.app.core.network.DeviceAuthorizeResponse
 import dev.dropit.app.core.network.DeviceTokenResponse
 import dev.dropit.app.core.network.DropitApiClient
 import dev.dropit.app.core.network.VerifiedServer
+import dev.dropit.app.core.network.parseScopeString
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import java.security.MessageDigest
+import java.security.SecureRandom
 import kotlin.math.max
 
 sealed class DevicePollOutcome {
@@ -50,14 +58,78 @@ sealed class DeviceAuthState {
     data class Failed(val error: ApiError) : DeviceAuthState()
 }
 
+/**
+ * Capability status of the current token for native in-app account & admin settings.
+ * Users upgraded from legacy device-code tokens lack the `account` scope and see
+ * [InsufficientScopeForAccountSettings] so UI can guide one-tap re-authentication.
+ */
+sealed class AccountCapabilityState {
+    data object SignedOut : AccountCapabilityState()
+    data class Ready(val hasAdminScope: Boolean) : AccountCapabilityState()
+    data class InsufficientScopeForAccountSettings(
+        val requiredScope: String = AuthRepository.SCOPE_ACCOUNT,
+        val message: String = DEFAULT_MESSAGE,
+    ) : AccountCapabilityState()
+
+    companion object {
+        const val DEFAULT_MESSAGE = "当前登录令牌缺少应用内设置权限，请使用邮箱密码或 GitHub / Google 重新登录以升级权限"
+    }
+}
+
+data class PendingOAuthLogin(
+    val provider: String,
+    val serverOrigin: String,
+    val state: String,
+    val launchUrl: String,
+)
+
+data class PendingOAuthLink(
+    val provider: String,
+    val state: String,
+    val ticket: String,
+    val path: String,
+    val launchUrl: String,
+    val expiresIn: Int = 60,
+)
+
+sealed class OAuthLoginResult {
+    data class Success(val response: AppAuthTokenResponse) : OAuthLoginResult()
+    data class Failed(val error: ApiError) : OAuthLoginResult()
+}
+
+sealed class OAuthLinkResult {
+    data class Linked(val provider: String, val alreadyLinked: Boolean) : OAuthLinkResult()
+    data class Failed(val error: ApiError) : OAuthLinkResult()
+}
+
 data class AuthSessionState(
     val serverOrigin: String? = null,
     val isSignedIn: Boolean = false,
-)
+    val tokenScopes: Set<String> = emptySet(),
+    val mustChangePassword: Boolean = false,
+) {
+    val hasAccountScope: Boolean
+        get() = AuthRepository.SCOPE_ACCOUNT in tokenScopes
+
+    val hasAdminScope: Boolean
+        get() = AuthRepository.SCOPE_ADMIN in tokenScopes
+}
 
 interface AuthRepository {
     val sessionState: StateFlow<AuthSessionState>
     val deviceAuthState: StateFlow<DeviceAuthState>
+
+    val accountCapability: StateFlow<AccountCapabilityState>
+        get() = MutableStateFlow(AccountCapabilityState.SignedOut)
+
+    val oauthLinkEvents: SharedFlow<OAuthLinkResult>
+        get() = MutableSharedFlow()
+
+    val hasAccountScope: Boolean
+        get() = sessionState.value.hasAccountScope
+
+    val hasAdminScope: Boolean
+        get() = sessionState.value.hasAdminScope
 
     suspend fun refreshSessionState(): AuthSessionState
     suspend fun verifyAndSaveServer(rawUrl: String): VerifiedServer
@@ -75,13 +147,68 @@ interface AuthRepository {
     ): Flow<DeviceAuthState>
 
     suspend fun completeAuthorization(serverOrigin: String, token: String)
+
+    suspend fun completeAuthorizationWithMetadata(
+        serverOrigin: String,
+        token: String,
+        scopes: Set<String> = emptySet(),
+        mustChangePassword: Boolean = false,
+    ) {
+        completeAuthorization(serverOrigin, token)
+    }
+
+    suspend fun getAuthProviders(serverOrigin: String? = null): AuthProvidersInfo =
+        throw UnsupportedOperationException("getAuthProviders not implemented")
+
+    suspend fun loginWithPassword(
+        serverOrigin: String,
+        email: String,
+        password: String,
+        invite: String? = null,
+    ): AppAuthTokenResponse =
+        throw UnsupportedOperationException("loginWithPassword not implemented")
+
+    suspend fun startAppOAuthLogin(
+        serverOrigin: String,
+        provider: String,
+        invite: String? = null,
+    ): PendingOAuthLogin =
+        throw UnsupportedOperationException("startAppOAuthLogin not implemented")
+
+    suspend fun exchangeAppOAuthCode(
+        serverOrigin: String,
+        code: String,
+    ): AppAuthTokenResponse =
+        throw UnsupportedOperationException("exchangeAppOAuthCode not implemented")
+
+    suspend fun handleOAuthLoginCallback(payload: OAuthCallbackPayload): OAuthLoginResult =
+        throw UnsupportedOperationException("handleOAuthLoginCallback not implemented")
+
+    suspend fun startAppOAuthLink(provider: String): PendingOAuthLink =
+        throw UnsupportedOperationException("startAppOAuthLink not implemented")
+
+    suspend fun handleOAuthLinkCallback(payload: OAuthCallbackPayload): OAuthLinkResult =
+        throw UnsupportedOperationException("handleOAuthLinkCallback not implemented")
+
+    suspend fun clearPendingOAuthFlow() = Unit
+
+    suspend fun markPasswordChanged() = Unit
+
+    suspend fun reportInsufficientScope(requiredScope: String = SCOPE_ACCOUNT) = Unit
+
     suspend fun clearLocalSession(clearServer: Boolean = false)
     suspend fun logout(clearServer: Boolean = false)
     fun resetDeviceAuthState()
 
     companion object {
-        val DEFAULT_SCOPES: List<String> = listOf("read", "write")
-        val EXTENDED_WEB_SCOPES: List<String> = listOf("read", "write", "web")
+        const val SCOPE_READ = "read"
+        const val SCOPE_WRITE = "write"
+        const val SCOPE_WEB = "web"
+        const val SCOPE_ACCOUNT = "account"
+        const val SCOPE_ADMIN = "admin"
+
+        val DEFAULT_SCOPES: List<String> = listOf(SCOPE_READ, SCOPE_WRITE)
+        val EXTENDED_WEB_SCOPES: List<String> = listOf(SCOPE_READ, SCOPE_WRITE, SCOPE_WEB)
     }
 }
 
@@ -91,6 +218,7 @@ class DefaultAuthRepository(
     private val tokenVault: TokenVault,
     private val deviceNameProvider: () -> String,
     private val json: Json = DropitApiClient.defaultJson(),
+    private val stateGenerator: () -> String = { generateAppState() },
 ) : AuthRepository {
 
     private val _sessionState = MutableStateFlow(AuthSessionState())
@@ -99,11 +227,27 @@ class DefaultAuthRepository(
     private val _deviceAuthState = MutableStateFlow<DeviceAuthState>(DeviceAuthState.Idle)
     override val deviceAuthState: StateFlow<DeviceAuthState> = _deviceAuthState.asStateFlow()
 
+    private val _accountCapability = MutableStateFlow<AccountCapabilityState>(AccountCapabilityState.SignedOut)
+    override val accountCapability: StateFlow<AccountCapabilityState> = _accountCapability.asStateFlow()
+
+    private val _oauthLinkEvents = MutableSharedFlow<OAuthLinkResult>(extraBufferCapacity = 8)
+    override val oauthLinkEvents: SharedFlow<OAuthLinkResult> = _oauthLinkEvents.asSharedFlow()
+
     override suspend fun refreshSessionState(): AuthSessionState {
-        val origin = settingsStore.getServerOrigin()
+        val settings = settingsStore.current()
+        val origin = settings.serverOrigin
         val hasToken = tokenVault.hasToken()
-        val next = AuthSessionState(serverOrigin = origin, isSignedIn = !origin.isNullOrBlank() && hasToken)
+        val signedIn = !origin.isNullOrBlank() && hasToken
+        val scopes = if (signedIn) settings.tokenScopes else emptySet()
+        val mustChange = if (signedIn) settings.mustChangePassword else false
+        val next = AuthSessionState(
+            serverOrigin = origin,
+            isSignedIn = signedIn,
+            tokenScopes = scopes,
+            mustChangePassword = mustChange,
+        )
         _sessionState.value = next
+        _accountCapability.value = computeCapability(next)
         return next
     }
 
@@ -112,6 +256,259 @@ class DefaultAuthRepository(
         settingsStore.setServerOrigin(verified.serverOrigin)
         refreshSessionState()
         return verified
+    }
+
+    override suspend fun getAuthProviders(serverOrigin: String?): AuthProvidersInfo =
+        apiClient.getAuthProviders(serverOrigin)
+
+    override suspend fun loginWithPassword(
+        serverOrigin: String,
+        email: String,
+        password: String,
+        invite: String?,
+    ): AppAuthTokenResponse {
+        val cleanEmail = email.trim()
+        if (cleanEmail.isEmpty() || password.isEmpty()) {
+            throw ApiError(
+                errorCode = ApiErrorCode.INVALID_INPUT,
+                rawCode = "INVALID_INPUT",
+                httpStatus = 400,
+                userMessage = "请输入邮箱和密码",
+            )
+        }
+        val response = apiClient.appPasswordLogin(
+            serverOrigin = serverOrigin,
+            email = cleanEmail,
+            password = password,
+            deviceName = deviceNameProvider(),
+            invite = invite,
+        )
+        completeAuthorizationWithMetadata(
+            serverOrigin = serverOrigin,
+            token = response.accessToken,
+            scopes = response.parsedScopes,
+            mustChangePassword = response.mustChangePassword,
+        )
+        return response
+    }
+
+    override suspend fun startAppOAuthLogin(
+        serverOrigin: String,
+        provider: String,
+        invite: String?,
+    ): PendingOAuthLogin {
+        val cleanProvider = provider.trim().lowercase()
+        if (cleanProvider.isEmpty()) {
+            throw ApiError(
+                errorCode = ApiErrorCode.INVALID_INPUT,
+                rawCode = "INVALID_INPUT",
+                httpStatus = 400,
+                userMessage = "登录方式不能为空",
+            )
+        }
+        val state = stateGenerator()
+        require(APP_STATE_REGEX.matches(state)) { "Generated app_state does not match server pattern" }
+        val launchUrl = apiClient.buildAppOAuthLoginUrl(
+            serverOrigin = serverOrigin,
+            provider = cleanProvider,
+            appState = state,
+            deviceName = deviceNameProvider(),
+            invite = invite,
+        )
+        val normalizedOrigin = launchUrl.substringBefore("/api/auth/")
+        settingsStore.setPendingOAuthFlow(
+            PendingOAuthFlowRecord(
+                mode = PendingOAuthFlowMode.LOGIN,
+                provider = cleanProvider,
+                serverOrigin = normalizedOrigin,
+                state = state,
+            ),
+        )
+        return PendingOAuthLogin(
+            provider = cleanProvider,
+            serverOrigin = normalizedOrigin,
+            state = state,
+            launchUrl = launchUrl,
+        )
+    }
+
+    override suspend fun exchangeAppOAuthCode(
+        serverOrigin: String,
+        code: String,
+    ): AppAuthTokenResponse {
+        val cleanCode = code.trim()
+        if (cleanCode.isEmpty()) {
+            throw ApiError(
+                errorCode = ApiErrorCode.OAUTH_CODE_INVALID,
+                rawCode = "OAUTH_CODE_INVALID",
+                httpStatus = 400,
+                userMessage = ApiErrorCode.OAUTH_CODE_INVALID.defaultMessage,
+            )
+        }
+        val response = apiClient.exchangeAppOAuthCode(
+            serverOrigin = serverOrigin,
+            code = cleanCode,
+            deviceName = deviceNameProvider(),
+        )
+        completeAuthorizationWithMetadata(
+            serverOrigin = serverOrigin,
+            token = response.accessToken,
+            scopes = response.parsedScopes,
+            mustChangePassword = response.mustChangePassword,
+        )
+        return response
+    }
+
+    override suspend fun handleOAuthLoginCallback(payload: OAuthCallbackPayload): OAuthLoginResult {
+        val pending = settingsStore.getPendingOAuthFlow()
+        if (pending == null ||
+            pending.mode != PendingOAuthFlowMode.LOGIN ||
+            !constantTimeEquals(pending.state, payload.state)
+        ) {
+            return OAuthLoginResult.Failed(
+                ApiError(
+                    errorCode = ApiErrorCode.OAUTH_STATE_INVALID,
+                    rawCode = "OAUTH_STATE_INVALID",
+                    httpStatus = 400,
+                    userMessage = ApiErrorCode.OAUTH_STATE_INVALID.defaultMessage,
+                ),
+            )
+        }
+        settingsStore.setPendingOAuthFlow(null)
+
+        return when (payload) {
+            is OAuthCallbackPayload.Error -> {
+                OAuthLoginResult.Failed(ApiError.fromOAuthErrorCode(payload.errorCode))
+            }
+            is OAuthCallbackPayload.LoginCode -> {
+                try {
+                    val tokenResponse = exchangeAppOAuthCode(
+                        serverOrigin = pending.serverOrigin,
+                        code = payload.code,
+                    )
+                    OAuthLoginResult.Success(tokenResponse)
+                } catch (e: ApiError) {
+                    OAuthLoginResult.Failed(e)
+                } catch (e: Exception) {
+                    OAuthLoginResult.Failed(ApiError.network(e))
+                }
+            }
+            is OAuthCallbackPayload.Linked -> {
+                OAuthLoginResult.Failed(
+                    ApiError(
+                        errorCode = ApiErrorCode.OAUTH_STATE_INVALID,
+                        rawCode = "OAUTH_STATE_INVALID",
+                        httpStatus = 400,
+                        userMessage = ApiErrorCode.OAUTH_STATE_INVALID.defaultMessage,
+                    ),
+                )
+            }
+        }
+    }
+
+    override suspend fun startAppOAuthLink(provider: String): PendingOAuthLink {
+        val cleanProvider = provider.trim().lowercase()
+        val state = stateGenerator()
+        require(APP_STATE_REGEX.matches(state)) { "Generated app_state does not match server pattern" }
+        val response = try {
+            apiClient.requestAppOAuthLink(provider = cleanProvider, appState = state)
+        } catch (e: ApiError) {
+            if (e.isInsufficientScope) {
+                reportInsufficientScope(AuthRepository.SCOPE_ACCOUNT)
+            }
+            throw e
+        }
+        val origin = settingsStore.getServerOrigin()?.trimEnd('/').orEmpty()
+        val launchUrl = when {
+            response.url.startsWith("https://", ignoreCase = true) ||
+                response.url.startsWith("http://", ignoreCase = true) -> response.url
+            response.path.startsWith("/") && origin.isNotEmpty() -> "$origin${response.path}"
+            else -> response.url.ifBlank { response.path }
+        }
+        val effectiveState = response.state.ifBlank { state }
+        settingsStore.setPendingOAuthFlow(
+            PendingOAuthFlowRecord(
+                mode = PendingOAuthFlowMode.LINK,
+                provider = cleanProvider,
+                serverOrigin = origin.ifBlank { launchUrl.substringBefore("/api/auth/") },
+                state = effectiveState,
+            ),
+        )
+        return PendingOAuthLink(
+            provider = cleanProvider,
+            state = effectiveState,
+            ticket = response.ticket,
+            path = response.path,
+            launchUrl = launchUrl,
+            expiresIn = response.expiresIn,
+        )
+    }
+
+    override suspend fun handleOAuthLinkCallback(payload: OAuthCallbackPayload): OAuthLinkResult {
+        val pending = settingsStore.getPendingOAuthFlow()
+        if (pending == null ||
+            pending.mode != PendingOAuthFlowMode.LINK ||
+            !constantTimeEquals(pending.state, payload.state)
+        ) {
+            val failed = OAuthLinkResult.Failed(
+                ApiError(
+                    errorCode = ApiErrorCode.OAUTH_STATE_INVALID,
+                    rawCode = "OAUTH_STATE_INVALID",
+                    httpStatus = 400,
+                    userMessage = ApiErrorCode.OAUTH_STATE_INVALID.defaultMessage,
+                ),
+            )
+            _oauthLinkEvents.tryEmit(failed)
+            return failed
+        }
+        settingsStore.setPendingOAuthFlow(null)
+
+        val result = when (payload) {
+            is OAuthCallbackPayload.Linked -> OAuthLinkResult.Linked(
+                provider = payload.provider,
+                alreadyLinked = payload.alreadyLinked,
+            )
+            is OAuthCallbackPayload.Error -> OAuthLinkResult.Failed(
+                ApiError.fromOAuthErrorCode(payload.errorCode),
+            )
+            is OAuthCallbackPayload.LoginCode -> OAuthLinkResult.Failed(
+                ApiError(
+                    errorCode = ApiErrorCode.OAUTH_STATE_INVALID,
+                    rawCode = "OAUTH_STATE_INVALID",
+                    httpStatus = 400,
+                    userMessage = ApiErrorCode.OAUTH_STATE_INVALID.defaultMessage,
+                ),
+            )
+        }
+        _oauthLinkEvents.tryEmit(result)
+        return result
+    }
+
+    override suspend fun clearPendingOAuthFlow() {
+        settingsStore.setPendingOAuthFlow(null)
+    }
+
+    override suspend fun markPasswordChanged() {
+        settingsStore.setMustChangePassword(false)
+        refreshSessionState()
+    }
+
+    override suspend fun reportInsufficientScope(requiredScope: String) {
+        val currentScopes = settingsStore.getTokenScopes()
+        val updatedScopes = when (requiredScope) {
+            AuthRepository.SCOPE_ACCOUNT -> currentScopes - AuthRepository.SCOPE_ACCOUNT - AuthRepository.SCOPE_ADMIN
+            AuthRepository.SCOPE_ADMIN -> currentScopes - AuthRepository.SCOPE_ADMIN
+            else -> currentScopes - requiredScope
+        }
+        if (updatedScopes != currentScopes) {
+            settingsStore.setTokenScopes(updatedScopes)
+        }
+        refreshSessionState()
+        if (requiredScope == AuthRepository.SCOPE_ACCOUNT) {
+            _accountCapability.value = AccountCapabilityState.InsufficientScopeForAccountSettings(
+                requiredScope = AuthRepository.SCOPE_ACCOUNT,
+            )
+        }
     }
 
     override suspend fun startDeviceAuthorization(
@@ -183,7 +580,12 @@ class DefaultAuthRepository(
                     emit(slowed)
                 }
                 is DevicePollOutcome.Token -> {
-                    completeAuthorization(serverOrigin, outcome.accessToken)
+                    completeAuthorizationWithMetadata(
+                        serverOrigin = serverOrigin,
+                        token = outcome.accessToken,
+                        scopes = parseScopeString(outcome.scope),
+                        mustChangePassword = false,
+                    )
                     val approved = DeviceAuthState.Approved(serverOrigin = serverOrigin, scope = outcome.scope)
                     _deviceAuthState.value = approved
                     emit(approved)
@@ -210,13 +612,31 @@ class DefaultAuthRepository(
     }
 
     override suspend fun completeAuthorization(serverOrigin: String, token: String) {
+        completeAuthorizationWithMetadata(
+            serverOrigin = serverOrigin,
+            token = token,
+            scopes = emptySet(),
+            mustChangePassword = false,
+        )
+    }
+
+    override suspend fun completeAuthorizationWithMetadata(
+        serverOrigin: String,
+        token: String,
+        scopes: Set<String>,
+        mustChangePassword: Boolean,
+    ) {
         settingsStore.setServerOrigin(serverOrigin)
+        settingsStore.setTokenScopes(scopes)
+        settingsStore.setMustChangePassword(mustChangePassword)
+        settingsStore.setPendingOAuthFlow(null)
         tokenVault.saveToken(token)
         refreshSessionState()
     }
 
     override suspend fun clearLocalSession(clearServer: Boolean) {
         tokenVault.clearToken()
+        settingsStore.clearAuthMetadata()
         if (clearServer) {
             settingsStore.clearServerConfig()
         }
@@ -236,8 +656,31 @@ class DefaultAuthRepository(
         _deviceAuthState.value = DeviceAuthState.Idle
     }
 
+    private fun computeCapability(session: AuthSessionState): AccountCapabilityState = when {
+        !session.isSignedIn -> AccountCapabilityState.SignedOut
+        session.hasAccountScope -> AccountCapabilityState.Ready(hasAdminScope = session.hasAdminScope)
+        else -> AccountCapabilityState.InsufficientScopeForAccountSettings(
+            requiredScope = AuthRepository.SCOPE_ACCOUNT,
+        )
+    }
+
     companion object {
         const val SLOW_DOWN_INCREMENT_SECONDS = 5
+        private val APP_STATE_REGEX = Regex("^[A-Za-z0-9._~-]{8,128}$")
+        private const val STATE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        private val SECURE_RANDOM = SecureRandom()
+
+        fun generateAppState(length: Int = 32): String {
+            require(length in 8..128) { "app_state length must be in 8..128" }
+            val sb = StringBuilder(length)
+            repeat(length) {
+                sb.append(STATE_ALPHABET[SECURE_RANDOM.nextInt(STATE_ALPHABET.length)])
+            }
+            return sb.toString()
+        }
+
+        private fun constantTimeEquals(a: String, b: String): Boolean =
+            MessageDigest.isEqual(a.toByteArray(Charsets.UTF_8), b.toByteArray(Charsets.UTF_8))
 
         /**
          * Pure interpretation of POST /api/auth/device/token response, aligned with mobile/www/core.js.

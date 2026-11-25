@@ -1,11 +1,14 @@
 package dev.dropit.app.protocol
 
 import android.content.Intent
+import dev.dropit.app.core.auth.AccountCapabilityState
 import dev.dropit.app.core.auth.AuthRepository
 import dev.dropit.app.core.auth.DefaultAuthRepository
 import dev.dropit.app.core.auth.DevicePollOutcome
 import dev.dropit.app.core.auth.InMemorySettingsStore
 import dev.dropit.app.core.auth.InMemoryTokenVault
+import dev.dropit.app.core.auth.OAuthCallbackParser
+import dev.dropit.app.core.auth.OAuthLoginResult
 import dev.dropit.app.core.network.ApiError
 import dev.dropit.app.core.network.ApiErrorCode
 import dev.dropit.app.core.network.DropitApiClient
@@ -22,6 +25,7 @@ import dev.dropit.app.core.repository.TransferDirection
 import dev.dropit.app.core.repository.TransferStatus
 import dev.dropit.app.core.repository.UpdateCheckResult
 import dev.dropit.app.core.repository.UpdateInstallState
+import dev.dropit.app.data.account.DefaultAccountSettingsRepository
 import dev.dropit.app.data.itemshare.DefaultItemShareRepository
 import dev.dropit.app.data.media.DefaultMediaRepository
 import dev.dropit.app.data.room.DefaultRoomRepository
@@ -741,6 +745,284 @@ class RealServerProtocolRegressionTest {
 
         spaceRealtime.disconnect(clearState = true)
         mediaRepo.cancelSessionObserver()
+    }
+
+    @Test
+    fun nativeAuthAccountAndAdminSettingsRegressionAgainstRealDropitServer() = runBlocking {
+        val origin = requireNotNull(liveServerUrl)
+        val settingsStore = InMemorySettingsStore()
+        val tokenVault = InMemoryTokenVault()
+        val deviceId = "and-LiveAcctReg202607"
+        val deviceName = "dropit Android · AccountReg"
+        settingsStore.setDeviceId(deviceId)
+
+        val credentialsProvider = object : SessionCredentialsProvider {
+            override suspend fun serverOrigin(): String? = settingsStore.getServerOrigin()
+            override suspend fun accessToken(): String? = tokenVault.getToken()
+            override suspend fun deviceId(): String = settingsStore.getOrCreateDeviceId()
+            override fun deviceName(): String = deviceName
+        }
+
+        val apiClient = DropitApiClient(
+            okHttpClient = okHttpClient,
+            credentialsProvider = credentialsProvider,
+            allowInsecureHttpForTest = true,
+        )
+        val authRepo = DefaultAuthRepository(
+            apiClient = apiClient,
+            settingsStore = settingsStore,
+            tokenVault = tokenVault,
+            deviceNameProvider = { deviceName },
+        )
+        val accountRepo = DefaultAccountSettingsRepository(
+            apiClient = apiClient,
+            authRepository = authRepo,
+        )
+        val spaceRepo = DefaultSpaceRepository(apiClient)
+        val boardRepo = DefaultBoardRepository(apiClient)
+        val itemShareRepo = DefaultItemShareRepository(apiClient)
+        val roomRepo = DefaultRoomRepository(apiClient, InMemoryRoomKeyStore(), settingsStore)
+
+        // ------------------------------------------------------------------
+        // 1. Auth providers & native admin password login (account + admin scopes)
+        // ------------------------------------------------------------------
+        authRepo.verifyAndSaveServer(origin)
+        val providers = authRepo.getAuthProviders(origin)
+        assertTrue(providers.password)
+
+        // Invalid OAuth exchange code fails cleanly with 401 OAUTH_CODE_INVALID
+        val pendingOAuth = authRepo.startAppOAuthLogin(origin, "github")
+        val invalidCb = OAuthCallbackParser.parse(
+            "dropit://auth/callback?code=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&state=${pendingOAuth.state}",
+        )!!
+        val invalidExchange = authRepo.handleOAuthLoginCallback(invalidCb)
+        assertTrue(invalidExchange is OAuthLoginResult.Failed)
+        assertEquals(ApiErrorCode.OAUTH_CODE_INVALID, (invalidExchange as OAuthLoginResult.Failed).error.errorCode)
+
+        val adminLogin = authRepo.loginWithPassword(origin, adminEmail, adminPassword)
+        assertEquals(adminEmail, adminLogin.user.email)
+        assertTrue(adminLogin.user.isAdmin)
+        assertFalse(adminLogin.mustChangePassword)
+        assertTrue(authRepo.hasAccountScope)
+        assertTrue(authRepo.hasAdminScope)
+        assertEquals(AccountCapabilityState.Ready(hasAdminScope = true), accountRepo.accountCapability.value)
+
+        val me = spaceRepo.getMe()
+        val personalSpace = spaceRepo.pickDefaultSpace(spaceRepo.getSpaces(), me.user.id)!!
+        val spaceScope = TargetScope.SpaceScope(personalSpace.id)
+
+        // ------------------------------------------------------------------
+        // 2. Legacy read/write PAT -> GET share-presets succeeds, account settings 403 INSUFFICIENT_SCOPE
+        // ------------------------------------------------------------------
+        val rwPat = accountRepo.createToken(name = "legacy-rw-test", scopes = listOf("read", "write"), expiresInDays = 7)
+        assertTrue(rwPat.token.length == 43)
+
+        val legacySettings = InMemorySettingsStore(dev.dropit.app.core.auth.AppSettings(serverOrigin = origin))
+        val legacyVault = InMemoryTokenVault(initialToken = rwPat.token)
+        val legacyCreds = object : SessionCredentialsProvider {
+            override suspend fun serverOrigin(): String? = legacySettings.getServerOrigin()
+            override suspend fun accessToken(): String? = legacyVault.getToken()
+            override suspend fun deviceId(): String = legacySettings.getOrCreateDeviceId()
+            override fun deviceName(): String = "dropit Android · Legacy"
+        }
+        val legacyApi = DropitApiClient(okHttpClient, credentialsProvider = legacyCreds, allowInsecureHttpForTest = true)
+        val legacyAuth = DefaultAuthRepository(legacyApi, legacySettings, legacyVault, { "dropit Android · Legacy" })
+        val legacyAccountRepo = DefaultAccountSettingsRepository(legacyApi, legacyAuth)
+        legacyAuth.refreshSessionState()
+        assertFalse(legacyAuth.hasAccountScope)
+        assertTrue(legacyAccountRepo.accountCapability.value is AccountCapabilityState.InsufficientScopeForAccountSettings)
+
+        // GET /api/me/share-presets is allowed on read Bearer
+        assertNotNull(legacyAccountRepo.getSharePresets())
+
+        // Account-scoped route rejects read/write token with 403 INSUFFICIENT_SCOPE
+        try {
+            legacyAccountRepo.listManagedShares()
+            fail("Expected 403 INSUFFICIENT_SCOPE for read/write token")
+        } catch (e: ApiError) {
+            assertEquals(403, e.httpStatus)
+            assertEquals(ApiErrorCode.INSUFFICIENT_SCOPE, e.errorCode)
+            assertTrue(e.isInsufficientScope)
+        }
+        assertTrue(legacyAccountRepo.accountCapability.value is AccountCapabilityState.InsufficientScopeForAccountSettings)
+
+        // Clean up the test PAT (rename -> revoke -> purge)
+        accountRepo.updateToken(rwPat.id, "legacy-rw-renamed")
+        assertTrue(accountRepo.listTokens().any { it.id == rwPat.id && it.name == "legacy-rw-renamed" })
+        accountRepo.revokeToken(rwPat.id, purge = false)
+        accountRepo.revokeToken(rwPat.id, purge = true)
+
+        // ------------------------------------------------------------------
+        // 3. Share presets sync + Managed shares center
+        // ------------------------------------------------------------------
+        val savedPresets = accountRepo.saveSharePresets(days = listOf(2, 7), views = listOf(5))
+        assertEquals(listOf(2, 7), savedPresets.days)
+        assertEquals(listOf(5), savedPresets.views)
+        assertEquals(savedPresets, accountRepo.getSharePresets())
+
+        val shareItem = boardRepo.createText(spaceScope, "分享管理中心真实回归条目")
+        val createdShare = itemShareRepo.createShare(spaceScope, shareItem.id, expiresIn = "2d", maxViews = 5)
+        val managedPage = accountRepo.listManagedShares()
+        assertTrue(managedPage.shares.any { it.id == createdShare.id && it.state == "active" })
+        val shareLink = accountRepo.getManagedShareLink(createdShare.id)
+        assertEquals("$origin/s/${createdShare.token}", shareLink.url)
+        accountRepo.revokeManagedShare(createdShare.id)
+        accountRepo.deleteManagedShare(createdShare.id)
+        boardRepo.retractItem(spaceScope, shareItem.id)
+
+        // ------------------------------------------------------------------
+        // 4. Browser sessions & Device code confirmation (lookup / approve / deny)
+        // ------------------------------------------------------------------
+        signInBrowserAdmin(origin, adminEmail, adminPassword)
+        val sessions = accountRepo.listSessions()
+        assertTrue("Expected at least 1 browser session", sessions.isNotEmpty())
+        val revokedCount = accountRepo.revokeOtherSessions()
+        assertTrue(revokedCount >= 1)
+
+        val devApprove = authRepo.startDeviceAuthorization(origin, AuthRepository.DEFAULT_SCOPES)
+        val lookup = accountRepo.lookupDeviceCode(devApprove.userCode, devApprove.verificationId)
+        assertEquals(deviceName, lookup.name)
+        accountRepo.approveDeviceCode(devApprove.userCode, devApprove.verificationId)
+
+        val devDeny = authRepo.startDeviceAuthorization(origin, AuthRepository.DEFAULT_SCOPES)
+        accountRepo.denyDeviceCode(devDeny.userCode, devDeny.verificationId)
+
+        // ------------------------------------------------------------------
+        // 5. Admin users + mustChangePassword + changePassword + Space members/invites
+        // ------------------------------------------------------------------
+        val memberEmail = "member-${UUID.randomUUID().toString().take(8)}@dropit.test"
+        val createdMember = accountRepo.createUser(
+            email = memberEmail,
+            name = "Reg Member",
+            role = "user",
+            temporaryPassword = true,
+        )
+        assertNotNull(createdMember.temporaryPassword)
+        assertTrue(accountRepo.listUsers().any { it.id == createdMember.id })
+
+        accountRepo.updateUser(
+            userId = createdMember.id,
+            name = OptionalField.Present("Reg Member Updated"),
+            inviteLimit = OptionalField.Present(3),
+        )
+        assertEquals("Reg Member Updated", accountRepo.listUsers().first { it.id == createdMember.id }.name)
+
+        // Member signs in with temporary password -> mustChangePassword = true -> changePassword unlocks /api/spaces
+        val memberSettings = InMemorySettingsStore()
+        val memberVault = InMemoryTokenVault()
+        val memberCreds = object : SessionCredentialsProvider {
+            override suspend fun serverOrigin(): String? = memberSettings.getServerOrigin()
+            override suspend fun accessToken(): String? = memberVault.getToken()
+            override suspend fun deviceId(): String = memberSettings.getOrCreateDeviceId()
+            override fun deviceName(): String = "dropit Android · Member"
+        }
+        val memberApi = DropitApiClient(okHttpClient, credentialsProvider = memberCreds, allowInsecureHttpForTest = true)
+        val memberAuth = DefaultAuthRepository(memberApi, memberSettings, memberVault, { "dropit Android · Member" })
+        val memberAccountRepo = DefaultAccountSettingsRepository(memberApi, memberAuth)
+        val memberSpaceRepo = DefaultSpaceRepository(memberApi)
+
+        val tempRes = memberAuth.loginWithPassword(origin, memberEmail, createdMember.temporaryPassword!!)
+        assertTrue(tempRes.mustChangePassword)
+        assertTrue(memberAuth.sessionState.value.mustChangePassword)
+        try {
+            memberSpaceRepo.getSpaces()
+            fail("Expected 403 PASSWORD_CHANGE_REQUIRED before changing temp password")
+        } catch (e: ApiError) {
+            assertEquals(403, e.httpStatus)
+            assertEquals(ApiErrorCode.PASSWORD_CHANGE_REQUIRED, e.errorCode)
+        }
+        val pwdChanged = memberAccountRepo.changePassword(createdMember.temporaryPassword!!, "MemberNewPass2026!")
+        assertTrue(pwdChanged.hasPassword)
+        assertFalse(pwdChanged.mustChangePassword)
+        assertFalse(memberAuth.sessionState.value.mustChangePassword)
+        assertTrue(memberSpaceRepo.getSpaces().isNotEmpty())
+        assertTrue(memberAccountRepo.listIdentities().identities.isEmpty())
+
+        // Space invite -> member accepts -> admin manages role & removes member -> re-accept & leaveSpace
+        val spaceInvite = accountRepo.createSpaceInvite(personalSpace.id, role = "viewer", maxUses = 3, expiresInHours = 24)
+        assertTrue(accountRepo.listSpaceInvites(personalSpace.id).invites.any { it.id == spaceInvite.id })
+        val acceptReq = memberApi.buildApiRequest("/api/invites/${spaceInvite.token}/accept", method = "POST")
+        memberApi.executeNoContent(acceptReq, authenticated = true)
+
+        val membersAfterJoin = accountRepo.listSpaceMembers(personalSpace.id)
+        assertTrue(membersAfterJoin.any { it.userId == createdMember.id && it.role == "viewer" })
+        val membersAfterPromote = accountRepo.updateSpaceMemberRole(personalSpace.id, createdMember.id, "editor")
+        assertTrue(membersAfterPromote.any { it.userId == createdMember.id && it.role == "editor" })
+        accountRepo.removeSpaceMember(personalSpace.id, createdMember.id)
+        assertTrue(accountRepo.listSpaceMembers(personalSpace.id).none { it.userId == createdMember.id })
+
+        val reAcceptReq = memberApi.buildApiRequest("/api/invites/${spaceInvite.token}/accept", method = "POST")
+        memberApi.executeNoContent(reAcceptReq, authenticated = true)
+        memberAccountRepo.leaveSpace(personalSpace.id)
+        assertTrue(accountRepo.listSpaceMembers(personalSpace.id).none { it.userId == createdMember.id })
+        accountRepo.revokeSpaceInvite(personalSpace.id, spaceInvite.id)
+
+        // Personal registration invites (admin)
+        val personalInvite = accountRepo.createPersonalInvite(expiresInHours = 24)
+        assertTrue(accountRepo.listPersonalInvites().invites.any { it.id == personalInvite.id })
+        accountRepo.revokePersonalInvite(personalInvite.id)
+
+        // Reset user password & force logout
+        val resetRes = accountRepo.resetUserPassword(createdMember.id)
+        assertTrue(resetRes.temporaryPassword.isNotBlank())
+        accountRepo.logoutUser(createdMember.id)
+
+        // ------------------------------------------------------------------
+        // 6. Admin invites, registration policy, limits + audit, rooms, site & OAuth settings
+        // ------------------------------------------------------------------
+        val regPolicyBefore = accountRepo.getRegistrationPolicy()
+        val regUpdated = accountRepo.updateRegistrationPolicy("open")
+        assertEquals("open", regUpdated.policy)
+        accountRepo.updateRegistrationPolicy(regPolicyBefore.policy)
+
+        val adminInvite = accountRepo.createAdminInvite(kind = "registration", maxUses = 3, expiresInHours = 48)
+        assertTrue(accountRepo.listAdminInvites().any { it.id == adminInvite.id })
+        accountRepo.revokeAdminInvite(adminInvite.id)
+
+        val limitsBefore = accountRepo.getLimits()
+        assertTrue(limitsBefore.containsKey("maxItems"))
+        val limitsPatched = accountRepo.updateLimits(mapOf("maxItems" to 777L))
+        assertEquals(777L, limitsPatched["maxItems"]?.value)
+        assertTrue(limitsPatched["maxItems"]?.overridden == true)
+        val auditPage = accountRepo.getLimitsAudit(limit = 10)
+        assertTrue(auditPage.entries.any { it.key == "maxItems" && it.newValue == 777L })
+        val limitsRestored = accountRepo.updateLimits(mapOf("maxItems" to null))
+        assertFalse(limitsRestored["maxItems"]?.overridden == true)
+
+        val adminTestRoom = roomRepo.createOrReuseRoom(code = "Adm${UUID.randomUUID().toString().replace("-", "").take(5)}", pin = "1357")
+        val roomId = adminTestRoom.token.substringBefore('.')
+        assertTrue(accountRepo.listAdminRooms().any { it.id == roomId })
+        accountRepo.closeRoom(roomId)
+        accountRepo.reopenRoom(roomId)
+        accountRepo.unlockRoom(roomId)
+        accountRepo.deleteRoom(roomId)
+        assertTrue(accountRepo.listAdminRooms().none { it.id == roomId })
+
+        val siteBefore = accountRepo.getSiteSettings()
+        assertEquals(origin, siteBefore.effectiveOrigin)
+        try {
+            accountRepo.updateSiteSettings("https://custom.dropit.test", confirm = false)
+            fail("Expected 409 ORIGIN_CONFIRM_REQUIRED")
+        } catch (e: ApiError) {
+            assertEquals(409, e.httpStatus)
+            assertTrue(e.isOriginConfirmRequired)
+        }
+        val siteSaved = accountRepo.updateSiteSettings("https://custom.dropit.test", confirm = true)
+        assertEquals("https://custom.dropit.test", siteSaved.origin)
+        val siteReset = accountRepo.updateSiteSettings(origin = null, confirm = true)
+        assertNull(siteReset.adminOrigin)
+        assertTrue(siteReset.source == "env" || siteReset.source == "request")
+
+        val oauthBefore = accountRepo.getOAuthSettings()
+        assertTrue(oauthBefore.providers.any { it.provider == "github" })
+        val oauthUpdated = accountRepo.updateOAuthProvider("github", clientId = "test_client_id", clientSecret = "test_secret_123456", enabled = false)
+        assertEquals("test_client_id", oauthUpdated.providers.first { it.provider == "github" }.clientId)
+        val oauthDeleted = accountRepo.deleteOAuthProvider("github")
+        assertEquals("none", oauthDeleted.providers.first { it.provider == "github" }.source)
+
+        // Clean up member and admin tokens
+        memberAuth.logout(clearServer = true)
+        authRepo.logout(clearServer = true)
     }
 
     private fun signInBrowserAdmin(origin: String, email: String, password: String): String {
