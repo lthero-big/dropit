@@ -9,6 +9,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
@@ -43,12 +44,21 @@ import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.Login
+import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -57,14 +67,17 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -73,6 +86,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -97,6 +112,7 @@ fun OnboardingScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = DropitTheme.colors
     val reducedMotion = DropitTheme.reducedMotion
+    val context = LocalContext.current
     val versionLabel = remember {
         ServerUrl.versionLabel(
             version = BuildConfig.VERSION_NAME,
@@ -105,7 +121,13 @@ fun OnboardingScreen(
         )
     }
 
-    // Back from DeviceAuth returns to ServerConfig instead of exiting abruptly.
+    LaunchedEffect(state.pendingOAuthLaunchUrl) {
+        val url = state.pendingOAuthLaunchUrl ?: return@LaunchedEffect
+        viewModel.consumePendingOAuthLaunchUrl()
+        openCustomTabUrl(context, url)
+    }
+
+    // Back from sign-in screen returns to ServerConfig instead of exiting abruptly.
     BackHandler(enabled = state.step == OnboardingStep.DEVICE_AUTH) {
         viewModel.switchServer()
     }
@@ -135,11 +157,18 @@ fun OnboardingScreen(
                     onSubmit = viewModel::submitServerUrl,
                 )
 
-                OnboardingStep.DEVICE_AUTH -> DeviceAuthContent(
+                OnboardingStep.DEVICE_AUTH -> NativeSignInContent(
                     state = state,
                     versionLabel = versionLabel,
                     onSwitchServer = viewModel::switchServer,
-                    onRetry = { viewModel.startDeviceAuth() },
+                    onReloadProviders = { viewModel.loadProviders(force = true) },
+                    onStartOAuth = viewModel::startOAuthLogin,
+                    onCancelOAuth = viewModel::cancelOAuthLogin,
+                    onEmailChanged = viewModel::onEmailChanged,
+                    onPasswordChanged = viewModel::onPasswordChanged,
+                    onSubmitPasswordLogin = viewModel::submitPasswordLogin,
+                    onToggleDeviceCode = viewModel::toggleDeviceCodeSection,
+                    onRetryDeviceAuth = { viewModel.startDeviceAuth() },
                     onBrowserOpened = viewModel::onBrowserApprovalLaunched,
                 )
             }
@@ -167,7 +196,6 @@ private fun ServerConfigContent(
         Column(modifier = Modifier.fillMaxWidth()) {
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Brand masthead
             DropitBrandLockup(
                 markSize = 40.dp,
                 subtitle = "跨设备纸感云剪贴板",
@@ -228,16 +256,7 @@ private fun ServerConfigContent(
                         isError = state.serverError != null && !state.isServerOffline,
                         shape = shapes.md,
                         textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.fg),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedContainerColor = colors.surface0,
-                            unfocusedContainerColor = colors.surface0,
-                            focusedBorderColor = colors.line3,
-                            unfocusedBorderColor = colors.line2,
-                            errorBorderColor = colors.destructive,
-                            focusedLabelColor = colors.fg2,
-                            unfocusedLabelColor = colors.fg3,
-                            cursorColor = colors.brand,
-                        ),
+                        colors = paperFieldColors(),
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Uri,
                             capitalization = KeyboardCapitalization.None,
@@ -320,19 +339,24 @@ private fun ServerConfigContent(
 }
 
 @Composable
-private fun DeviceAuthContent(
+private fun NativeSignInContent(
     state: OnboardingUiState,
     versionLabel: String,
     onSwitchServer: () -> Unit,
-    onRetry: () -> Unit,
+    onReloadProviders: () -> Unit,
+    onStartOAuth: (String) -> Unit,
+    onCancelOAuth: () -> Unit,
+    onEmailChanged: (String) -> Unit,
+    onPasswordChanged: (String) -> Unit,
+    onSubmitPasswordLogin: () -> Unit,
+    onToggleDeviceCode: () -> Unit,
+    onRetryDeviceAuth: () -> Unit,
     onBrowserOpened: () -> Unit,
 ) {
     val colors = DropitTheme.colors
     val shapes = DropitTheme.shapes
-    val context = LocalContext.current
-    val fontScale = LocalDensity.current.fontScale
-    val currentUserCode = (state.deviceAuthState as? DeviceAuthState.WaitingForApproval)?.authorization?.userCode
-    var copiedCode by remember(currentUserCode) { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    var passwordVisible by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -341,7 +365,10 @@ private fun DeviceAuthContent(
             .padding(horizontal = 20.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.SpaceBetween,
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
             // Top bar with switch server entry
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -389,13 +416,10 @@ private fun DeviceAuthContent(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
-
             if (state.sessionExpiredNotice) {
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 14.dp)
                         .semantics { liveRegion = LiveRegionMode.Polite },
                     shape = shapes.md,
                     color = colors.warnSoft,
@@ -415,13 +439,13 @@ private fun DeviceAuthContent(
                         )
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(
-                                text = "登录已失效，请重新授权",
+                                text = "登录已失效，请重新登录",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.SemiBold,
                                 color = colors.fg,
                             )
                             Text(
-                                text = "当前设备的登录令牌已失效或被撤销，已保留当前服务器地址，请在浏览器中重新确认授权。",
+                                text = "当前设备的登录令牌已失效或被撤销，已保留当前服务器地址，请使用密码或第三方账号重新登录。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = colors.fg2,
                             )
@@ -430,7 +454,7 @@ private fun DeviceAuthContent(
                 }
             }
 
-            // Main paper card
+            // Main Native Login Paper Card
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = shapes.lg,
@@ -443,122 +467,271 @@ private fun DeviceAuthContent(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         DropitBrandMark(size = 28.dp)
-                        Text(
-                            text = "设备码授权登录",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = colors.fg,
-                        )
-                    }
-
-                    state.verifiedServer?.let { verified ->
-                        Text(
-                            text = "已校验服务端 ${verified.versionInfo.version}（${verified.versionInfo.install}）",
-                            style = DropitMonoTypography.meta,
-                            color = colors.ok,
-                        )
-                    }
-
-                    when (val auth = state.deviceAuthState) {
-                        DeviceAuthState.Idle,
-                        DeviceAuthState.RequestingCode,
-                        -> {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 24.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(12.dp),
-                            ) {
-                                CircularProgressIndicator(
-                                    color = colors.brand,
-                                    strokeWidth = 2.5.dp,
-                                    modifier = Modifier.size(28.dp),
-                                )
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = "登录 dropit",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = colors.fg,
+                            )
+                            state.verifiedServer?.let { verified ->
                                 Text(
-                                    text = "正在向服务器申请设备授权码…",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = colors.fg2,
+                                    text = "服务端 ${verified.versionInfo.version}（${verified.versionInfo.install}）",
+                                    style = DropitMonoTypography.meta,
+                                    color = colors.ok,
                                 )
                             }
                         }
+                    }
 
-                        is DeviceAuthState.WaitingForApproval -> {
+                    if (state.isLoadingProviders && state.providersInfo == null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = colors.brand,
+                            )
                             Text(
-                                text = "点击下方按钮在浏览器中核对并批准设备码，批准后本页会自动完成登录。",
+                                text = "正在读取服务器支持的登录方式…",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = colors.fg3,
                             )
+                        }
+                    } else if (state.providersError != null) {
+                        StatusNoticeBanner(
+                            message = "无法读取第三方登录配置：${state.providersError}",
+                            isOffline = true,
+                            onRetry = onReloadProviders,
+                        )
+                    }
 
-                            // Prominent monospace user_code container
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        copyTextToClipboard(context, "dropit 设备码", auth.authorization.userCode)
-                                        copiedCode = true
-                                        Toast.makeText(context, "已复制设备码", Toast.LENGTH_SHORT).show()
-                                    }
-                                    .semantics {
-                                        contentDescription = "设备授权码 ${auth.authorization.userCode}，点击复制"
-                                    },
-                                shape = shapes.md,
-                                color = colors.codeBg,
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (copiedCode) colors.ok.copy(alpha = 0.55f) else colors.line2,
-                                ),
-                                tonalElevation = 0.dp,
-                            ) {
-                                Column(
+                    if (state.providersInfo?.setupRequired == true) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = shapes.md,
+                            color = colors.warnSoft,
+                            border = BorderStroke(1.dp, colors.warn.copy(alpha = 0.35f)),
+                            tonalElevation = 0.dp,
+                        ) {
+                            Text(
+                                text = "该服务器尚未完成首次管理员初始化，请先在浏览器打开服务器地址完成 /setup 设置。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.fg,
+                                modifier = Modifier.padding(12.dp),
+                            )
+                        }
+                    }
+
+                    // 1. Dynamic OAuth Providers (GitHub / Google)
+                    if (state.enabledOAuthProviders.isNotEmpty()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            state.enabledOAuthProviders.forEach { provider ->
+                                val label = when (provider) {
+                                    "github" -> "使用 GitHub 登录"
+                                    "google" -> "使用 Google 登录"
+                                    else -> "使用 ${provider.replaceFirstChar { it.uppercase() }} 登录"
+                                }
+                                val isActiveThis = state.activeOAuthProvider == provider
+                                OutlinedButton(
+                                    onClick = { onStartOAuth(provider) },
+                                    enabled = !state.isBusySigningIn,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 18.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        .defaultMinSize(minHeight = 48.dp),
+                                    shape = shapes.md,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isActiveThis) colors.brand else colors.line2,
+                                    ),
+                                    colors = ButtonDefaults.outlinedButtonColors(
+                                        containerColor = if (isActiveThis) colors.brandSoft else colors.surface0,
+                                        contentColor = colors.fg,
+                                    ),
                                 ) {
-                                    Text(
-                                        text = auth.authorization.userCode,
-                                        style = if (fontScale >= 1.3f) {
-                                            DropitMonoTypography.deviceCodeCompact
-                                        } else {
-                                            DropitMonoTypography.deviceCode
-                                        },
-                                        color = colors.fg,
-                                        textAlign = TextAlign.Center,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.ContentCopy,
-                                            contentDescription = null,
-                                            tint = if (copiedCode) colors.ok else colors.fg3,
-                                            modifier = Modifier.size(14.dp),
+                                    if (isActiveThis && state.isExchangingOAuthCode) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp,
+                                            color = colors.brand,
                                         )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("正在完成登录…", fontWeight = FontWeight.Medium)
+                                    } else {
+                                        Icon(
+                                            imageVector = if (provider == "github") Icons.Rounded.Login else Icons.Rounded.Language,
+                                            contentDescription = null,
+                                            tint = if (provider == "github") colors.fg else colors.brand,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
                                         Text(
-                                            text = if (copiedCode) "已复制授权码" else "点击复制授权码",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = if (copiedCode) colors.ok else colors.fg3,
+                                            text = label,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Medium,
                                         )
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // Active OAuth waiting notice
+                    if (state.activeOAuthProvider != null && !state.isExchangingOAuthCode) {
+                        val providerName = when (state.activeOAuthProvider) {
+                            "github" -> "GitHub"
+                            "google" -> "Google"
+                            else -> state.activeOAuthProvider
+                        }
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = shapes.md,
+                            color = colors.surface0,
+                            border = BorderStroke(1.dp, colors.line2),
+                            tonalElevation = 0.dp,
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = colors.brand,
+                                )
+                                Text(
+                                    text = "正在等待 $providerName 浏览器授权回跳…",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = colors.fg2,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                TextButton(
+                                    onClick = onCancelOAuth,
+                                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                                    colors = ButtonDefaults.textButtonColors(contentColor = colors.fg3),
+                                ) {
+                                    Text("取消")
+                                }
+                            }
+                        }
+                    }
+
+                    // Divider between OAuth and Password
+                    if (state.enabledOAuthProviders.isNotEmpty() && state.isPasswordEnabled) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            HorizontalDivider(modifier = Modifier.weight(1f), thickness = 1.dp, color = colors.line1)
+                            Text(
+                                text = "或使用邮箱密码登录",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.fg3,
+                            )
+                            HorizontalDivider(modifier = Modifier.weight(1f), thickness = 1.dp, color = colors.line1)
+                        }
+                    }
+
+                    // 2. Email + Password Form
+                    if (state.isPasswordEnabled) {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            OutlinedTextField(
+                                value = state.emailInput,
+                                onValueChange = onEmailChanged,
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !state.isBusySigningIn,
+                                singleLine = true,
+                                label = { Text("邮箱") },
+                                placeholder = { Text("you@example.com", color = colors.fg4) },
+                                shape = shapes.md,
+                                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.fg),
+                                colors = paperFieldColors(),
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Email,
+                                    capitalization = KeyboardCapitalization.None,
+                                    autoCorrectEnabled = false,
+                                    imeAction = ImeAction.Next,
+                                ),
+                                keyboardActions = KeyboardActions(
+                                    onNext = { focusManager.moveFocus(FocusDirection.Down) },
+                                ),
+                            )
+
+                            OutlinedTextField(
+                                value = state.passwordInput,
+                                onValueChange = onPasswordChanged,
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !state.isBusySigningIn,
+                                singleLine = true,
+                                label = { Text("密码") },
+                                placeholder = { Text("输入账户密码", color = colors.fg4) },
+                                visualTransformation = if (passwordVisible) {
+                                    VisualTransformation.None
+                                } else {
+                                    PasswordVisualTransformation()
+                                },
+                                trailingIcon = {
+                                    IconButton(
+                                        onClick = { passwordVisible = !passwordVisible },
+                                        modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp),
+                                    ) {
+                                        Icon(
+                                            imageVector = if (passwordVisible) {
+                                                Icons.Rounded.VisibilityOff
+                                            } else {
+                                                Icons.Rounded.Visibility
+                                            },
+                                            contentDescription = if (passwordVisible) "隐藏密码" else "显示密码",
+                                            tint = colors.fg3,
+                                        )
+                                    }
+                                },
+                                shape = shapes.md,
+                                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.fg),
+                                colors = paperFieldColors(),
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Password,
+                                    capitalization = KeyboardCapitalization.None,
+                                    autoCorrectEnabled = false,
+                                    imeAction = ImeAction.Done,
+                                ),
+                                keyboardActions = KeyboardActions(
+                                    onDone = {
+                                        focusManager.clearFocus()
+                                        onSubmitPasswordLogin()
+                                    },
+                                ),
+                            )
+
+                            if (state.authError != null) {
+                                StatusNoticeBanner(
+                                    message = state.authError,
+                                    isOffline = state.isAuthOffline,
+                                    onRetry = null,
+                                )
                             }
 
                             Button(
                                 onClick = {
-                                    openVerificationUrl(context, auth.authorization.verificationUriComplete)
-                                    onBrowserOpened()
+                                    focusManager.clearFocus()
+                                    onSubmitPasswordLogin()
                                 },
+                                enabled = !state.isBusySigningIn,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .defaultMinSize(minHeight = 48.dp),
@@ -566,175 +739,99 @@ private fun DeviceAuthContent(
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = colors.brand,
                                     contentColor = colors.brandFg,
+                                    disabledContainerColor = colors.brand.copy(alpha = 0.45f),
+                                    disabledContentColor = colors.brandFg,
                                 ),
                             ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = if (state.browserOpened) "再次打开浏览器批准" else "在浏览器中批准",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium,
-                                )
-                            }
-
-                            // Polling status indicator
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = shapes.sm,
-                                color = colors.surface0,
-                                border = BorderStroke(1.dp, colors.line1),
-                                tonalElevation = 0.dp,
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                ) {
+                                if (state.isPasswordLoginInProgress) {
                                     CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        strokeWidth = 2.dp,
-                                        color = colors.brand,
-                                    )
-                                    Text(
-                                        text = if (state.isSlowedDown) {
-                                            "等待批准中 · 已放缓轮询（每 ${auth.pollIntervalSeconds} 秒）"
-                                        } else {
-                                            "等待浏览器批准中 · 每 ${auth.pollIntervalSeconds} 秒自动检查"
-                                        },
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = colors.fg2,
-                                    )
-                                }
-                            }
-                        }
-
-                        is DeviceAuthState.Approved -> {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 16.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.CheckCircle,
-                                    contentDescription = null,
-                                    tint = colors.ok,
-                                    modifier = Modifier.size(22.dp),
-                                )
-                                Text(
-                                    text = "授权成功，正在进入云剪贴板…",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = colors.ok,
-                                    fontWeight = FontWeight.Medium,
-                                )
-                            }
-                        }
-
-                        DeviceAuthState.Expired -> {
-                            StatusNoticeBanner(
-                                message = "授权码已过期，请重新获取新的设备码。",
-                                isOffline = false,
-                                onRetry = null,
-                            )
-                            Button(
-                                onClick = onRetry,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .defaultMinSize(minHeight = 48.dp),
-                                shape = shapes.md,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = colors.brand,
-                                    contentColor = colors.brandFg,
-                                ),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Refresh,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("重新获取授权码")
-                            }
-                        }
-
-                        DeviceAuthState.Denied -> {
-                            StatusNoticeBanner(
-                                message = "本次授权请求已被拒绝。如为误操作，可重新发起设备授权。",
-                                isOffline = false,
-                                onRetry = null,
-                            )
-                            Button(
-                                onClick = onRetry,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .defaultMinSize(minHeight = 48.dp),
-                                shape = shapes.md,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = colors.brand,
-                                    contentColor = colors.brandFg,
-                                ),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Refresh,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp),
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("重新发起授权")
-                            }
-                        }
-
-                        is DeviceAuthState.Failed -> {
-                            val offline = auth.error.errorCode == ApiErrorCode.NETWORK_ERROR
-                            StatusNoticeBanner(
-                                message = if (offline) {
-                                    "当前处于离线状态或网络中断，无法获取授权状态。"
-                                } else {
-                                    auth.error.userMessage
-                                },
-                                isOffline = offline,
-                                onRetry = null,
-                            )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                Button(
-                                    onClick = onRetry,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .defaultMinSize(minHeight = 48.dp),
-                                    shape = shapes.md,
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = colors.brand,
-                                        contentColor = colors.brandFg,
-                                    ),
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Rounded.Refresh,
-                                        contentDescription = null,
                                         modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = colors.brandFg,
                                     )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("重试")
-                                }
-                                OutlinedButton(
-                                    onClick = onSwitchServer,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .defaultMinSize(minHeight = 48.dp),
-                                    shape = shapes.md,
-                                    border = BorderStroke(1.dp, colors.line2),
-                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.fg2),
-                                ) {
-                                    Text("更换服务器")
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("正在登录…", fontWeight = FontWeight.Medium)
+                                } else {
+                                    Text("登录", fontWeight = FontWeight.Medium)
                                 }
                             }
+                        }
+                    } else if (state.authError != null) {
+                        StatusNoticeBanner(
+                            message = state.authError,
+                            isOffline = state.isAuthOffline,
+                            onRetry = null,
+                        )
+                    }
+                }
+            }
+
+            // 3. Secondary collapsible Device Code login card
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = shapes.lg,
+                color = colors.surface1,
+                border = BorderStroke(1.dp, colors.line1),
+                tonalElevation = 0.dp,
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 52.dp)
+                            .clickable(onClick = onToggleDeviceCode)
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.QrCode2,
+                            contentDescription = null,
+                            tint = colors.fg2,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                text = "使用设备码登录",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = colors.fg,
+                            )
+                            Text(
+                                text = "适合在另一台已登录设备或浏览器代为批准（仅剪贴板同步权限）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.fg3,
+                            )
+                        }
+                        Icon(
+                            imageVector = if (state.isDeviceCodeExpanded) {
+                                Icons.Rounded.ExpandLess
+                            } else {
+                                Icons.Rounded.ExpandMore
+                            },
+                            contentDescription = if (state.isDeviceCodeExpanded) "收起设备码登录" else "展开设备码登录",
+                            tint = colors.fg3,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+
+                    AnimatedVisibility(visible = state.isDeviceCodeExpanded) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            HorizontalDivider(thickness = 1.dp, color = colors.line1)
+                            DeviceCodeFallbackContent(
+                                state = state,
+                                onRetry = onRetryDeviceAuth,
+                                onSwitchServer = onSwitchServer,
+                                onBrowserOpened = onBrowserOpened,
+                            )
                         }
                     }
                 }
@@ -756,6 +853,293 @@ private fun DeviceAuthContent(
         }
     }
 }
+
+@Composable
+private fun DeviceCodeFallbackContent(
+    state: OnboardingUiState,
+    onRetry: () -> Unit,
+    onSwitchServer: () -> Unit,
+    onBrowserOpened: () -> Unit,
+) {
+    val colors = DropitTheme.colors
+    val shapes = DropitTheme.shapes
+    val context = LocalContext.current
+    val fontScale = LocalDensity.current.fontScale
+    val currentUserCode = (state.deviceAuthState as? DeviceAuthState.WaitingForApproval)?.authorization?.userCode
+    var copiedCode by remember(currentUserCode) { mutableStateOf(false) }
+
+    when (val auth = state.deviceAuthState) {
+        DeviceAuthState.Idle,
+        DeviceAuthState.RequestingCode,
+        -> {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                CircularProgressIndicator(
+                    color = colors.brand,
+                    strokeWidth = 2.5.dp,
+                    modifier = Modifier.size(24.dp),
+                )
+                Text(
+                    text = "正在向服务器申请设备授权码…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.fg2,
+                )
+            }
+        }
+
+        is DeviceAuthState.WaitingForApproval -> {
+            Text(
+                text = "点击下方按钮在浏览器中核对并批准设备码，批准后会自动完成登录。",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.fg3,
+            )
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        copyTextToClipboard(context, "dropit 设备码", auth.authorization.userCode)
+                        copiedCode = true
+                        Toast.makeText(context, "已复制设备码", Toast.LENGTH_SHORT).show()
+                    }
+                    .semantics {
+                        contentDescription = "设备授权码 ${auth.authorization.userCode}，点击复制"
+                    },
+                shape = shapes.md,
+                color = colors.codeBg,
+                border = BorderStroke(
+                    1.dp,
+                    if (copiedCode) colors.ok.copy(alpha = 0.55f) else colors.line2,
+                ),
+                tonalElevation = 0.dp,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = auth.authorization.userCode,
+                        style = if (fontScale >= 1.3f) {
+                            DropitMonoTypography.deviceCodeCompact
+                        } else {
+                            DropitMonoTypography.deviceCode
+                        },
+                        color = colors.fg,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ContentCopy,
+                            contentDescription = null,
+                            tint = if (copiedCode) colors.ok else colors.fg3,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Text(
+                            text = if (copiedCode) "已复制授权码" else "点击复制授权码",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (copiedCode) colors.ok else colors.fg3,
+                        )
+                    }
+                }
+            }
+
+            OutlinedButton(
+                onClick = {
+                    openCustomTabUrl(context, auth.authorization.verificationUriComplete)
+                    onBrowserOpened()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = 48.dp),
+                shape = shapes.md,
+                border = BorderStroke(1.dp, colors.line2),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.fg),
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (state.browserOpened) "再次打开浏览器批准" else "在浏览器中批准",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = shapes.sm,
+                color = colors.surface0,
+                border = BorderStroke(1.dp, colors.line1),
+                tonalElevation = 0.dp,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = colors.brand,
+                    )
+                    Text(
+                        text = if (state.isSlowedDown) {
+                            "等待批准中 · 已放缓轮询（每 ${auth.pollIntervalSeconds} 秒）"
+                        } else {
+                            "等待批准中 · 每 ${auth.pollIntervalSeconds} 秒自动检查"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.fg2,
+                    )
+                }
+            }
+        }
+
+        is DeviceAuthState.Approved -> {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.CheckCircle,
+                    contentDescription = null,
+                    tint = colors.ok,
+                    modifier = Modifier.size(22.dp),
+                )
+                Text(
+                    text = "授权成功，正在进入云剪贴板…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.ok,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+
+        DeviceAuthState.Expired -> {
+            StatusNoticeBanner(
+                message = "授权码已过期，请重新获取新的设备码。",
+                isOffline = false,
+                onRetry = null,
+            )
+            OutlinedButton(
+                onClick = onRetry,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = 48.dp),
+                shape = shapes.md,
+                border = BorderStroke(1.dp, colors.line2),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("重新获取授权码")
+            }
+        }
+
+        DeviceAuthState.Denied -> {
+            StatusNoticeBanner(
+                message = "本次授权请求已被拒绝。如为误操作，可重新发起设备授权。",
+                isOffline = false,
+                onRetry = null,
+            )
+            OutlinedButton(
+                onClick = onRetry,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = 48.dp),
+                shape = shapes.md,
+                border = BorderStroke(1.dp, colors.line2),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("重新发起授权")
+            }
+        }
+
+        is DeviceAuthState.Failed -> {
+            val offline = auth.error.errorCode == ApiErrorCode.NETWORK_ERROR
+            StatusNoticeBanner(
+                message = if (offline) {
+                    "当前处于离线状态或网络中断，无法获取授权状态。"
+                } else {
+                    auth.error.userMessage
+                },
+                isOffline = offline,
+                onRetry = null,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onRetry,
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = 48.dp),
+                    shape = shapes.md,
+                    border = BorderStroke(1.dp, colors.line2),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("重试")
+                }
+                OutlinedButton(
+                    onClick = onSwitchServer,
+                    modifier = Modifier
+                        .weight(1f)
+                        .defaultMinSize(minHeight = 48.dp),
+                    shape = shapes.md,
+                    border = BorderStroke(1.dp, colors.line2),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.fg2),
+                ) {
+                    Text("更换服务器")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun paperFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedContainerColor = DropitTheme.colors.surface0,
+    unfocusedContainerColor = DropitTheme.colors.surface0,
+    focusedBorderColor = DropitTheme.colors.line3,
+    unfocusedBorderColor = DropitTheme.colors.line2,
+    errorBorderColor = DropitTheme.colors.destructive,
+    focusedLabelColor = DropitTheme.colors.fg2,
+    unfocusedLabelColor = DropitTheme.colors.fg3,
+    cursorColor = DropitTheme.colors.brand,
+)
 
 @Composable
 private fun StatusNoticeBanner(
@@ -802,33 +1186,9 @@ private fun StatusNoticeBanner(
                     modifier = Modifier.defaultMinSize(minHeight = 48.dp),
                     colors = ButtonDefaults.textButtonColors(contentColor = tint),
                 ) {
-                    Text(
-                        text = "重试",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+                    Text("重试", fontWeight = FontWeight.SemiBold)
                 }
             }
-        }
-    }
-}
-
-private fun openVerificationUrl(context: Context, url: String) {
-    val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return
-    val launchedCustomTab = runCatching {
-        val customTabs = CustomTabsIntent.Builder()
-            .setShowTitle(true)
-            .build()
-        customTabs.launchUrl(context, uri)
-    }.isSuccess
-    if (!launchedCustomTab) {
-        runCatching {
-            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
-        }.onFailure {
-            Toast.makeText(context, "未找到可用的浏览器打开授权页", Toast.LENGTH_SHORT).show()
         }
     }
 }
@@ -836,4 +1196,21 @@ private fun openVerificationUrl(context: Context, url: String) {
 private fun copyTextToClipboard(context: Context, label: String, text: String) {
     val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
     manager.setPrimaryClip(ClipData.newPlainText(label, text))
+}
+
+private fun openCustomTabUrl(context: Context, rawUrl: String) {
+    val uri = runCatching { Uri.parse(rawUrl) }.getOrNull() ?: return
+    val opened = runCatching {
+        CustomTabsIntent.Builder()
+            .setShowTitle(true)
+            .build()
+            .launchUrl(context, uri)
+    }.isSuccess
+    if (!opened) {
+        runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.onFailure {
+            Toast.makeText(context, "未找到可用的浏览器", Toast.LENGTH_SHORT).show()
+        }
+    }
 }

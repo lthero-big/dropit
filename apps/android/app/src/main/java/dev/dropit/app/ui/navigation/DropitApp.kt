@@ -51,15 +51,32 @@ import dev.dropit.app.core.auth.ThemeMode
 import dev.dropit.app.core.network.ClipItem
 import dev.dropit.app.core.network.TargetScope
 import dev.dropit.app.core.repository.MediaRepository
+import dev.dropit.app.data.account.AccountSettingsRepository
 import dev.dropit.app.di.AppContainer
 import dev.dropit.app.ui.board.BoardScreen
 import dev.dropit.app.ui.board.BoardViewModel
 import dev.dropit.app.ui.onboarding.OnboardingScreen
 import dev.dropit.app.ui.onboarding.OnboardingViewModel
 import dev.dropit.app.ui.rooms.RoomViewModel
+import dev.dropit.app.ui.settings.AdminSettingsSubPage
+import dev.dropit.app.ui.settings.AdminSettingsViewModel
 import dev.dropit.app.ui.settings.AppUpdateDialog
+import dev.dropit.app.ui.settings.DevicesSubPage
+import dev.dropit.app.ui.settings.DevicesViewModel
+import dev.dropit.app.ui.settings.ForcePasswordChangeDialog
+import dev.dropit.app.ui.settings.SecurityAndOAuthSubPage
+import dev.dropit.app.ui.settings.SecurityViewModel
 import dev.dropit.app.ui.settings.SettingsScreen
+import dev.dropit.app.ui.settings.SettingsSubPage
 import dev.dropit.app.ui.settings.SettingsViewModel
+import dev.dropit.app.ui.settings.ShareLinksSubPage
+import dev.dropit.app.ui.settings.ShareLinksViewModel
+import dev.dropit.app.ui.settings.SharePresetsSubPage
+import dev.dropit.app.ui.settings.SharePresetsViewModel
+import dev.dropit.app.ui.settings.SpaceSharingSubPage
+import dev.dropit.app.ui.settings.SpaceSharingViewModel
+import dev.dropit.app.ui.settings.TokensAndDeviceCodeSubPage
+import dev.dropit.app.ui.settings.TokensViewModel
 import dev.dropit.app.ui.share.ItemShareViewModel
 import dev.dropit.app.ui.share.ShareTargetSheet
 import dev.dropit.app.ui.share.ShareTargetViewModel
@@ -122,6 +139,7 @@ fun DropitApp(
                 key = "onboarding",
                 factory = OnboardingViewModel.Factory(
                     authRepository = container.authRepository,
+                    oauthCallbackBus = container.oauthCallbackBus,
                     initialServerOrigin = route.serverOrigin,
                     initialSessionExpired = route.sessionExpired,
                 ),
@@ -192,6 +210,7 @@ fun DropitApp(
                     itemShareRepository = container.itemShareRepository,
                     serverOriginProvider = serverOriginProvider,
                     onSessionExpired = appViewModel::markSessionExpired,
+                    accountSettingsRepository = container.accountSettingsRepository,
                 ),
             )
             val shareTargetViewModel: ShareTargetViewModel = viewModel(
@@ -216,13 +235,14 @@ fun DropitApp(
 
             LaunchedEffect(sessionKey) {
                 boardViewModel.activateSession(sessionKey)
-                itemShareViewModel.close()
+                itemShareViewModel.resetSessionState()
                 roomViewModel.clearDialogFeedback()
                 // Asynchronous non-blocking update check once per authenticated session
                 settingsViewModel.triggerBackgroundUpdateCheck(sessionKey)
             }
 
             DropitMainScaffold(
+                sessionKey = sessionKey,
                 serverOrigin = route.serverOrigin,
                 rootState = rootState,
                 boardViewModel = boardViewModel,
@@ -231,8 +251,11 @@ fun DropitApp(
                 itemShareViewModel = itemShareViewModel,
                 shareTargetViewModel = shareTargetViewModel,
                 settingsViewModel = settingsViewModel,
+                accountSettingsRepository = container.accountSettingsRepository,
                 mediaRepository = container.mediaRepository,
                 imageLoader = imageLoader,
+                onSessionExpired = appViewModel::markSessionExpired,
+                onConsumeOAuthLinkResult = appViewModel::consumeLatestOAuthLinkResult,
                 onThemeModeChange = appViewModel::setThemeMode,
                 onSwitchAccount = appViewModel::switchAccount,
                 onLogoutAndSwitchServer = appViewModel::logoutAndSwitchServer,
@@ -243,6 +266,7 @@ fun DropitApp(
 
 @Composable
 private fun DropitMainScaffold(
+    sessionKey: String,
     serverOrigin: String,
     rootState: AppRootUiState,
     boardViewModel: BoardViewModel,
@@ -251,8 +275,11 @@ private fun DropitMainScaffold(
     itemShareViewModel: ItemShareViewModel,
     shareTargetViewModel: ShareTargetViewModel,
     settingsViewModel: SettingsViewModel,
+    accountSettingsRepository: AccountSettingsRepository,
     mediaRepository: MediaRepository,
     imageLoader: ImageLoader,
+    onSessionExpired: () -> Unit,
+    onConsumeOAuthLinkResult: () -> Unit,
     onThemeModeChange: (ThemeMode) -> Unit,
     onSwitchAccount: () -> Unit,
     onLogoutAndSwitchServer: () -> Unit,
@@ -260,11 +287,26 @@ private fun DropitMainScaffold(
     val colors = DropitTheme.colors
     val context = LocalContext.current
     var selectedTab by rememberSaveable { mutableStateOf(MainTab.BOARD) }
+    var activeSettingsSubPage by rememberSaveable { mutableStateOf<SettingsSubPage?>(null) }
     var activeViewer by remember { mutableStateOf<ActiveViewer?>(null) }
 
     val boardState by boardViewModel.uiState.collectAsStateWithLifecycle()
     val shareTargetState by shareTargetViewModel.uiState.collectAsStateWithLifecycle()
     val settingsState by settingsViewModel.uiState.collectAsStateWithLifecycle()
+
+    LaunchedEffect(sessionKey) {
+        activeSettingsSubPage = null
+        activeViewer = null
+    }
+
+    // If an OAuth link callback returns after Activity recreation, open the Security & OAuth page
+    // so the user immediately sees the link confirmation or error message.
+    LaunchedEffect(rootState.latestOAuthLinkResult) {
+        if (rootState.latestOAuthLinkResult != null && activeSettingsSubPage != SettingsSubPage.SECURITY_AND_OAUTH) {
+            selectedTab = MainTab.SETTINGS
+            activeSettingsSubPage = SettingsSubPage.SECURITY_AND_OAUTH
+        }
+    }
 
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
@@ -294,9 +336,9 @@ private fun DropitMainScaffold(
         boardState.spaces.associate { it.id to it.name.ifBlank { "我的空间" } }
     }
 
-    // Global back stack rule (§2.2): non-home tabs return to Board before exiting app
-    // (disabled whenever a fullscreen viewer is open so the viewer consumes Back first).
-    BackHandler(enabled = activeViewer == null && selectedTab != MainTab.BOARD) {
+    // Global back stack rule (§2.2): viewers and native settings sub-pages consume Back first;
+    // then non-home tabs return to Board before exiting app.
+    BackHandler(enabled = activeViewer == null && activeSettingsSubPage == null && selectedTab != MainTab.BOARD) {
         selectedTab = MainTab.BOARD
     }
 
@@ -310,7 +352,10 @@ private fun DropitMainScaffold(
                     selectedTab = selectedTab,
                     activeTransferCount = rootState.activeTransferCount,
                     failedTransferCount = rootState.failedTransferCount,
-                    onSelectTab = { selectedTab = it },
+                    onSelectTab = {
+                        activeSettingsSubPage = null
+                        selectedTab = it
+                    },
                 )
             },
         ) { innerPadding ->
@@ -336,6 +381,10 @@ private fun DropitMainScaffold(
                         onOpenTextReader = { item ->
                             activeViewer = ActiveViewer.TextReader(item, boardState.activeScope)
                         },
+                        suppressItemShareSheet = activeSettingsSubPage != null,
+                        onOpenSharePresets = {
+                            activeSettingsSubPage = SettingsSubPage.SHARE_PRESETS
+                        },
                     )
 
                     MainTab.TRANSFERS -> TransfersScreen(
@@ -349,11 +398,144 @@ private fun DropitMainScaffold(
                         themeMode = rootState.themeMode,
                         isLoggingOut = rootState.isLoggingOut,
                         settingsState = settingsState,
+                        hasAdminScope = rootState.hasAdminScope,
+                        accountCapability = rootState.accountCapability,
+                        onOpenSubPage = { subPage -> activeSettingsSubPage = subPage },
+                        onReauthenticateForUpgrade = onSwitchAccount,
                         onThemeModeChange = onThemeModeChange,
                         onCheckUpdate = settingsViewModel::checkForUpdateManually,
                         onSwitchAccount = onSwitchAccount,
                         onLogoutAndSwitchServer = onLogoutAndSwitchServer,
                     )
+                }
+            }
+        }
+
+        // Native Settings Secondary Pages (full-screen paper surfaces with back gesture support)
+        activeSettingsSubPage?.let { subPage ->
+            when (subPage) {
+                SettingsSubPage.SHARE_PRESETS -> {
+                    val vm: SharePresetsViewModel = viewModel(
+                        key = "settings-share-presets-$sessionKey",
+                        factory = SharePresetsViewModel.Factory(
+                            repository = accountSettingsRepository,
+                            onSessionExpired = onSessionExpired,
+                        ),
+                    )
+                    SharePresetsSubPage(
+                        viewModel = vm,
+                        onBack = {
+                            activeSettingsSubPage = null
+                            itemShareViewModel.refreshPresets()
+                        },
+                        onReauthenticate = onSwitchAccount,
+                        onPresetsSaved = { saved ->
+                            itemShareViewModel.applyPresets(saved)
+                        },
+                    )
+                }
+
+                SettingsSubPage.SHARE_LINKS -> {
+                    val vm: ShareLinksViewModel = viewModel(
+                        key = "settings-share-links-$sessionKey",
+                        factory = ShareLinksViewModel.Factory(
+                            repository = accountSettingsRepository,
+                            onSessionExpired = onSessionExpired,
+                        ),
+                    )
+                    ShareLinksSubPage(
+                        viewModel = vm,
+                        onBack = { activeSettingsSubPage = null },
+                        onReauthenticate = onSwitchAccount,
+                    )
+                }
+
+                SettingsSubPage.SPACE_SHARING -> {
+                    val vm: SpaceSharingViewModel = viewModel(
+                        key = "settings-space-sharing-$sessionKey",
+                        factory = SpaceSharingViewModel.Factory(
+                            repository = accountSettingsRepository,
+                            onSessionExpired = onSessionExpired,
+                        ),
+                    )
+                    SpaceSharingSubPage(
+                        viewModel = vm,
+                        spaces = boardState.spaces,
+                        currentUserId = boardState.me?.user?.id,
+                        canManagePersonalInvites = boardState.me?.user?.isAdmin == true && rootState.hasAdminScope,
+                        onSpacesChanged = { boardViewModel.loadInitial() },
+                        onBack = { activeSettingsSubPage = null },
+                        onReauthenticate = onSwitchAccount,
+                    )
+                }
+
+                SettingsSubPage.DEVICES -> {
+                    val vm: DevicesViewModel = viewModel(
+                        key = "settings-devices-$sessionKey",
+                        factory = DevicesViewModel.Factory(
+                            repository = accountSettingsRepository,
+                            onSessionExpired = onSessionExpired,
+                        ),
+                    )
+                    DevicesSubPage(
+                        viewModel = vm,
+                        onBack = { activeSettingsSubPage = null },
+                        onReauthenticate = onSwitchAccount,
+                    )
+                }
+
+                SettingsSubPage.TOKENS_AND_DEVICE_CODE -> {
+                    val vm: TokensViewModel = viewModel(
+                        key = "settings-tokens-$sessionKey",
+                        factory = TokensViewModel.Factory(
+                            repository = accountSettingsRepository,
+                            onSessionExpired = onSessionExpired,
+                        ),
+                    )
+                    TokensAndDeviceCodeSubPage(
+                        viewModel = vm,
+                        onBack = { activeSettingsSubPage = null },
+                        onReauthenticate = onSwitchAccount,
+                    )
+                }
+
+                SettingsSubPage.SECURITY_AND_OAUTH -> {
+                    val vm: SecurityViewModel = viewModel(
+                        key = "settings-security-$sessionKey",
+                        factory = SecurityViewModel.Factory(
+                            repository = accountSettingsRepository,
+                            onSessionExpired = onSessionExpired,
+                        ),
+                    )
+                    SecurityAndOAuthSubPage(
+                        viewModel = vm,
+                        hasPassword = boardState.me?.hasPassword == true,
+                        latestOAuthLinkResult = rootState.latestOAuthLinkResult,
+                        onConsumeOAuthLinkResult = onConsumeOAuthLinkResult,
+                        onPasswordUpdated = { boardViewModel.loadInitial() },
+                        onBack = { activeSettingsSubPage = null },
+                        onReauthenticate = onSwitchAccount,
+                    )
+                }
+
+                SettingsSubPage.ADMIN -> {
+                    val isAdminAllowed = boardState.me?.user?.isAdmin == true && rootState.hasAdminScope
+                    if (!isAdminAllowed) {
+                        LaunchedEffect(Unit) { activeSettingsSubPage = null }
+                    } else {
+                        val vm: AdminSettingsViewModel = viewModel(
+                            key = "settings-admin-$sessionKey",
+                            factory = AdminSettingsViewModel.Factory(
+                                repository = accountSettingsRepository,
+                                onSessionExpired = onSessionExpired,
+                            ),
+                        )
+                        AdminSettingsSubPage(
+                            viewModel = vm,
+                            onBack = { activeSettingsSubPage = null },
+                            onReauthenticate = onSwitchAccount,
+                        )
+                    }
                 }
             }
         }
@@ -454,6 +636,19 @@ private fun DropitMainScaffold(
                     }
                 },
                 onCancel = shareTargetViewModel::cancelShare,
+            )
+        }
+
+        // Blocking Native Forced Password Change Dialog when server requires changing a temporary password
+        val requiresPasswordChange = rootState.mustChangePassword || boardState.me?.mustChangePassword == true
+        if (requiresPasswordChange) {
+            ForcePasswordChangeDialog(
+                accountSettingsRepository = accountSettingsRepository,
+                onPasswordChanged = {
+                    Toast.makeText(context, "密码已修改", Toast.LENGTH_SHORT).show()
+                    boardViewModel.loadInitial()
+                },
+                onSwitchAccount = onSwitchAccount,
             )
         }
 
