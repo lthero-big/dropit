@@ -124,15 +124,28 @@ class RealtimeClientTest {
                     webSocket.send("""{"type":"item.created","item":{"id":"i2","spaceId":"sp-1","kind":"text","text":"second","createdAt":20,"updatedAt":20,"expiresAt":999,"pinned":false,"hasThumbnail":false,"tags":[]}}""")
                     webSocket.close(1001, "Server restart")
                 }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(code, reason)
+                }
             }),
         )
         // Connection 2: transient 503 failure -> triggers backoff attempt 1
         server.enqueue(MockResponse().setResponseCode(503))
         // Connection 3: reconnect succeeds and sends authoritative replacement snapshot (only i3, i1/i2 removed!)
+        val conn3Closed = java.util.concurrent.CountDownLatch(1)
         server.enqueue(
             MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     webSocket.send("""{"type":"snapshot","items":[{"id":"i3","spaceId":"sp-1","kind":"text","text":"fresh","createdAt":30,"updatedAt":30,"expiresAt":999,"pinned":false,"hasThumbnail":false,"tags":[]}],"groups":["G2"],"serverTime":30,"expiresAt":null}""")
+                }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(code, reason)
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    conn3Closed.countDown()
                 }
             }),
         )
@@ -165,6 +178,7 @@ class RealtimeClientTest {
 
         client.disconnect(clearState = true)
         assertEquals(ConnectionState.DISCONNECTED, client.connectionState.value)
+        assertTrue(conn3Closed.await(3, java.util.concurrent.TimeUnit.SECONDS))
     }
 
     @Test
