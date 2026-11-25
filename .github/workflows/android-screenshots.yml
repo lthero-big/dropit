@@ -98,6 +98,41 @@ jobs:
                   assert distinct >= 16, f"Screenshot appears blank/uniform: {name} ({distinct} colors)"
           PY
           ls -lh "$OUT_DIR"
+      - name: Verify committed docs screenshots and markdown links
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re
+          from PIL import Image
+
+          expected = [
+              "docs/screenshots/android-board-light.png",
+              "docs/screenshots/android-board-dark.png",
+              "docs/screenshots/android-share-sheet.png",
+              "docs/screenshots/android-transfers.png",
+          ]
+          for path in expected:
+              assert os.path.isfile(path), f"Missing committed screenshot: {path}"
+              with Image.open(path) as img:
+                  w, h = img.size
+                  assert w >= 800 and h >= 1600, f"Unexpected dimensions for {path}: {w}x{h}"
+
+          readme = open("README.md", encoding="utf-8").read()
+          for path in expected:
+              assert path in readme, f"README.md missing reference to {path}"
+          assert "https://github.com/lthero-big/dropit/releases" in readme, "README.md missing GitHub Releases link"
+
+          shots_readme = open("docs/screenshots/README.md", encoding="utf-8").read()
+          for path in expected:
+              base = os.path.basename(path)
+              assert base in shots_readme, f"docs/screenshots/README.md missing {base}"
+
+          for m in re.finditer(r'src="(docs/screenshots/[^"]+)"', readme):
+              target = m.group(1)
+              assert os.path.isfile(target), f"Broken screenshot link in README.md: {target}"
+
+          print("All committed Android screenshots and README links verified.")
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: dropit-android-screenshots
