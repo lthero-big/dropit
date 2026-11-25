@@ -47,6 +47,7 @@ import dev.dropit.app.core.repository.UploadFileRequest
 import dev.dropit.app.di.AppContainer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -57,6 +58,8 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -64,10 +67,12 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.TimeUnit
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AppViewModelTest {
@@ -204,11 +209,22 @@ class AppViewModelTest {
             advanceUntilIdle()
 
             // Active switchAccount MUST revoke remote token via POST /api/auth/logout
-            assertEquals(1, server.requestCount)
-            val logoutReq = server.takeRequest()
-            assertEquals("POST", logoutReq.method)
+            val logoutReq = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull("Expected POST /api/auth/logout request", logoutReq)
+            assertEquals("POST", logoutReq!!.method)
             assertEquals("/api/auth/logout", logoutReq.path)
             assertEquals("Bearer tok_account_a_12345678901234567890123456", logoutReq.getHeader("Authorization"))
+
+            withContext(Dispatchers.Default) {
+                withTimeout(5_000L) {
+                    while (vm.uiState.value.isLoggingOut) {
+                        testDispatcher.scheduler.advanceUntilIdle()
+                        delay(10)
+                    }
+                }
+            }
+            advanceUntilIdle()
+            assertEquals(1, server.requestCount)
 
             // Must clear account-scoped caches/queues/rooms/pending share
             assertEquals(1, container.recordingRoomRepository.clearRoomStateCount)
@@ -256,11 +272,23 @@ class AppViewModelTest {
             vm.logoutAndSwitchServer()
             advanceUntilIdle()
 
+            val logoutReq = server.takeRequest(5, TimeUnit.SECONDS)
+            assertNotNull("Expected POST /api/auth/logout request", logoutReq)
+            assertEquals("POST", logoutReq!!.method)
+            assertEquals("/api/auth/logout", logoutReq.path)
+
+            withContext(Dispatchers.Default) {
+                withTimeout(5_000L) {
+                    while (vm.uiState.value.isLoggingOut) {
+                        testDispatcher.scheduler.advanceUntilIdle()
+                        delay(10)
+                    }
+                }
+            }
+            advanceUntilIdle()
+
             assertEquals(1, container.resetForServerSwitchCount)
             assertEquals(1, server.requestCount)
-            val logoutReq = server.takeRequest()
-            assertEquals("POST", logoutReq.method)
-            assertEquals("/api/auth/logout", logoutReq.path)
             assertNull(container.tokenVault.getToken())
             assertNull(container.settingsStore.getServerOrigin())
             assertFalse(vm.uiState.value.isLoggingOut)
