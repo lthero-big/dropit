@@ -408,7 +408,8 @@ class BoardViewModelTest {
 
         assertEquals(0, boardRepo.mutationCallCount)
         val msg = vm.uiState.value.snackbar?.message.orEmpty()
-        assertTrue(msg.contains("512 B"))
+        assertTrue(msg.contains("1 KB"))
+        assertFalse(msg.contains("0 KB"))
     }
 
     @Test
