@@ -181,14 +181,24 @@ data class ItemShare(
 )
 
 @Serializable
+enum class UpdateSource {
+    SELF_HOSTED,
+    GITHUB,
+}
+
+@Serializable
 data class AppUpdateManifest(
-    val versionCode: Int,
+    val versionCode: Int = 0,
     val versionName: String,
     val notes: String = "",
     val size: Long,
     val sha256: String,
     val publishedAt: String? = null,
     val url: String,
+    val source: UpdateSource = UpdateSource.SELF_HOSTED,
+    val fallbackUrl: String? = null,
+    val fallbackSha256: String? = null,
+    val fallbackSize: Long? = null,
 )
 
 sealed class WsEvent {
@@ -343,6 +353,7 @@ data class AuthProvidersInfo(
     val password: Boolean = true,
     val registration: String = "invite",
     val setupRequired: Boolean = false,
+    val googleClientId: String? = null,
 )
 
 @Serializable

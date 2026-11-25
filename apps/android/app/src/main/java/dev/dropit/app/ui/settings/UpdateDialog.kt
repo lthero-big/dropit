@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import dev.dropit.app.BuildConfig
 import dev.dropit.app.core.network.AppUpdateManifest
 import dev.dropit.app.core.network.ServerUrl
+import dev.dropit.app.core.network.UpdateSource
 import dev.dropit.app.core.repository.UpdateInstallState
 import dev.dropit.app.ui.theme.DropitMonoTypography
 import dev.dropit.app.ui.theme.DropitTheme
@@ -95,8 +96,12 @@ fun AppUpdateDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                val sourceLabel = when (manifest.source) {
+                    UpdateSource.GITHUB -> "GitHub Releases"
+                    UpdateSource.SELF_HOSTED -> "当前服务器"
+                }
                 Text(
-                    text = "当前 ${BuildConfig.VERSION_NAME} · 安装包 ${ServerUrl.formatSize(manifest.size)}",
+                    text = "当前 ${BuildConfig.VERSION_NAME} · 安装包 ${ServerUrl.formatSize(manifest.size)} · $sourceLabel",
                     style = DropitMonoTypography.meta,
                     color = colors.fg3,
                 )

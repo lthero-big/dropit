@@ -10,7 +10,6 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -1582,17 +1581,11 @@ private fun shareFileUri(context: Context, uri: Uri, mimeType: String) {
 }
 
 private fun openExternalUrl(context: Context, rawUrl: String) {
-    val uri = runCatching { Uri.parse(rawUrl) }.getOrNull() ?: return
-    val opened = runCatching {
-        CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, uri)
-    }.isSuccess
-    if (!opened) {
-        runCatching {
-            context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }.onFailure {
-            Toast.makeText(context, "无法打开链接", Toast.LENGTH_SHORT).show()
-        }
-    }
+    dev.dropit.app.ui.common.CustomTabsHelper.openUrl(
+        context = context,
+        rawUrl = rawUrl,
+        fallbackErrorMessage = "无法打开链接",
+    )
 }
 
 private fun resolveUploadRequest(

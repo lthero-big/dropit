@@ -3,11 +3,8 @@ package dev.dropit.app.ui.onboarding
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -71,6 +68,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -96,23 +94,30 @@ import dev.dropit.app.BuildConfig
 import dev.dropit.app.core.auth.DeviceAuthState
 import dev.dropit.app.core.network.ApiErrorCode
 import dev.dropit.app.core.network.ServerUrl
+import dev.dropit.app.ui.common.CustomTabsHelper
 import dev.dropit.app.ui.theme.DropitBrandLockup
 import dev.dropit.app.ui.theme.DropitBrandMark
 import dev.dropit.app.ui.theme.DropitElevation
 import dev.dropit.app.ui.theme.DropitMonoTypography
 import dev.dropit.app.ui.theme.DropitMotion
 import dev.dropit.app.ui.theme.DropitTheme
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 @Composable
 fun OnboardingScreen(
     viewModel: OnboardingViewModel,
     modifier: Modifier = Modifier,
     applyStatusBarsPadding: Boolean = true,
+    googleIdTokenFetcher: GoogleIdTokenFetcher = AndroidGoogleIdTokenFetcher,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val colors = DropitTheme.colors
     val reducedMotion = DropitTheme.reducedMotion
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    var activeGoogleSignInJob by remember { mutableStateOf<Job?>(null) }
     val versionLabel = remember {
         ServerUrl.versionLabel(
             version = BuildConfig.VERSION_NAME,
@@ -121,10 +126,32 @@ fun OnboardingScreen(
         )
     }
 
+    // Decouple the suspending Credential Manager picker from LaunchedEffect's key lifecycle:
+    // consuming the pending request clears the key to null on the next frame, so the fetch must run
+    // in rememberCoroutineScope() to avoid immediate self-cancellation, while still resetting VM
+    // busy state if the screen leaves composition or rotates mid-flight.
+    LaunchedEffect(state.pendingNativeGoogleRequest?.requestId) {
+        val request = state.pendingNativeGoogleRequest ?: return@LaunchedEffect
+        viewModel.consumePendingNativeGoogleRequest(request.requestId)
+        activeGoogleSignInJob?.cancel()
+        activeGoogleSignInJob = coroutineScope.launch {
+            try {
+                val result = googleIdTokenFetcher.fetchIdToken(context, request.clientId)
+                viewModel.onNativeGoogleIdTokenResult(result, requestId = request.requestId)
+            } catch (ce: CancellationException) {
+                viewModel.onNativeGoogleIdTokenResult(
+                    GoogleIdTokenFetchResult.Cancelled,
+                    requestId = request.requestId,
+                )
+                throw ce
+            }
+        }
+    }
+
     LaunchedEffect(state.pendingOAuthLaunchUrl) {
         val url = state.pendingOAuthLaunchUrl ?: return@LaunchedEffect
         viewModel.consumePendingOAuthLaunchUrl()
-        openCustomTabUrl(context, url)
+        CustomTabsHelper.openUrl(context, url, "未找到可用的浏览器")
     }
 
     // Back from sign-in screen returns to ServerConfig instead of exiting abruptly.
@@ -166,6 +193,8 @@ fun OnboardingScreen(
                     onCancelOAuth = viewModel::cancelOAuthLogin,
                     onEmailChanged = viewModel::onEmailChanged,
                     onPasswordChanged = viewModel::onPasswordChanged,
+                    onInviteCodeChanged = viewModel::onInviteCodeChanged,
+                    onToggleInviteInput = viewModel::toggleInviteInput,
                     onSubmitPasswordLogin = viewModel::submitPasswordLogin,
                     onToggleDeviceCode = viewModel::toggleDeviceCodeSection,
                     onRetryDeviceAuth = { viewModel.startDeviceAuth() },
@@ -348,6 +377,8 @@ private fun NativeSignInContent(
     onCancelOAuth: () -> Unit,
     onEmailChanged: (String) -> Unit,
     onPasswordChanged: (String) -> Unit,
+    onInviteCodeChanged: (String) -> Unit,
+    onToggleInviteInput: () -> Unit,
     onSubmitPasswordLogin: () -> Unit,
     onToggleDeviceCode: () -> Unit,
     onRetryDeviceAuth: () -> Unit,
@@ -560,14 +591,21 @@ private fun NativeSignInContent(
                                         contentColor = colors.fg,
                                     ),
                                 ) {
-                                    if (isActiveThis && state.isExchangingOAuthCode) {
+                                    if (isActiveThis && (state.isExchangingOAuthCode || state.isNativeGoogleSignInInProgress)) {
                                         CircularProgressIndicator(
                                             modifier = Modifier.size(16.dp),
                                             strokeWidth = 2.dp,
                                             color = colors.brand,
                                         )
                                         Spacer(modifier = Modifier.width(8.dp))
-                                        Text("正在完成登录…", fontWeight = FontWeight.Medium)
+                                        Text(
+                                            text = if (state.isNativeGoogleSignInInProgress) {
+                                                "正在拉起 Google 账号…"
+                                            } else {
+                                                "正在完成登录…"
+                                            },
+                                            fontWeight = FontWeight.Medium,
+                                        )
                                     } else {
                                         Icon(
                                             imageVector = if (provider == "github") Icons.Rounded.Login else Icons.Rounded.Language,
@@ -587,13 +625,19 @@ private fun NativeSignInContent(
                         }
                     }
 
-                    // Active OAuth waiting notice
-                    if (state.activeOAuthProvider != null && !state.isExchangingOAuthCode) {
+                    // Active OAuth waiting notice (Custom Tabs flow)
+                    if (state.activeOAuthProvider != null &&
+                        !state.isExchangingOAuthCode &&
+                        !state.isNativeGoogleSignInInProgress
+                    ) {
                         val providerName = when (state.activeOAuthProvider) {
                             "github" -> "GitHub"
                             "google" -> "Google"
                             else -> state.activeOAuthProvider
                         }
+                        val waitingText = state.oauthFallbackNotice?.let { notice ->
+                            "$notice，正在等待 $providerName 浏览器授权回跳…"
+                        } ?: "正在等待 $providerName 浏览器授权回跳…"
                         Surface(
                             modifier = Modifier.fillMaxWidth(),
                             shape = shapes.md,
@@ -614,7 +658,7 @@ private fun NativeSignInContent(
                                     color = colors.brand,
                                 )
                                 Text(
-                                    text = "正在等待 $providerName 浏览器授权回跳…",
+                                    text = waitingText,
                                     style = MaterialTheme.typography.labelMedium,
                                     color = colors.fg2,
                                     modifier = Modifier.weight(1f),
@@ -626,6 +670,52 @@ private fun NativeSignInContent(
                                 ) {
                                     Text("取消")
                                 }
+                            }
+                        }
+                    }
+
+                    // Optional invite code input (auto-expanded on INVITATION_REQUIRED / INVITE_INVALID)
+                    if (state.showInviteInput) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedTextField(
+                                value = state.inviteCodeInput,
+                                onValueChange = onInviteCodeChanged,
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !state.isBusySigningIn,
+                                singleLine = true,
+                                label = { Text("邀请码（新用户注册必填）") },
+                                placeholder = { Text("粘贴管理员提供的邀请码", color = colors.fg4) },
+                                shape = shapes.md,
+                                textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.fg),
+                                colors = paperFieldColors(),
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Ascii,
+                                    capitalization = KeyboardCapitalization.None,
+                                    autoCorrectEnabled = false,
+                                    imeAction = ImeAction.Done,
+                                ),
+                            )
+                            Text(
+                                text = "输入邀请码后，重新点击上方第三方登录或下方登录按钮即可完成注册。",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.fg3,
+                            )
+                        }
+                    } else if (state.providersInfo?.registration == "invite") {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            TextButton(
+                                onClick = onToggleInviteInput,
+                                enabled = !state.isBusySigningIn,
+                                modifier = Modifier.defaultMinSize(minHeight = 40.dp),
+                                colors = ButtonDefaults.textButtonColors(contentColor = colors.fg3),
+                            ) {
+                                Text(
+                                    text = "新用户？填写邀请码",
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
                             }
                         }
                     }
@@ -958,7 +1048,7 @@ private fun DeviceCodeFallbackContent(
 
             OutlinedButton(
                 onClick = {
-                    openCustomTabUrl(context, auth.authorization.verificationUriComplete)
+                    CustomTabsHelper.openUrl(context, auth.authorization.verificationUriComplete, "未找到可用的浏览器")
                     onBrowserOpened()
                 },
                 modifier = Modifier
@@ -1196,21 +1286,4 @@ private fun StatusNoticeBanner(
 private fun copyTextToClipboard(context: Context, label: String, text: String) {
     val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
     manager.setPrimaryClip(ClipData.newPlainText(label, text))
-}
-
-private fun openCustomTabUrl(context: Context, rawUrl: String) {
-    val uri = runCatching { Uri.parse(rawUrl) }.getOrNull() ?: return
-    val opened = runCatching {
-        CustomTabsIntent.Builder()
-            .setShowTitle(true)
-            .build()
-            .launchUrl(context, uri)
-    }.isSuccess
-    if (!opened) {
-        runCatching {
-            context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }.onFailure {
-            Toast.makeText(context, "未找到可用的浏览器", Toast.LENGTH_SHORT).show()
-        }
-    }
 }

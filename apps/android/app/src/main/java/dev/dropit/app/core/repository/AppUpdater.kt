@@ -40,6 +40,9 @@ interface AppUpdater {
     suspend fun shouldPromptAutoUpdate(manifest: AppUpdateManifest): Boolean
     suspend fun downloadAndInstall(manifest: AppUpdateManifest): UpdateInstallState
     suspend fun skipVersion(versionCode: Int)
+    suspend fun skipVersion(manifest: AppUpdateManifest) {
+        skipVersion(manifest.versionCode)
+    }
     fun resetInstallState()
 }
 

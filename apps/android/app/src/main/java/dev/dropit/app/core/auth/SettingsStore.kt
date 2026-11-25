@@ -51,6 +51,7 @@ data class AppSettings(
     val deviceId: String = "",
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val skipUpdateVersionCode: Int? = null,
+    val skipUpdateVersionName: String? = null,
     val legacyMigrated: Boolean = false,
     val tokenScopes: Set<String> = emptySet(),
     val mustChangePassword: Boolean = false,
@@ -69,6 +70,7 @@ interface SettingsStore {
     suspend fun setDeviceId(deviceId: String)
     suspend fun setThemeMode(mode: ThemeMode)
     suspend fun setSkipUpdateVersionCode(versionCode: Int?)
+    suspend fun setSkipUpdateVersionName(versionName: String?) = Unit
     suspend fun isLegacyMigrated(): Boolean
     suspend fun markLegacyMigrated()
     suspend fun clearServerConfig()
@@ -105,6 +107,7 @@ class DataStoreSettingsStore(
             deviceId = prefs[KEY_DEVICE_ID].orEmpty(),
             themeMode = ThemeMode.fromStorage(prefs[KEY_THEME_MODE]),
             skipUpdateVersionCode = prefs[KEY_SKIP_UPDATE_VERSION_CODE]?.takeIf { it > 0 },
+            skipUpdateVersionName = prefs[KEY_SKIP_UPDATE_VERSION_NAME]?.takeIf { it.isNotBlank() },
             legacyMigrated = prefs[KEY_LEGACY_MIGRATED] ?: false,
             tokenScopes = parseScopeString(prefs[KEY_TOKEN_SCOPES]),
             mustChangePassword = prefs[KEY_MUST_CHANGE_PASSWORD] ?: false,
@@ -159,6 +162,17 @@ class DataStoreSettingsStore(
         }
     }
 
+    override suspend fun setSkipUpdateVersionName(versionName: String?) {
+        dataStore.edit { prefs ->
+            val cleaned = versionName?.trim().orEmpty()
+            if (cleaned.isEmpty()) {
+                prefs.remove(KEY_SKIP_UPDATE_VERSION_NAME)
+            } else {
+                prefs[KEY_SKIP_UPDATE_VERSION_NAME] = cleaned
+            }
+        }
+    }
+
     override suspend fun isLegacyMigrated(): Boolean = current().legacyMigrated
 
     override suspend fun markLegacyMigrated() {
@@ -171,6 +185,7 @@ class DataStoreSettingsStore(
         dataStore.edit { prefs ->
             prefs.remove(KEY_SERVER_ORIGIN)
             prefs.remove(KEY_SKIP_UPDATE_VERSION_CODE)
+            prefs.remove(KEY_SKIP_UPDATE_VERSION_NAME)
             prefs.remove(KEY_TOKEN_SCOPES)
             prefs.remove(KEY_MUST_CHANGE_PASSWORD)
             prefs.remove(KEY_PENDING_OAUTH_FLOW)
@@ -230,6 +245,7 @@ class DataStoreSettingsStore(
         private val KEY_DEVICE_ID = stringPreferencesKey("device_id")
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
         private val KEY_SKIP_UPDATE_VERSION_CODE = intPreferencesKey("skip_update_version_code")
+        private val KEY_SKIP_UPDATE_VERSION_NAME = stringPreferencesKey("skip_update_version_name")
         private val KEY_LEGACY_MIGRATED = booleanPreferencesKey("legacy_migrated")
         private val KEY_TOKEN_SCOPES = stringPreferencesKey("token_scopes")
         private val KEY_MUST_CHANGE_PASSWORD = booleanPreferencesKey("must_change_password")
@@ -297,6 +313,10 @@ class InMemorySettingsStore(
         state.value = state.value.copy(skipUpdateVersionCode = versionCode?.takeIf { it > 0 })
     }
 
+    override suspend fun setSkipUpdateVersionName(versionName: String?) = mutex.withLock {
+        state.value = state.value.copy(skipUpdateVersionName = versionName?.trim()?.takeIf { it.isNotEmpty() })
+    }
+
     override suspend fun isLegacyMigrated(): Boolean = state.value.legacyMigrated
 
     override suspend fun markLegacyMigrated() = mutex.withLock {
@@ -308,6 +328,7 @@ class InMemorySettingsStore(
         state.value = state.value.copy(
             serverOrigin = null,
             skipUpdateVersionCode = null,
+            skipUpdateVersionName = null,
             tokenScopes = emptySet(),
             mustChangePassword = false,
         )

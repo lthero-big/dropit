@@ -30,6 +30,11 @@ enum class OnboardingStep {
     DEVICE_AUTH,
 }
 
+data class NativeGoogleSignInRequest(
+    val requestId: Long,
+    val clientId: String,
+)
+
 data class OnboardingUiState(
     val step: OnboardingStep = OnboardingStep.SERVER_CONFIG,
     val serverUrlInput: String = "",
@@ -46,9 +51,14 @@ data class OnboardingUiState(
     // Email + password form
     val emailInput: String = "",
     val passwordInput: String = "",
+    val inviteCodeInput: String = "",
+    val showInviteInput: Boolean = false,
     val isPasswordLoginInProgress: Boolean = false,
-    // OAuth login state
+    // OAuth login state (native Google Credential Manager + Custom Tabs fallback)
     val activeOAuthProvider: String? = null,
+    val isNativeGoogleSignInInProgress: Boolean = false,
+    val pendingNativeGoogleRequest: NativeGoogleSignInRequest? = null,
+    val oauthFallbackNotice: String? = null,
     val isExchangingOAuthCode: Boolean = false,
     val pendingOAuthLaunchUrl: String? = null,
     // Unified auth error banner
@@ -70,8 +80,11 @@ data class OnboardingUiState(
     val isPasswordEnabled: Boolean
         get() = providersInfo?.password ?: true
 
+    val googleClientId: String?
+        get() = providersInfo?.googleClientId?.trim()?.takeIf { it.isNotEmpty() }
+
     val isBusySigningIn: Boolean
-        get() = isPasswordLoginInProgress || isExchangingOAuthCode
+        get() = isPasswordLoginInProgress || isExchangingOAuthCode || isNativeGoogleSignInInProgress
 
     val isSlowedDown: Boolean
         get() {
@@ -105,6 +118,8 @@ class OnboardingViewModel(
     private var providersJob: Job? = null
     private var deviceAuthJob: Job? = null
     private var lastLoadedProvidersOrigin: String? = null
+    private var nextNativeGoogleRequestId: Long = 0L
+    private var activeNativeGoogleRequestId: Long? = null
 
     init {
         observeOAuthCallbacks()
@@ -157,8 +172,13 @@ class OnboardingViewModel(
                         isLoadingProviders = false,
                         providersError = null,
                         passwordInput = "",
+                        inviteCodeInput = "",
+                        showInviteInput = false,
                         isPasswordLoginInProgress = false,
                         activeOAuthProvider = null,
+                        isNativeGoogleSignInInProgress = false,
+                        pendingNativeGoogleRequest = null,
+                        oauthFallbackNotice = null,
                         isExchangingOAuthCode = false,
                         pendingOAuthLaunchUrl = null,
                         authError = null,
@@ -204,8 +224,13 @@ class OnboardingViewModel(
                 providersInfo = if (serverChanged) null else it.providersInfo,
                 providersError = null,
                 passwordInput = "",
+                inviteCodeInput = if (serverChanged) "" else it.inviteCodeInput,
+                showInviteInput = if (serverChanged) false else it.showInviteInput,
                 isPasswordLoginInProgress = false,
                 activeOAuthProvider = null,
+                isNativeGoogleSignInInProgress = false,
+                pendingNativeGoogleRequest = null,
+                oauthFallbackNotice = null,
                 isExchangingOAuthCode = false,
                 pendingOAuthLaunchUrl = null,
                 authError = null,
@@ -380,6 +405,14 @@ class OnboardingViewModel(
         _uiState.update { it.copy(passwordInput = value, authError = null, isAuthOffline = false) }
     }
 
+    fun onInviteCodeChanged(value: String) {
+        _uiState.update { it.copy(inviteCodeInput = value, authError = null, isAuthOffline = false) }
+    }
+
+    fun toggleInviteInput() {
+        _uiState.update { it.copy(showInviteInput = !it.showInviteInput) }
+    }
+
     fun submitPasswordLogin() {
         val current = _uiState.value
         val origin = current.configuredServerOrigin ?: return
@@ -387,6 +420,7 @@ class OnboardingViewModel(
 
         val email = current.emailInput.trim()
         val password = current.passwordInput
+        val invite = current.inviteCodeInput.trim().takeIf { it.isNotEmpty() }
         if (email.isEmpty() || password.isEmpty()) {
             _uiState.update { it.copy(authError = "请输入邮箱和密码", isAuthOffline = false) }
             return
@@ -407,12 +441,15 @@ class OnboardingViewModel(
                         serverOrigin = origin,
                         email = email,
                         password = password,
+                        invite = invite,
                     )
                 }
                 _uiState.update {
                     it.copy(
                         isPasswordLoginInProgress = false,
                         passwordInput = "",
+                        inviteCodeInput = "",
+                        showInviteInput = false,
                         sessionExpiredNotice = false,
                         authError = null,
                         isAuthOffline = false,
@@ -420,11 +457,14 @@ class OnboardingViewModel(
                 }
             } catch (e: ApiError) {
                 val offline = e.errorCode == ApiErrorCode.NETWORK_ERROR
+                val needsInvite = e.errorCode == ApiErrorCode.INVITATION_REQUIRED ||
+                    e.errorCode == ApiErrorCode.INVITE_INVALID
                 _uiState.update {
                     it.copy(
                         isPasswordLoginInProgress = false,
                         authError = e.userMessage,
                         isAuthOffline = offline,
+                        showInviteInput = it.showInviteInput || needsInvite,
                     )
                 }
             } catch (e: Exception) {
@@ -445,9 +485,184 @@ class OnboardingViewModel(
         if (current.isBusySigningIn) return
 
         val normalizedProvider = provider.trim().lowercase()
+        val invite = current.inviteCodeInput.trim().takeIf { it.isNotEmpty() }
+
+        // Prefer Android native Google Credential Manager when server publishes googleClientId.
+        val googleClientId = current.googleClientId
+        if (normalizedProvider == "google" && googleClientId != null) {
+            val requestId = ++nextNativeGoogleRequestId
+            activeNativeGoogleRequestId = requestId
+            _uiState.update {
+                it.copy(
+                    activeOAuthProvider = "google",
+                    isNativeGoogleSignInInProgress = true,
+                    pendingNativeGoogleRequest = NativeGoogleSignInRequest(
+                        requestId = requestId,
+                        clientId = googleClientId,
+                    ),
+                    oauthFallbackNotice = null,
+                    authError = null,
+                    isAuthOffline = false,
+                    pendingOAuthLaunchUrl = null,
+                )
+            }
+            return
+        }
+
+        launchBrowserOAuth(
+            origin = origin,
+            normalizedProvider = normalizedProvider,
+            invite = invite,
+            fallbackNotice = null,
+        )
+    }
+
+    fun consumePendingNativeGoogleRequest(requestId: Long? = null) {
+        _uiState.update { current ->
+            val pending = current.pendingNativeGoogleRequest
+            if (pending != null && (requestId == null || pending.requestId == requestId)) {
+                current.copy(pendingNativeGoogleRequest = null)
+            } else {
+                current
+            }
+        }
+    }
+
+    fun onNativeGoogleIdTokenResult(
+        result: GoogleIdTokenFetchResult,
+        requestId: Long? = null,
+    ) {
+        val currentActiveId = activeNativeGoogleRequestId
+        if (requestId != null && (currentActiveId == null || requestId != currentActiveId)) {
+            return
+        }
+        activeNativeGoogleRequestId = null
+
+        val current = _uiState.value
+        val origin = current.configuredServerOrigin
+        val invite = current.inviteCodeInput.trim().takeIf { it.isNotEmpty() }
+
+        when (result) {
+            GoogleIdTokenFetchResult.Cancelled -> {
+                // User dismissed the system Google account picker or composition was cancelled:
+                // silently restore idle button state so UI can never get stuck.
+                _uiState.update {
+                    it.copy(
+                        activeOAuthProvider = null,
+                        isNativeGoogleSignInInProgress = false,
+                        pendingNativeGoogleRequest = null,
+                        oauthFallbackNotice = null,
+                    )
+                }
+            }
+
+            is GoogleIdTokenFetchResult.FallbackToBrowser -> {
+                if (origin == null) {
+                    _uiState.update {
+                        it.copy(
+                            activeOAuthProvider = null,
+                            isNativeGoogleSignInInProgress = false,
+                            pendingNativeGoogleRequest = null,
+                        )
+                    }
+                    return
+                }
+                launchBrowserOAuth(
+                    origin = origin,
+                    normalizedProvider = "google",
+                    invite = invite,
+                    fallbackNotice = "已自动切换浏览器完成 Google 登录",
+                )
+            }
+
+            is GoogleIdTokenFetchResult.Success -> {
+                if (origin == null) {
+                    _uiState.update {
+                        it.copy(
+                            activeOAuthProvider = null,
+                            isNativeGoogleSignInInProgress = false,
+                            pendingNativeGoogleRequest = null,
+                        )
+                    }
+                    return
+                }
+                _uiState.update {
+                    it.copy(
+                        activeOAuthProvider = "google",
+                        isNativeGoogleSignInInProgress = false,
+                        pendingNativeGoogleRequest = null,
+                        oauthFallbackNotice = null,
+                        isExchangingOAuthCode = true,
+                        authError = null,
+                        isAuthOffline = false,
+                    )
+                }
+                viewModelScope.launch {
+                    try {
+                        withContext(ioDispatcher) {
+                            authRepository.loginWithGoogleIdToken(
+                                serverOrigin = origin,
+                                idToken = result.idToken,
+                                invite = invite,
+                            )
+                        }
+                        _uiState.update {
+                            it.copy(
+                                activeOAuthProvider = null,
+                                isNativeGoogleSignInInProgress = false,
+                                isExchangingOAuthCode = false,
+                                pendingOAuthLaunchUrl = null,
+                                oauthFallbackNotice = null,
+                                inviteCodeInput = "",
+                                showInviteInput = false,
+                                sessionExpiredNotice = false,
+                                authError = null,
+                                isAuthOffline = false,
+                            )
+                        }
+                    } catch (e: ApiError) {
+                        val offline = e.errorCode == ApiErrorCode.NETWORK_ERROR
+                        val needsInvite = e.errorCode == ApiErrorCode.INVITATION_REQUIRED ||
+                            e.errorCode == ApiErrorCode.INVITE_INVALID
+                        _uiState.update {
+                            it.copy(
+                                activeOAuthProvider = null,
+                                isNativeGoogleSignInInProgress = false,
+                                isExchangingOAuthCode = false,
+                                authError = e.userMessage,
+                                isAuthOffline = offline,
+                                showInviteInput = it.showInviteInput || needsInvite,
+                            )
+                        }
+                    } catch (e: Exception) {
+                        _uiState.update {
+                            it.copy(
+                                activeOAuthProvider = null,
+                                isNativeGoogleSignInInProgress = false,
+                                isExchangingOAuthCode = false,
+                                authError = e.message?.takeIf { m -> m.isNotBlank() } ?: "Google 登录失败，请重试",
+                                isAuthOffline = false,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun launchBrowserOAuth(
+        origin: String,
+        normalizedProvider: String,
+        invite: String?,
+        fallbackNotice: String?,
+    ) {
+        activeNativeGoogleRequestId = null
         _uiState.update {
             it.copy(
                 activeOAuthProvider = normalizedProvider,
+                isNativeGoogleSignInInProgress = false,
+                pendingNativeGoogleRequest = null,
+                oauthFallbackNotice = fallbackNotice,
                 authError = null,
                 isAuthOffline = false,
                 pendingOAuthLaunchUrl = null,
@@ -460,6 +675,7 @@ class OnboardingViewModel(
                     authRepository.startAppOAuthLogin(
                         serverOrigin = origin,
                         provider = normalizedProvider,
+                        invite = invite,
                     )
                 }
                 _uiState.update {
@@ -472,6 +688,7 @@ class OnboardingViewModel(
                 _uiState.update {
                     it.copy(
                         activeOAuthProvider = null,
+                        oauthFallbackNotice = null,
                         authError = e.userMessage,
                         isAuthOffline = e.errorCode == ApiErrorCode.NETWORK_ERROR,
                     )
@@ -480,6 +697,7 @@ class OnboardingViewModel(
                 _uiState.update {
                     it.copy(
                         activeOAuthProvider = null,
+                        oauthFallbackNotice = null,
                         authError = e.message?.takeIf { m -> m.isNotBlank() } ?: "无法拉起第三方登录",
                         isAuthOffline = false,
                     )
@@ -493,6 +711,7 @@ class OnboardingViewModel(
     }
 
     fun cancelOAuthLogin() {
+        activeNativeGoogleRequestId = null
         viewModelScope.launch {
             runCatching {
                 withContext(ioDispatcher) { authRepository.clearPendingOAuthFlow() }
@@ -500,6 +719,9 @@ class OnboardingViewModel(
             _uiState.update {
                 it.copy(
                     activeOAuthProvider = null,
+                    isNativeGoogleSignInInProgress = false,
+                    pendingNativeGoogleRequest = null,
+                    oauthFallbackNotice = null,
                     isExchangingOAuthCode = false,
                     pendingOAuthLaunchUrl = null,
                 )
@@ -509,8 +731,11 @@ class OnboardingViewModel(
 
     fun handleOAuthCallback(payload: OAuthCallbackPayload) {
         if (payload is OAuthCallbackPayload.Linked) return
+        activeNativeGoogleRequestId = null
         _uiState.update {
             it.copy(
+                isNativeGoogleSignInInProgress = false,
+                pendingNativeGoogleRequest = null,
                 isExchangingOAuthCode = true,
                 authError = null,
                 isAuthOffline = false,
@@ -532,8 +757,12 @@ class OnboardingViewModel(
                     _uiState.update {
                         it.copy(
                             activeOAuthProvider = null,
+                            isNativeGoogleSignInInProgress = false,
                             isExchangingOAuthCode = false,
                             pendingOAuthLaunchUrl = null,
+                            oauthFallbackNotice = null,
+                            inviteCodeInput = "",
+                            showInviteInput = false,
                             sessionExpiredNotice = false,
                             authError = null,
                             isAuthOffline = false,
@@ -541,13 +770,18 @@ class OnboardingViewModel(
                     }
                 }
                 is OAuthLoginResult.Failed -> {
+                    val needsInvite = result.error.errorCode == ApiErrorCode.INVITATION_REQUIRED ||
+                        result.error.errorCode == ApiErrorCode.INVITE_INVALID
                     _uiState.update {
                         it.copy(
                             activeOAuthProvider = null,
+                            isNativeGoogleSignInInProgress = false,
                             isExchangingOAuthCode = false,
                             pendingOAuthLaunchUrl = null,
+                            oauthFallbackNotice = null,
                             authError = result.error.userMessage,
                             isAuthOffline = result.error.errorCode == ApiErrorCode.NETWORK_ERROR,
+                            showInviteInput = it.showInviteInput || needsInvite,
                         )
                     }
                 }
@@ -661,8 +895,13 @@ class OnboardingViewModel(
                 isLoadingProviders = false,
                 providersError = null,
                 passwordInput = "",
+                inviteCodeInput = "",
+                showInviteInput = false,
                 isPasswordLoginInProgress = false,
                 activeOAuthProvider = null,
+                isNativeGoogleSignInInProgress = false,
+                pendingNativeGoogleRequest = null,
+                oauthFallbackNotice = null,
                 isExchangingOAuthCode = false,
                 pendingOAuthLaunchUrl = null,
                 authError = null,
@@ -676,6 +915,7 @@ class OnboardingViewModel(
     }
 
     private fun cancelBackgroundAuthJobs() {
+        activeNativeGoogleRequestId = null
         providersJob?.cancel()
         providersJob = null
         deviceAuthJob?.cancel()

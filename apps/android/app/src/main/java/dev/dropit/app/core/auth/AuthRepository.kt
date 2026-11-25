@@ -168,6 +168,13 @@ interface AuthRepository {
     ): AppAuthTokenResponse =
         throw UnsupportedOperationException("loginWithPassword not implemented")
 
+    suspend fun loginWithGoogleIdToken(
+        serverOrigin: String,
+        idToken: String,
+        invite: String? = null,
+    ): AppAuthTokenResponse =
+        throw UnsupportedOperationException("loginWithGoogleIdToken not implemented")
+
     suspend fun startAppOAuthLogin(
         serverOrigin: String,
         provider: String,
@@ -280,6 +287,35 @@ class DefaultAuthRepository(
             serverOrigin = serverOrigin,
             email = cleanEmail,
             password = password,
+            deviceName = deviceNameProvider(),
+            invite = invite,
+        )
+        completeAuthorizationWithMetadata(
+            serverOrigin = serverOrigin,
+            token = response.accessToken,
+            scopes = response.parsedScopes,
+            mustChangePassword = response.mustChangePassword,
+        )
+        return response
+    }
+
+    override suspend fun loginWithGoogleIdToken(
+        serverOrigin: String,
+        idToken: String,
+        invite: String?,
+    ): AppAuthTokenResponse {
+        val cleanIdToken = idToken.trim()
+        if (cleanIdToken.isEmpty()) {
+            throw ApiError(
+                errorCode = ApiErrorCode.INVALID_INPUT,
+                rawCode = "INVALID_INPUT",
+                httpStatus = 400,
+                userMessage = "Google 登录凭据为空，请重试",
+            )
+        }
+        val response = apiClient.loginWithGoogleIdToken(
+            serverOrigin = serverOrigin,
+            idToken = cleanIdToken,
             deviceName = deviceNameProvider(),
             invite = invite,
         )

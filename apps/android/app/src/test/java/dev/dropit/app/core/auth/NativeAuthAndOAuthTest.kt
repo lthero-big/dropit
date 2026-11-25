@@ -73,10 +73,10 @@ class NativeAuthAndOAuthTest {
     }
 
     @Test
-    fun getAuthProviders_parsesEnabledProvidersAndPasswordFlag() = runTest {
+    fun getAuthProviders_parsesEnabledProvidersPasswordAndGoogleClientId() = runTest {
         server.enqueue(
             MockResponse().setResponseCode(200).setBody(
-                """{"providers":["github","google"],"password":true,"registration":"invite","setupRequired":false}""",
+                """{"providers":["github","google"],"password":true,"registration":"invite","setupRequired":false,"googleClientId":"12345.apps.googleusercontent.com"}""",
             ),
         )
         val info = authRepository.getAuthProviders(baseUrl)
@@ -84,10 +84,67 @@ class NativeAuthAndOAuthTest {
         assertTrue(info.password)
         assertEquals("invite", info.registration)
         assertFalse(info.setupRequired)
+        assertEquals("12345.apps.googleusercontent.com", info.googleClientId)
         val req = server.takeRequest()
         assertEquals("GET", req.method)
         assertEquals("/api/auth/providers", req.path)
         assertNull(req.getHeader("Authorization"))
+    }
+
+    @Test
+    fun loginWithGoogleIdToken_persistsTokenScopesAndMapsBusinessErrors() = runTest {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """
+                {
+                  "access_token": "tok_google_native_123456789012345678901234",
+                  "token_type": "Bearer",
+                  "scope": "read write account admin",
+                  "expires_in": 31536000,
+                  "user": { "id": "u-g1", "email": "google@example.com", "name": "Google User", "role": "admin" },
+                  "mustChangePassword": false
+                }
+                """.trimIndent(),
+            ),
+        )
+
+        val res = authRepository.loginWithGoogleIdToken(
+            serverOrigin = baseUrl,
+            idToken = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjMifQ.sig",
+            invite = "INV-2026",
+        )
+        assertEquals("u-g1", res.user.id)
+        assertTrue(res.user.isAdmin)
+        assertEquals(setOf("read", "write", "account", "admin"), res.parsedScopes)
+        assertEquals("tok_google_native_123456789012345678901234", tokenVault.getToken())
+        assertTrue(authRepository.sessionState.value.isSignedIn)
+        assertTrue(authRepository.hasAccountScope)
+        assertTrue(authRepository.hasAdminScope)
+
+        val req = server.takeRequest()
+        assertEquals("POST", req.method)
+        assertEquals("/api/auth/app/google/id-token", req.path)
+        val sent = Json.parseToJsonElement(req.body.readUtf8()) as JsonObject
+        assertEquals("eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjMifQ.sig", sent["idToken"]?.jsonPrimitive?.content)
+        assertEquals("dropit Android · Pixel9", sent["deviceName"]?.jsonPrimitive?.content)
+        assertEquals("INV-2026", sent["invite"]?.jsonPrimitive?.content)
+
+        // Business errors map to localized ApiErrorCode
+        for ((status, code, expected) in listOf(
+            Triple(403, "INVITATION_REQUIRED", ApiErrorCode.INVITATION_REQUIRED),
+            Triple(403, "USER_DISABLED", ApiErrorCode.USER_DISABLED),
+            Triple(409, "ACCOUNT_EXISTS", ApiErrorCode.ACCOUNT_EXISTS),
+            Triple(404, "PROVIDER_UNAVAILABLE", ApiErrorCode.PROVIDER_UNAVAILABLE),
+        )) {
+            server.enqueue(MockResponse().setResponseCode(status).setBody("""{"error":{"code":"$code"}}"""))
+            try {
+                authRepository.loginWithGoogleIdToken(baseUrl, "eyJ.eyJ.sig")
+                fail("Expected $code")
+            } catch (e: ApiError) {
+                assertEquals(status, e.httpStatus)
+                assertEquals(expected, e.errorCode)
+            }
+        }
     }
 
     @Test
@@ -311,5 +368,13 @@ class NativeAuthAndOAuthTest {
         assertEquals(expected, bus.consumePendingCallback())
         assertNull(bus.pendingCallback.value)
         assertNotNull(DefaultAuthRepository.generateAppState())
+
+        // Defensive parsing of intent:// bridge URI if passed raw by a ROM browser
+        val intentUri = "intent://auth/callback?code=bridge_code_1&state=bridge_state_1#Intent;scheme=dropit;package=dev.dropit.app;end"
+        assertTrue(OAuthCallbackParser.isCallbackUri(intentUri))
+        assertEquals(
+            OAuthCallbackPayload.LoginCode(code = "bridge_code_1", state = "bridge_state_1"),
+            OAuthCallbackParser.parse(intentUri),
+        )
     }
 }

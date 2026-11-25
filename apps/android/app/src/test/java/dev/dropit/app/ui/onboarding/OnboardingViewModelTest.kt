@@ -1,5 +1,10 @@
 package dev.dropit.app.ui.onboarding
 
+import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialInterruptedException
+import androidx.credentials.exceptions.GetCredentialProviderConfigurationException
+import androidx.credentials.exceptions.GetCredentialUnsupportedException
+import androidx.credentials.exceptions.NoCredentialException
 import dev.dropit.app.core.auth.AuthRepository
 import dev.dropit.app.core.auth.AuthSessionState
 import dev.dropit.app.core.auth.DeviceAuthState
@@ -379,6 +384,218 @@ class OnboardingViewModelTest {
         assertEquals(1, fakeAuth.providersCallCount)
     }
 
+    @Test
+    fun googleSignIn_withGoogleClientIdUsesNativePickerAndCompletesLogin() = runTest(testDispatcher) {
+        val fakeAuth = FakeAuthRepository(
+            providersInfo = AuthProvidersInfo(
+                providers = listOf("github", "google"),
+                password = true,
+                googleClientId = "99999.apps.googleusercontent.com",
+            ),
+            googleIdTokenResponse = AppAuthTokenResponse(
+                accessToken = "tok-native-google",
+                scope = "read write account admin",
+                user = AppAuthUser(id = "u-g", email = "g@example.com", name = "G", role = "admin"),
+            ),
+        )
+        val vm = OnboardingViewModel(
+            authRepository = fakeAuth,
+            initialServerOrigin = "https://dropit.example.com",
+            ioDispatcher = testDispatcher,
+            pollDelayMillis = {},
+        )
+        advanceUntilIdle()
+
+        vm.startOAuthLogin("google")
+        // Triggers native Credential Manager picker, NOT Custom Tabs
+        val req = vm.uiState.value.pendingNativeGoogleRequest
+        assertNotNull(req)
+        assertEquals("99999.apps.googleusercontent.com", req?.clientId)
+        assertTrue((req?.requestId ?: 0L) > 0L)
+        assertTrue(vm.uiState.value.isNativeGoogleSignInInProgress)
+        assertNull(vm.uiState.value.pendingOAuthLaunchUrl)
+
+        vm.consumePendingNativeGoogleRequest(req!!.requestId)
+        assertNull(vm.uiState.value.pendingNativeGoogleRequest)
+
+        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Success("eyJ.google.idtoken"), requestId = req.requestId)
+        advanceUntilIdle()
+
+        assertEquals(listOf("eyJ.google.idtoken" to null), fakeAuth.googleIdTokenCalls)
+        assertTrue(fakeAuth.sessionState.value.isSignedIn)
+        assertTrue(fakeAuth.sessionState.value.hasAccountScope)
+        assertTrue(fakeAuth.sessionState.value.hasAdminScope)
+        assertNull(vm.uiState.value.authError)
+        assertNull(vm.uiState.value.activeOAuthProvider)
+        assertFalse(vm.uiState.value.isBusySigningIn)
+    }
+
+    @Test
+    fun googleSignIn_userCancelRestoresIdleSilentlyWithoutErrorOrBrowserFallback() = runTest(testDispatcher) {
+        val fakeAuth = FakeAuthRepository(
+            providersInfo = AuthProvidersInfo(
+                providers = listOf("google"),
+                password = true,
+                googleClientId = "99999.apps.googleusercontent.com",
+            ),
+        )
+        val vm = OnboardingViewModel(
+            authRepository = fakeAuth,
+            initialServerOrigin = "https://dropit.example.com",
+            ioDispatcher = testDispatcher,
+            pollDelayMillis = {},
+        )
+        advanceUntilIdle()
+
+        vm.startOAuthLogin("google")
+        val firstReq = vm.uiState.value.pendingNativeGoogleRequest!!
+        vm.consumePendingNativeGoogleRequest(firstReq.requestId)
+        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Cancelled, requestId = firstReq.requestId)
+        advanceUntilIdle()
+
+        assertNull(vm.uiState.value.activeOAuthProvider)
+        assertFalse(vm.uiState.value.isNativeGoogleSignInInProgress)
+        assertNull(vm.uiState.value.pendingOAuthLaunchUrl)
+        assertNull(vm.uiState.value.authError)
+        assertEquals(0, fakeAuth.startOAuthLoginCalls.size)
+        assertFalse(fakeAuth.sessionState.value.isSignedIn)
+
+        // Rapid retry with the same clientId must generate a strictly newer requestId
+        vm.startOAuthLogin("google")
+        val secondReq = vm.uiState.value.pendingNativeGoogleRequest!!
+        assertEquals(firstReq.clientId, secondReq.clientId)
+        assertTrue(secondReq.requestId > firstReq.requestId)
+
+        // Stale result from firstReq must be ignored while secondReq is active
+        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Cancelled, requestId = firstReq.requestId)
+        assertTrue(vm.uiState.value.isNativeGoogleSignInInProgress)
+    }
+
+    @Test
+    fun googleSignIn_unavailableOrExceptionFallsBackToCustomTabsAutomatically() = runTest(testDispatcher) {
+        // Verify Credential Manager exception classification
+        assertEquals(
+            GoogleIdTokenFetchResult.Cancelled,
+            AndroidGoogleIdTokenFetcher.classifyCredentialException(GetCredentialCancellationException("cancelled")),
+        )
+        assertTrue(
+            AndroidGoogleIdTokenFetcher.classifyCredentialException(NoCredentialException("none"))
+                is GoogleIdTokenFetchResult.FallbackToBrowser,
+        )
+        assertTrue(
+            AndroidGoogleIdTokenFetcher.classifyCredentialException(GetCredentialUnsupportedException("no gms"))
+                is GoogleIdTokenFetchResult.FallbackToBrowser,
+        )
+        assertTrue(
+            AndroidGoogleIdTokenFetcher.classifyCredentialException(GetCredentialProviderConfigurationException("bad cfg"))
+                is GoogleIdTokenFetchResult.FallbackToBrowser,
+        )
+        assertTrue(
+            AndroidGoogleIdTokenFetcher.classifyCredentialException(GetCredentialInterruptedException("interrupted"))
+                is GoogleIdTokenFetchResult.FallbackToBrowser,
+        )
+        assertTrue(
+            AndroidGoogleIdTokenFetcher.classifyCredentialException(IllegalStateException("play services missing"))
+                is GoogleIdTokenFetchResult.FallbackToBrowser,
+        )
+
+        val fakeAuth = FakeAuthRepository(
+            providersInfo = AuthProvidersInfo(
+                providers = listOf("google"),
+                password = true,
+                googleClientId = "99999.apps.googleusercontent.com",
+            ),
+        )
+        val vm = OnboardingViewModel(
+            authRepository = fakeAuth,
+            initialServerOrigin = "https://dropit.example.com",
+            ioDispatcher = testDispatcher,
+            pollDelayMillis = {},
+        )
+        advanceUntilIdle()
+
+        vm.startOAuthLogin("google")
+        vm.consumePendingNativeGoogleRequest()
+        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.FallbackToBrowser("unsupported"))
+        advanceUntilIdle()
+
+        assertEquals(1, fakeAuth.startOAuthLoginCalls.size)
+        assertEquals("google", fakeAuth.startOAuthLoginCalls.first().first)
+        assertNotNull(vm.uiState.value.pendingOAuthLaunchUrl)
+        assertTrue(vm.uiState.value.pendingOAuthLaunchUrl!!.contains("/api/auth/google?"))
+        assertNotNull(vm.uiState.value.oauthFallbackNotice)
+        assertNull(vm.uiState.value.authError)
+    }
+
+    @Test
+    fun googleSignIn_businessErrorsDisplayLocalizedMessageAndSupportInviteRetry() = runTest(testDispatcher) {
+        val fakeAuth = FakeAuthRepository(
+            providersInfo = AuthProvidersInfo(
+                providers = listOf("google"),
+                password = true,
+                registration = "invite",
+                googleClientId = "99999.apps.googleusercontent.com",
+            ),
+            googleIdTokenError = ApiError(
+                errorCode = ApiErrorCode.INVITATION_REQUIRED,
+                rawCode = "INVITATION_REQUIRED",
+                httpStatus = 403,
+                userMessage = ApiErrorCode.INVITATION_REQUIRED.defaultMessage,
+            ),
+        )
+        val vm = OnboardingViewModel(
+            authRepository = fakeAuth,
+            initialServerOrigin = "https://dropit.example.com",
+            ioDispatcher = testDispatcher,
+            pollDelayMillis = {},
+        )
+        advanceUntilIdle()
+
+        // 1. INVITATION_REQUIRED reveals invite input field & shows localized error
+        vm.startOAuthLogin("google")
+        vm.consumePendingNativeGoogleRequest()
+        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Success("tok-1"))
+        advanceUntilIdle()
+
+        assertEquals(ApiErrorCode.INVITATION_REQUIRED.defaultMessage, vm.uiState.value.authError)
+        assertTrue(vm.uiState.value.showInviteInput)
+        assertFalse(fakeAuth.sessionState.value.isSignedIn)
+
+        // 2. USER_DISABLED & ACCOUNT_EXISTS display clear Chinese messages
+        fakeAuth.googleIdTokenError = ApiError(
+            errorCode = ApiErrorCode.USER_DISABLED,
+            rawCode = "USER_DISABLED",
+            httpStatus = 403,
+            userMessage = ApiErrorCode.USER_DISABLED.defaultMessage,
+        )
+        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Success("tok-2"))
+        advanceUntilIdle()
+        assertEquals(ApiErrorCode.USER_DISABLED.defaultMessage, vm.uiState.value.authError)
+
+        fakeAuth.googleIdTokenError = ApiError(
+            errorCode = ApiErrorCode.ACCOUNT_EXISTS,
+            rawCode = "ACCOUNT_EXISTS",
+            httpStatus = 409,
+            userMessage = ApiErrorCode.ACCOUNT_EXISTS.defaultMessage,
+        )
+        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Success("tok-3"))
+        advanceUntilIdle()
+        assertEquals(ApiErrorCode.ACCOUNT_EXISTS.defaultMessage, vm.uiState.value.authError)
+
+        // 3. Enter invite code and retry -> succeeds and forwards invite to repository
+        fakeAuth.googleIdTokenError = null
+        vm.onInviteCodeChanged("INV-999")
+        vm.startOAuthLogin("google")
+        vm.consumePendingNativeGoogleRequest()
+        vm.onNativeGoogleIdTokenResult(GoogleIdTokenFetchResult.Success("tok-4"))
+        advanceUntilIdle()
+
+        assertEquals("tok-4" to "INV-999", fakeAuth.googleIdTokenCalls.last())
+        assertTrue(fakeAuth.sessionState.value.isSignedIn)
+        assertNull(vm.uiState.value.authError)
+        assertEquals("", vm.uiState.value.inviteCodeInput)
+    }
+
     private fun sampleAuth(code: String, interval: Int = 5) = DeviceAuthorizeResponse(
         deviceCode = "dev-$code",
         userCode = code,
@@ -396,6 +613,12 @@ class OnboardingViewModelTest {
             accessToken = "tok-default",
             scope = "read write account",
             user = AppAuthUser(id = "u1", email = "u@example.com", name = "User", role = "user"),
+        ),
+        var googleIdTokenError: Throwable? = null,
+        var googleIdTokenResponse: AppAuthTokenResponse = AppAuthTokenResponse(
+            accessToken = "tok-google-default",
+            scope = "read write account",
+            user = AppAuthUser(id = "u-google", email = "google@example.com", name = "Google User", role = "user"),
         ),
         var oauthLoginCallbackResult: OAuthLoginResult = OAuthLoginResult.Failed(
             ApiError.fromOAuthErrorCode("OAUTH_STATE_INVALID"),
@@ -418,6 +641,8 @@ class OnboardingViewModelTest {
         override val deviceAuthState: StateFlow<DeviceAuthState> = _deviceAuthState.asStateFlow()
 
         val verifiedUrls = mutableListOf<String>()
+        val googleIdTokenCalls = mutableListOf<Pair<String, String?>>()
+        val startOAuthLoginCalls = mutableListOf<Pair<String, String?>>()
         var startDeviceAuthCallCount = 0
         var providersCallCount = 0
 
@@ -455,16 +680,35 @@ class OnboardingViewModelTest {
             return passwordLoginResponse
         }
 
+        override suspend fun loginWithGoogleIdToken(
+            serverOrigin: String,
+            idToken: String,
+            invite: String?,
+        ): AppAuthTokenResponse {
+            googleIdTokenCalls.add(idToken to invite)
+            googleIdTokenError?.let { throw it }
+            _sessionState.value = AuthSessionState(
+                serverOrigin = serverOrigin,
+                isSignedIn = true,
+                tokenScopes = googleIdTokenResponse.parsedScopes,
+                mustChangePassword = googleIdTokenResponse.mustChangePassword,
+            )
+            return googleIdTokenResponse
+        }
+
         override suspend fun startAppOAuthLogin(
             serverOrigin: String,
             provider: String,
             invite: String?,
-        ): PendingOAuthLogin = PendingOAuthLogin(
-            provider = provider,
-            serverOrigin = serverOrigin,
-            state = "state-123456",
-            launchUrl = "$serverOrigin/api/auth/$provider?app_redirect=dropit://auth/callback&app_state=state-123456",
-        )
+        ): PendingOAuthLogin {
+            startOAuthLoginCalls.add(provider to invite)
+            return PendingOAuthLogin(
+                provider = provider,
+                serverOrigin = serverOrigin,
+                state = "state-123456",
+                launchUrl = "$serverOrigin/api/auth/$provider?app_redirect=dropit://auth/callback&app_state=state-123456",
+            )
+        }
 
         override suspend fun handleOAuthLoginCallback(payload: OAuthCallbackPayload): OAuthLoginResult {
             val res = oauthLoginCallbackResult
