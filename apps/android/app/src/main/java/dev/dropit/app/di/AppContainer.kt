@@ -21,18 +21,27 @@ import dev.dropit.app.core.repository.DefaultBoardRepository
 import dev.dropit.app.core.repository.DefaultSpaceRepository
 import dev.dropit.app.core.repository.ItemShareRepository
 import dev.dropit.app.core.repository.MediaRepository
-import dev.dropit.app.core.repository.PlaceholderAppUpdater
 import dev.dropit.app.core.repository.PlaceholderItemShareRepository
 import dev.dropit.app.core.repository.PlaceholderMediaRepository
 import dev.dropit.app.core.repository.PlaceholderRoomRepository
-import dev.dropit.app.core.repository.PlaceholderShareInbox
-import dev.dropit.app.core.repository.PlaceholderTransferManager
 import dev.dropit.app.core.repository.RoomRepository
 import dev.dropit.app.core.repository.ShareInbox
 import dev.dropit.app.core.repository.SpaceRepository
 import dev.dropit.app.core.repository.TransferManager
+import dev.dropit.app.data.share.AndroidShareIntentExtractor
+import dev.dropit.app.data.share.DefaultShareInbox
+import dev.dropit.app.data.transfer.AndroidDownloadSink
+import dev.dropit.app.data.transfer.AndroidTransferWorkScheduler
+import dev.dropit.app.data.transfer.AndroidUploadUriStager
+import dev.dropit.app.data.transfer.DefaultTransferManager
+import dev.dropit.app.data.transfer.DefaultTransferScopeProvider
+import dev.dropit.app.data.transfer.TransferDatabase
+import dev.dropit.app.data.transfer.TransferEngine
+import dev.dropit.app.data.update.AndroidApkInstaller
+import dev.dropit.app.data.update.DefaultAppUpdater
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
@@ -126,10 +135,64 @@ class DefaultAppContainer(context: Context) : AppContainer {
 
     override val boardRepository: BoardRepository = DefaultBoardRepository(apiClient)
 
-    // Default placeholders replaced in Stage 2A
-    override val transferManager: TransferManager = PlaceholderTransferManager()
-    override val shareInbox: ShareInbox = PlaceholderShareInbox()
-    override val appUpdater: AppUpdater = PlaceholderAppUpdater()
+    // Stage 2A concrete engines: Room + WorkManager transfer queue, persistent share staging, self-hosted APK updater
+    private val transferDatabase: TransferDatabase by lazy { TransferDatabase.create(appContext) }
+    private val uploadStagingDir: File = File(appContext.filesDir, "transfer_staging")
+    private val shareStagingDir: File = File(appContext.filesDir, DefaultShareInbox.STAGING_DIR_NAME)
+    private val downloadTempDir: File = File(appContext.cacheDir, "download_parts")
+
+    private val transferScopeProvider: DefaultTransferScopeProvider by lazy {
+        DefaultTransferScopeProvider(
+            settingsStore = settingsStore,
+            tokenVault = tokenVault,
+            authRepository = authRepository,
+            apiClient = apiClient,
+            dao = transferDatabase.transferDao(),
+        )
+    }
+
+    private val transferEngine: TransferEngine by lazy {
+        TransferEngine(
+            apiClient = apiClient,
+            dao = transferDatabase.transferDao(),
+            downloadSink = AndroidDownloadSink(appContext),
+            downloadTempDir = downloadTempDir,
+            ownedStagingRoots = listOf(uploadStagingDir, shareStagingDir, downloadTempDir),
+        )
+    }
+
+    private val defaultTransferManager: DefaultTransferManager by lazy {
+        DefaultTransferManager(
+            dao = transferDatabase.transferDao(),
+            engine = transferEngine,
+            scheduler = AndroidTransferWorkScheduler(appContext),
+            scopeProvider = transferScopeProvider,
+            uploadUriStager = AndroidUploadUriStager(appContext),
+            uploadStagingDir = uploadStagingDir,
+            downloadTempDir = downloadTempDir,
+        )
+    }
+
+    private val defaultShareInbox: DefaultShareInbox by lazy {
+        DefaultShareInbox(
+            stagingRootDir = shareStagingDir,
+            extractor = AndroidShareIntentExtractor(appContext),
+            json = json,
+        )
+    }
+
+    private val defaultAppUpdater: DefaultAppUpdater by lazy {
+        DefaultAppUpdater(
+            apiClient = apiClient,
+            settingsStore = settingsStore,
+            cacheDir = appContext.cacheDir,
+            installer = AndroidApkInstaller(appContext),
+        )
+    }
+
+    override val transferManager: TransferManager get() = defaultTransferManager
+    override val shareInbox: ShareInbox get() = defaultShareInbox
+    override val appUpdater: AppUpdater get() = defaultAppUpdater
 
     // Default placeholders replaced in Stage 3A
     override val roomRepository: RoomRepository = PlaceholderRoomRepository()
@@ -144,6 +207,7 @@ class DefaultAppContainer(context: Context) : AppContainer {
         val result = legacyMigrator.migrateIfNeeded()
         settingsStore.getOrCreateDeviceId()
         authRepository.refreshSessionState()
+        defaultTransferManager.recoverInterruptedTasks()
         return result
     }
 
@@ -152,6 +216,8 @@ class DefaultAppContainer(context: Context) : AppContainer {
         roomRepository.clearRoomState()
         transferManager.clearAllForScopeSwitch()
         shareInbox.discardPendingShare()
+        defaultAppUpdater.resetInstallState()
+        defaultAppUpdater.clearCachedUpdates()
         mediaRepository.clearCaches()
         authRepository.logout(clearServer = true)
     }
