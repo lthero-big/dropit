@@ -15,7 +15,8 @@ class ServerUrlException(message: String) : IllegalArgumentException(message)
 
 object ServerUrl {
     val INSTALL_KINDS: Set<String> = setOf("docker", "docker-build", "source")
-    private val SCHEME_REGEX = Regex("^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$")
+    private val SCHEME_WITH_SLASHES_REGEX = Regex("^([a-zA-Z][a-zA-Z0-9+.-]*):\\/\\/(.*)$")
+    private val SCHEME_NO_SLASHES_REGEX = Regex("^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$")
     private val SEMVER_REGEX = Regex("^\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]{1,40})?$")
     private val DEVICE_ID_REGEX = Regex("^[A-Za-z0-9_-]{6,64}$")
     private val COMMIT_HEX_REGEX = Regex("^[0-9a-f]{7,40}$")
@@ -35,16 +36,30 @@ object ServerUrl {
         if (text.isEmpty()) {
             throw ServerUrlException("请输入服务器地址")
         }
-        val schemeMatch = SCHEME_REGEX.matchEntire(text)
-        if (schemeMatch == null) {
-            text = "https://$text"
-        } else {
-            val scheme = schemeMatch.groupValues[1].lowercase()
+        val schemeWithSlashes = SCHEME_WITH_SLASHES_REGEX.matchEntire(text)
+        if (schemeWithSlashes != null) {
+            val scheme = schemeWithSlashes.groupValues[1].lowercase()
             if (scheme != "https") {
                 throw ServerUrlException("只支持 https:// 地址")
             }
-            if (!schemeMatch.groupValues[2].startsWith("//")) {
-                throw ServerUrlException("地址格式不正确")
+        } else {
+            val firstDelimiter = text.indexOfAny(charArrayOf('/', '?', '#'))
+            val firstSegment = if (firstDelimiter < 0) text else text.substring(0, firstDelimiter)
+            val colonIdx = firstSegment.indexOf(':')
+            if (colonIdx >= 0 && !firstSegment.startsWith("[")) {
+                val afterColon = firstSegment.substring(colonIdx + 1)
+                val isBareHostPort = colonIdx > 0 && afterColon.isNotEmpty() && afterColon.all { it.isDigit() }
+                if (isBareHostPort) {
+                    text = "https://$text"
+                } else {
+                    val schemeMatch = SCHEME_NO_SLASHES_REGEX.matchEntire(text)
+                    if (schemeMatch != null && schemeMatch.groupValues[1].lowercase() != "https") {
+                        throw ServerUrlException("只支持 https:// 地址")
+                    }
+                    throw ServerUrlException("地址格式不正确")
+                }
+            } else {
+                text = "https://$text"
             }
         }
 

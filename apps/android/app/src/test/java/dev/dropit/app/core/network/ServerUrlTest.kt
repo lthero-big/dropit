@@ -14,6 +14,9 @@ class ServerUrlTest {
     @Test
     fun normalizeServerUrl_acceptsBareHostAndHttps() {
         assertEquals("https://dropit.lthero.com", ServerUrl.normalizeServerUrl("dropit.lthero.com"))
+        assertEquals("https://dropit.lthero.com:8443", ServerUrl.normalizeServerUrl("dropit.lthero.com:8443"))
+        assertEquals("https://dropit.lthero.com:8443/sub", ServerUrl.normalizeServerUrl("dropit.lthero.com:8443/sub/"))
+        assertEquals("https://dropit.lthero.com", ServerUrl.normalizeServerUrl("dropit.lthero.com:443/"))
         assertEquals("https://dropit.lthero.com", ServerUrl.normalizeServerUrl("  https://dropit.lthero.com/  "))
         assertEquals("https://dropit.lthero.com", ServerUrl.normalizeServerUrl("https://DROPIT.LTHERO.COM:443///"))
         assertEquals("https://dropit.lthero.com:8443/sub", ServerUrl.normalizeServerUrl("https://dropit.lthero.com:8443/sub/"))
@@ -28,6 +31,7 @@ class ServerUrlTest {
         assertThrowsUrlError("HTTP://dropit.lthero.com", "只支持 https:// 地址")
         assertThrowsUrlError("ftp://dropit.lthero.com", "只支持 https:// 地址")
         assertThrowsUrlError("javascript:alert(1)", "只支持 https:// 地址")
+        assertThrowsUrlError("https:foo", "地址格式不正确")
         assertThrowsUrlError("https://user:pass@dropit.lthero.com", "地址里不能带用户名或密码")
         assertThrowsUrlError("https://user@dropit.lthero.com", "地址里不能带用户名或密码")
         assertThrowsUrlError("https://:@dropit.lthero.com", "地址里不能带用户名或密码")

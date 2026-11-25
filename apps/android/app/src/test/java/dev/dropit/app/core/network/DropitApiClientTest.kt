@@ -4,7 +4,9 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -134,6 +136,39 @@ class DropitApiClientTest {
 
         val event = expiredDeferred.await()
         assertEquals("/api/spaces", event.path)
+        assertEquals(baseUrl, event.serverOrigin)
+    }
+
+    @Test
+    fun executeNoContent_preservesNonDefaultPortAndIpv6InSessionExpiredOrigin() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(401)
+                .setBody("""{"error":{"code":"UNAUTHENTICATED"}}"""),
+        )
+
+        val client = createClient()
+        assertEquals("https://dropit.lthero.com", client.originOf("https://dropit.lthero.com:443/api/me".toHttpUrl()))
+        assertEquals("https://dropit.lthero.com:8443", client.originOf("https://dropit.lthero.com:8443/api/me".toHttpUrl()))
+        assertEquals("https://[::1]:8443", client.originOf("https://[::1]:8443/api/me".toHttpUrl()))
+
+        val expiredDeferred = async(start = CoroutineStart.UNDISPATCHED) { client.sessionExpiredEvents.first() }
+        val request = Request.Builder()
+            .url("$baseUrl/api/spaces/sp-1/uploads/up-1")
+            .delete()
+            .build()
+
+        try {
+            client.executeNoContent(request, authenticated = true)
+            fail("Expected 401 ApiError")
+        } catch (e: ApiError) {
+            assertEquals(401, e.httpStatus)
+            assertEquals(ApiErrorCode.UNAUTHENTICATED, e.errorCode)
+        }
+
+        val event = expiredDeferred.await()
+        assertEquals(baseUrl, event.serverOrigin)
+        assertEquals("/api/spaces/sp-1/uploads/up-1", event.path)
     }
 
     @Test

@@ -15,6 +15,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -291,18 +292,20 @@ class DropitApiClient(
         authenticated: Boolean,
         deserializer: DeserializationStrategy<T>,
     ): T {
-        val origin = "${request.url.scheme}://${request.url.host}" +
-            if ((request.url.scheme == "https" && request.url.port != 443) || (request.url.scheme == "http" && request.url.port != 80)) {
-                ":${request.url.port}"
-            } else {
-                ""
-            }
+        val origin = originOf(request.url)
         return executeJson(request, authenticated, origin, request.url.encodedPath, deserializer)
     }
 
     suspend fun executeNoContent(request: Request, authenticated: Boolean) {
-        val origin = "${request.url.scheme}://${request.url.host}"
+        val origin = originOf(request.url)
         executeNoContent(request, authenticated, origin, request.url.encodedPath)
+    }
+
+    internal fun originOf(url: HttpUrl): String {
+        val hostPart = if (url.host.contains(':')) "[${url.host}]" else url.host
+        val isDefaultPort = (url.scheme == "https" && url.port == 443) || (url.scheme == "http" && url.port == 80)
+        val portPart = if (isDefaultPort) "" else ":${url.port}"
+        return "${url.scheme}://$hostPart$portPart"
     }
 
     fun emitSessionExpiredIf401(statusCode: Int, serverOrigin: String, path: String) {
