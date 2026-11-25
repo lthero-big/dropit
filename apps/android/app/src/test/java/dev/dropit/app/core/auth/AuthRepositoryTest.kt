@@ -207,4 +207,30 @@ class AuthRepositoryTest {
         assertNull(tokenVault.getToken())
         assertNull(settingsStore.getServerOrigin())
     }
+
+    @Test
+    fun clearLocalSession_neverCallsRemoteLogoutAndOptionallyPreservesServer() = runTest {
+        settingsStore.setServerOrigin(baseUrl)
+        tokenVault.saveToken("tok_local_only_12345678901234567890123456")
+        authRepository.refreshSessionState()
+        assertTrue(authRepository.sessionState.value.isSignedIn)
+
+        authRepository.clearLocalSession(clearServer = false)
+
+        assertEquals(0, server.requestCount)
+        assertNull(tokenVault.getToken())
+        assertEquals(baseUrl, settingsStore.getServerOrigin())
+        assertFalse(authRepository.sessionState.value.isSignedIn)
+        assertEquals(DeviceAuthState.Idle, authRepository.deviceAuthState.value)
+
+        // Clearing local session with clearServer = true also never calls POST /api/auth/logout
+        tokenVault.saveToken("tok_local_only_2_123456789012345678901234")
+        authRepository.refreshSessionState()
+        authRepository.clearLocalSession(clearServer = true)
+
+        assertEquals(0, server.requestCount)
+        assertNull(tokenVault.getToken())
+        assertNull(settingsStore.getServerOrigin())
+        assertFalse(authRepository.sessionState.value.isSignedIn)
+    }
 }

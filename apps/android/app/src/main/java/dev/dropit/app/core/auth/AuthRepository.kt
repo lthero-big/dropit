@@ -75,6 +75,7 @@ interface AuthRepository {
     ): Flow<DeviceAuthState>
 
     suspend fun completeAuthorization(serverOrigin: String, token: String)
+    suspend fun clearLocalSession(clearServer: Boolean = false)
     suspend fun logout(clearServer: Boolean = false)
     fun resetDeviceAuthState()
 
@@ -214,17 +215,21 @@ class DefaultAuthRepository(
         refreshSessionState()
     }
 
-    override suspend fun logout(clearServer: Boolean) {
-        // Best-effort remote token revocation; always clear local credentials even if offline or 401.
-        if (tokenVault.hasToken() && !settingsStore.getServerOrigin().isNullOrBlank()) {
-            runCatching { apiClient.logout() }
-        }
+    override suspend fun clearLocalSession(clearServer: Boolean) {
         tokenVault.clearToken()
         if (clearServer) {
             settingsStore.clearServerConfig()
         }
         _deviceAuthState.value = DeviceAuthState.Idle
         refreshSessionState()
+    }
+
+    override suspend fun logout(clearServer: Boolean) {
+        // Best-effort remote token revocation for explicit user sign-out; always clear local credentials.
+        if (tokenVault.hasToken() && !settingsStore.getServerOrigin().isNullOrBlank()) {
+            runCatching { apiClient.logout() }
+        }
+        clearLocalSession(clearServer = clearServer)
     }
 
     override fun resetDeviceAuthState() {

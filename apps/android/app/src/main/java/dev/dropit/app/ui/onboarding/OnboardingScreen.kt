@@ -43,7 +43,6 @@ import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.ErrorOutline
-import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.Button
@@ -82,6 +81,8 @@ import dev.dropit.app.BuildConfig
 import dev.dropit.app.core.auth.DeviceAuthState
 import dev.dropit.app.core.network.ApiErrorCode
 import dev.dropit.app.core.network.ServerUrl
+import dev.dropit.app.ui.theme.DropitBrandLockup
+import dev.dropit.app.ui.theme.DropitBrandMark
 import dev.dropit.app.ui.theme.DropitElevation
 import dev.dropit.app.ui.theme.DropitMonoTypography
 import dev.dropit.app.ui.theme.DropitMotion
@@ -167,40 +168,10 @@ private fun ServerConfigContent(
             Spacer(modifier = Modifier.height(16.dp))
 
             // Brand masthead
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Surface(
-                    shape = shapes.md,
-                    color = colors.brand,
-                    tonalElevation = 0.dp,
-                ) {
-                    Box(
-                        modifier = Modifier.size(36.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = "d",
-                            style = MaterialTheme.typography.titleLarge,
-                            color = colors.brandFg,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
-                }
-                Column {
-                    Text(
-                        text = "dropit",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = colors.fg,
-                    )
-                    Text(
-                        text = "跨设备纸感云剪贴板",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.fg3,
-                    )
-                }
-            }
+            DropitBrandLockup(
+                markSize = 40.dp,
+                subtitle = "跨设备纸感云剪贴板",
+            )
 
             Spacer(modifier = Modifier.height(28.dp))
 
@@ -476,14 +447,9 @@ private fun DeviceAuthContent(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Key,
-                            contentDescription = null,
-                            tint = colors.brand,
-                            modifier = Modifier.size(20.dp),
-                        )
+                        DropitBrandMark(size = 28.dp)
                         Text(
                             text = "设备码授权登录",
                             style = MaterialTheme.typography.titleMedium,

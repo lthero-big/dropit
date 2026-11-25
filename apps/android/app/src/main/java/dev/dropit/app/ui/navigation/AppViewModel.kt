@@ -154,7 +154,10 @@ class AppViewModel(
     /**
      * Single owner for global 401 session expiration handling.
      * Deduplicated per active session generation so concurrent 401 responses never trigger
-     * duplicate logout calls while still handling future 401s after re-authentication.
+     * duplicate clears while still handling future 401s after re-authentication.
+     *
+     * Never calls `POST /api/auth/logout` remotely on passive 401 so a transient or
+     * endpoint-specific 401 cannot revoke a still-valid device token.
      */
     fun markSessionExpired() {
         viewModelScope.launch(ioDispatcher) {
@@ -169,7 +172,7 @@ class AppViewModel(
                 handledGenerationFor401 = currentGen
                 sessionExpiredNotice = true
                 container.realtimeClient.disconnect(clearState = false)
-                container.authRepository.logout(clearServer = false)
+                container.authRepository.clearLocalSession(clearServer = false)
                 val origin = container.settingsStore.getServerOrigin()
                 updateRouteFromSession(origin, isSignedIn = false)
             }
@@ -182,6 +185,33 @@ class AppViewModel(
         }
     }
 
+    /**
+     * Explicit user-initiated account switch on the same server.
+     * Revokes the current device token remotely and wipes account-scoped local state
+     * (temporary room state, transfer queue, pending share, media caches) while preserving
+     * `serverOrigin` so the user can sign in with another account directly.
+     */
+    fun switchAccount() {
+        if (_uiState.value.isLoggingOut) return
+        _uiState.update { it.copy(isLoggingOut = true) }
+        viewModelScope.launch(ioDispatcher) {
+            try {
+                sessionExpiredNotice = false
+                container.realtimeClient.disconnect(clearState = true)
+                container.roomRepository.clearRoomState()
+                container.transferManager.clearAllForScopeSwitch()
+                container.shareInbox.discardPendingShare()
+                container.mediaRepository.clearCaches()
+                container.authRepository.logout(clearServer = false)
+            } finally {
+                sessionExpiredNotice = false
+                _uiState.update { it.copy(isLoggingOut = false) }
+                val session = container.authRepository.sessionState.value
+                updateRouteFromSession(session.serverOrigin, session.isSignedIn)
+            }
+        }
+    }
+
     fun logoutAndSwitchServer() {
         if (_uiState.value.isLoggingOut) return
         _uiState.update { it.copy(isLoggingOut = true) }
@@ -190,6 +220,7 @@ class AppViewModel(
                 sessionExpiredNotice = false
                 container.resetForServerSwitch()
             } finally {
+                sessionExpiredNotice = false
                 _uiState.update { it.copy(isLoggingOut = false) }
                 val session = container.authRepository.sessionState.value
                 updateRouteFromSession(session.serverOrigin, session.isSignedIn)

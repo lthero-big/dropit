@@ -334,11 +334,16 @@ class OnboardingViewModelTest {
             _sessionState.value = AuthSessionState(serverOrigin = serverOrigin, isSignedIn = true)
         }
 
-        override suspend fun logout(clearServer: Boolean) {
+        override suspend fun clearLocalSession(clearServer: Boolean) {
             _sessionState.value = AuthSessionState(
                 serverOrigin = if (clearServer) null else _sessionState.value.serverOrigin,
                 isSignedIn = false,
             )
+            _deviceAuthState.value = DeviceAuthState.Idle
+        }
+
+        override suspend fun logout(clearServer: Boolean) {
+            clearLocalSession(clearServer)
         }
 
         override fun resetDeviceAuthState() {
