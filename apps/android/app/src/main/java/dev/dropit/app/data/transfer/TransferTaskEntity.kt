@@ -81,6 +81,8 @@ data class TransferTaskEntity(
             status = domainStatus,
             errorMessage = errorMessage,
             localResultUri = localResultUri,
+            remoteItemId = remoteItemId,
+            shareAfterDownload = shareAfterDownload,
             createdAt = createdAt,
             updatedAt = updatedAt,
         )

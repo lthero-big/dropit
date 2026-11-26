@@ -554,13 +554,28 @@ class TransferEngine(
             val finalBytes = partFile.length()
             runCatching { partFile.delete() }
 
+            val finishedAt = clockMs()
             dao.markSucceeded(
                 id = entity.id,
                 status = TransferStatus.SUCCEEDED.name,
                 transferredBytes = finalBytes,
                 localResultUri = saved.uriString,
-                updatedAt = clockMs(),
+                updatedAt = finishedAt,
             )
+            if (!entity.shareAfterDownload) {
+                dao.upsertSavedDownload(
+                    SavedDownloadEntity(
+                        serverOrigin = entity.serverOrigin,
+                        accountId = SavedDownloadEntity.normalizeAccountId(entity.accountId),
+                        remoteItemId = itemId,
+                        localUri = saved.uriString,
+                        fileName = resolvedMeta.fileName,
+                        mimeType = resolvedMeta.mimeType,
+                        fileSize = finalBytes,
+                        savedAt = finishedAt,
+                    ),
+                )
+            }
             onMetrics(TransferRuntimeMetrics(transferredBytes = finalBytes, speedBytesPerSec = 0L, etaSeconds = 0L))
             TransferExecutionOutcome.Succeeded
         } catch (ce: CancellationException) {

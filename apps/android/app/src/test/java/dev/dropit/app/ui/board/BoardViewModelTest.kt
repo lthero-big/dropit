@@ -18,7 +18,9 @@ import dev.dropit.app.core.realtime.BoardSnapshotState
 import dev.dropit.app.core.realtime.BoardStateReducer
 import dev.dropit.app.core.realtime.ConnectionState
 import dev.dropit.app.core.repository.BoardRepository
+import dev.dropit.app.core.repository.DownloadEnqueueResult
 import dev.dropit.app.core.repository.DownloadFileRequest
+import dev.dropit.app.core.repository.SavedDownloadRecord
 import dev.dropit.app.core.repository.SpaceRepository
 import dev.dropit.app.core.repository.StagedShareFile
 import dev.dropit.app.core.repository.TransferManager
@@ -460,6 +462,83 @@ class BoardViewModelTest {
         }
     }
 
+    @Test
+    fun savedDownloadFlow_reflectsThreeStates_promptsOpenOrRedownload_autoRedownloadsIfDeleted_andDedupesActive() =
+        runTest(testDispatcher) {
+            val fileItem = ClipItem(
+                id = "file-1",
+                spaceId = "sp-personal",
+                kind = "file",
+                filename = "季度报告.pdf",
+                mime = "application/pdf",
+                size = 4_096L,
+                createdAt = 100L,
+            )
+            boardRepo.snapshot = WsEvent.Snapshot(items = listOf(fileItem), groups = emptyList(), serverTime = 100L, expiresAt = null)
+
+            val vm = createViewModel()
+            advanceUntilIdle()
+
+            // Initial: NOT_SAVED
+            assertEquals(FileSaveState.NOT_SAVED, vm.uiState.value.fileSaveStateFor("file-1"))
+            assertTrue(transferManager.verifyAllCallCount >= 1)
+
+            // Active download: SAVING -> tapping save does NOT start duplicate download
+            transferManager.setActiveDownloads(setOf("file-1"))
+            advanceUntilIdle()
+            assertEquals(FileSaveState.SAVING, vm.uiState.value.fileSaveStateFor("file-1"))
+
+            vm.downloadItem(fileItem)
+            advanceUntilIdle()
+            assertEquals(0, transferManager.downloadedItems.size)
+            assertTrue(vm.uiState.value.snackbar?.message.orEmpty().contains("正在保存中"))
+            assertTrue(vm.uiState.value.snackbar?.showTransfersAction == true)
+
+            // Completed download: SAVED -> tapping save opens prompt WITHOUT calling enqueueDownload
+            val savedRecord = SavedDownloadRecord(
+                serverOrigin = "https://dropit.lthero.com",
+                accountId = "u-1",
+                remoteItemId = "file-1",
+                localUri = "content://media/external/downloads/101",
+                fileName = "季度报告.pdf",
+                mimeType = "application/pdf",
+                fileSize = 4_096L,
+                savedAt = 200L,
+            )
+            transferManager.setActiveDownloads(emptySet())
+            transferManager.setSavedDownloads(mapOf("file-1" to savedRecord))
+            transferManager.existingSavedIds.add("file-1")
+            advanceUntilIdle()
+            assertEquals(FileSaveState.SAVED, vm.uiState.value.fileSaveStateFor("file-1"))
+
+            vm.downloadItem(fileItem)
+            advanceUntilIdle()
+            assertEquals(0, transferManager.downloadedItems.size)
+            assertNotNull(vm.uiState.value.alreadySavedPrompt)
+            assertEquals(savedRecord, vm.uiState.value.alreadySavedPrompt?.record)
+
+            // Confirming "重新下载" dismisses prompt and enqueues new download
+            vm.confirmRedownloadAlreadySaved()
+            advanceUntilIdle()
+            assertNull(vm.uiState.value.alreadySavedPrompt)
+            assertEquals(1, transferManager.downloadedItems.size)
+            assertEquals("file-1", transferManager.downloadedItems.first().item.id)
+
+            // Local file deleted externally -> tapping save cleans stale index and immediately redownloads without dialog
+            transferManager.existingSavedIds.clear()
+            vm.downloadItem(fileItem)
+            advanceUntilIdle()
+            assertNull(vm.uiState.value.alreadySavedPrompt)
+            assertEquals(2, transferManager.downloadedItems.size)
+            assertEquals(FileSaveState.NOT_SAVED, vm.uiState.value.fileSaveStateFor("file-1"))
+
+            // Foreground return re-runs verifyAllSavedDownloads
+            val beforeFg = transferManager.verifyAllCallCount
+            vm.onForeground()
+            advanceUntilIdle()
+            assertEquals(beforeFg + 1, transferManager.verifyAllCallCount)
+        }
+
     // ---- Test Doubles ----
 
     private class FakeSpaceRepository(
@@ -645,8 +724,24 @@ class BoardViewModelTest {
         private val _activeCount = MutableStateFlow(0)
         override val activeCount: StateFlow<Int> = _activeCount.asStateFlow()
 
+        private val _savedDownloads = MutableStateFlow<Map<String, SavedDownloadRecord>>(emptyMap())
+        override val savedDownloads: StateFlow<Map<String, SavedDownloadRecord>> = _savedDownloads.asStateFlow()
+
+        private val _activeDownloadItemIds = MutableStateFlow<Set<String>>(emptySet())
+        override val activeDownloadItemIds: StateFlow<Set<String>> = _activeDownloadItemIds.asStateFlow()
+
         val downloadedItems = mutableListOf<DownloadFileRequest>()
+        val existingSavedIds = mutableSetOf<String>()
+        var verifyAllCallCount = 0
         var shareResult: Result<Uri> = Result.failure(UnsupportedOperationException("pending"))
+
+        fun setSavedDownloads(map: Map<String, SavedDownloadRecord>) {
+            _savedDownloads.value = map
+        }
+
+        fun setActiveDownloads(ids: Set<String>) {
+            _activeDownloadItemIds.value = ids
+        }
 
         override suspend fun enqueueUploads(requests: List<UploadFileRequest>): List<String> =
             requests.indices.map { "up-$it" }
@@ -660,6 +755,28 @@ class BoardViewModelTest {
         override suspend fun enqueueDownload(request: DownloadFileRequest): String {
             downloadedItems.add(request)
             return "dl-${downloadedItems.size}"
+        }
+
+        override suspend fun enqueueDownloadOrReuse(request: DownloadFileRequest): DownloadEnqueueResult {
+            if (!request.shareAfterDownload && request.item.id in _activeDownloadItemIds.value) {
+                return DownloadEnqueueResult.AlreadyInProgress("active-${request.item.id}")
+            }
+            return DownloadEnqueueResult.Started(enqueueDownload(request))
+        }
+
+        override suspend fun verifySavedDownload(remoteItemId: String): SavedDownloadRecord? {
+            val record = _savedDownloads.value[remoteItemId] ?: return null
+            return if (remoteItemId in existingSavedIds) {
+                record
+            } else {
+                _savedDownloads.value = _savedDownloads.value - remoteItemId
+                null
+            }
+        }
+
+        override suspend fun verifyAllSavedDownloads() {
+            verifyAllCallCount += 1
+            _savedDownloads.value = _savedDownloads.value.filterKeys { it in existingSavedIds }
         }
 
         override suspend fun downloadForShare(item: ClipItem, targetScope: TargetScope): Result<Uri> = shareResult

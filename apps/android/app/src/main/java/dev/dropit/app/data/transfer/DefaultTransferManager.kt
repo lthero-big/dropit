@@ -10,13 +10,16 @@ import dev.dropit.app.core.network.ApiError
 import dev.dropit.app.core.network.ClipItem
 import dev.dropit.app.core.network.DropitApiClient
 import dev.dropit.app.core.network.TargetScope
+import dev.dropit.app.core.repository.DownloadEnqueueResult
 import dev.dropit.app.core.repository.DownloadFileRequest
+import dev.dropit.app.core.repository.SavedDownloadRecord
 import dev.dropit.app.core.repository.StagedShareFile
 import dev.dropit.app.core.repository.TransferDirection
 import dev.dropit.app.core.repository.TransferManager
 import dev.dropit.app.core.repository.TransferStatus
 import dev.dropit.app.core.repository.TransferTask
 import dev.dropit.app.core.repository.UploadFileRequest
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -206,6 +209,11 @@ class DefaultTransferScopeProvider(
                         newAccountId = userId,
                         updatedAt = clockMs(),
                     )
+                    dao.reassignSavedDownloadsAccountId(
+                        serverOrigin = origin,
+                        oldAccountId = fallbackId,
+                        newAccountId = userId,
+                    )
                 }
                 TransferScopeKey(serverOrigin = origin, accountId = userId)
             } else {
@@ -238,13 +246,17 @@ class DefaultTransferManager(
     private val uploadUriStager: UploadUriStager,
     private val uploadStagingDir: File,
     private val downloadTempDir: File,
+    private val localSavedFileChecker: LocalSavedFileChecker = FileSystemLocalSavedFileChecker,
     private val coroutineScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val clockMs: () -> Long = { System.currentTimeMillis() },
 ) : TransferManager {
 
     private val runtimeMetrics = MutableStateFlow<Map<String, TransferRuntimeMetrics>>(emptyMap())
     private val runningJobs = ConcurrentHashMap<String, Job>()
     private val taskLock = Mutex()
+    private val downloadEnqueueLock = Mutex()
+    private val verifyAllLock = Mutex()
 
     override val tasks: StateFlow<List<TransferTask>> = scopeProvider.activeScope
         .flatMapLatest { scope ->
@@ -276,6 +288,39 @@ class DefaultTransferManager(
             scope = coroutineScope,
             started = SharingStarted.Eagerly,
             initialValue = 0,
+        )
+
+    override val savedDownloads: StateFlow<Map<String, SavedDownloadRecord>> = scopeProvider.activeScope
+        .flatMapLatest { scope ->
+            if (scope == null) {
+                flowOf(emptyList())
+            } else {
+                dao.observeSavedDownloadsByScope(
+                    scope.serverOrigin,
+                    SavedDownloadEntity.normalizeAccountId(scope.accountId),
+                )
+            }
+        }
+        .map { entities ->
+            entities.associate { it.remoteItemId to it.toDomain() }
+        }
+        .stateIn(
+            scope = coroutineScope,
+            started = SharingStarted.Eagerly,
+            initialValue = emptyMap(),
+        )
+
+    override val activeDownloadItemIds: StateFlow<Set<String>> = tasks
+        .map { list ->
+            list.asSequence()
+                .filter { it.direction == TransferDirection.DOWNLOAD && !it.shareAfterDownload && it.isActive }
+                .mapNotNull { it.remoteItemId?.takeIf { id -> id.isNotBlank() } }
+                .toSet()
+        }
+        .stateIn(
+            scope = coroutineScope,
+            started = SharingStarted.Eagerly,
+            initialValue = emptySet(),
         )
 
     override suspend fun enqueueUploads(requests: List<UploadFileRequest>): List<String> {
@@ -379,32 +424,85 @@ class DefaultTransferManager(
         return createdIds
     }
 
-    override suspend fun enqueueDownload(request: DownloadFileRequest): String {
-        val scope = scopeProvider.currentScope() ?: throw ApiError.notConfigured()
-        val taskId = UUID.randomUUID().toString()
-        val now = clockMs()
-        val fileName = DownloadName.sanitize(request.item.filename) ?: "dropit-download"
-        val mime = DownloadName.baseMime(request.item.mime).ifBlank { "application/octet-stream" }
+    override suspend fun enqueueDownload(request: DownloadFileRequest): String =
+        enqueueDownloadOrReuse(request).taskId
 
-        val entity = TransferTaskEntity(
-            id = taskId,
-            serverOrigin = scope.serverOrigin,
-            accountId = scope.accountId,
-            targetScopeType = request.targetScope.scopeType,
-            targetScopeId = request.targetScope.scopeId,
-            direction = TransferDirection.DOWNLOAD.name,
-            fileName = fileName,
-            mimeType = mime,
-            totalBytes = request.item.size.coerceAtLeast(0L),
-            remoteItemId = request.item.id,
-            shareAfterDownload = request.shareAfterDownload,
-            status = TransferStatus.QUEUED.name,
-            createdAt = now,
-            updatedAt = now,
-        )
-        dao.upsert(entity)
-        scheduler.enqueue(taskId)
-        return taskId
+    override suspend fun enqueueDownloadOrReuse(request: DownloadFileRequest): DownloadEnqueueResult {
+        val scope = scopeProvider.currentScope() ?: throw ApiError.notConfigured()
+        return downloadEnqueueLock.withLock {
+            if (!request.shareAfterDownload) {
+                val existingActive = dao.findActiveDownloadForItem(
+                    serverOrigin = scope.serverOrigin,
+                    accountId = scope.accountId,
+                    remoteItemId = request.item.id,
+                )
+                if (existingActive != null) {
+                    return@withLock DownloadEnqueueResult.AlreadyInProgress(existingActive.id)
+                }
+            }
+
+            val taskId = UUID.randomUUID().toString()
+            val now = clockMs()
+            val fileName = DownloadName.sanitize(request.item.filename) ?: "dropit-download"
+            val mime = DownloadName.baseMime(request.item.mime).ifBlank { "application/octet-stream" }
+
+            val entity = TransferTaskEntity(
+                id = taskId,
+                serverOrigin = scope.serverOrigin,
+                accountId = scope.accountId,
+                targetScopeType = request.targetScope.scopeType,
+                targetScopeId = request.targetScope.scopeId,
+                direction = TransferDirection.DOWNLOAD.name,
+                fileName = fileName,
+                mimeType = mime,
+                totalBytes = request.item.size.coerceAtLeast(0L),
+                remoteItemId = request.item.id,
+                shareAfterDownload = request.shareAfterDownload,
+                status = TransferStatus.QUEUED.name,
+                createdAt = now,
+                updatedAt = now,
+            )
+            dao.upsert(entity)
+            scheduler.enqueue(taskId)
+            DownloadEnqueueResult.Started(taskId)
+        }
+    }
+
+    override suspend fun verifySavedDownload(remoteItemId: String): SavedDownloadRecord? = withContext(ioDispatcher) {
+        if (remoteItemId.isBlank()) return@withContext null
+        val scope = scopeProvider.currentScope() ?: return@withContext null
+        val normalizedAccount = SavedDownloadEntity.normalizeAccountId(scope.accountId)
+        val entity = dao.getSavedDownload(scope.serverOrigin, normalizedAccount, remoteItemId)
+            ?: return@withContext null
+        val stillExists = runCatching {
+            localSavedFileChecker.exists(entity.localUri, entity.fileSize)
+        }.getOrDefault(false)
+        if (stillExists) {
+            entity.toDomain()
+        } else {
+            dao.deleteSavedDownload(scope.serverOrigin, normalizedAccount, remoteItemId)
+            null
+        }
+    }
+
+    override suspend fun verifyAllSavedDownloads() = withContext(ioDispatcher) {
+        verifyAllLock.withLock {
+            val scope = scopeProvider.currentScope() ?: return@withLock
+            val normalizedAccount = SavedDownloadEntity.normalizeAccountId(scope.accountId)
+            val savedList = runCatching {
+                dao.listSavedDownloadsByScope(scope.serverOrigin, normalizedAccount)
+            }.getOrDefault(emptyList())
+            for (entity in savedList) {
+                val stillExists = runCatching {
+                    localSavedFileChecker.exists(entity.localUri, entity.fileSize)
+                }.getOrDefault(false)
+                if (!stillExists) {
+                    runCatching {
+                        dao.deleteSavedDownload(scope.serverOrigin, normalizedAccount, entity.remoteItemId)
+                    }
+                }
+            }
+        }
     }
 
     override suspend fun downloadForShare(item: ClipItem, targetScope: TargetScope): Result<Uri> {
@@ -489,8 +587,9 @@ class DefaultTransferManager(
             engine.deleteStagedFileIfOwned(entity.localStagedPath)
         }
 
-        // Clear persisted transfer queue and staging directories.
+        // Clear persisted transfer queue, saved download index, and staging directories.
         dao.deleteAll()
+        dao.deleteAllSavedDownloads()
         runCatching { uploadStagingDir.deleteRecursively() }
         runCatching { downloadTempDir.deleteRecursively() }
         scopeProvider.clearCachedAccount()

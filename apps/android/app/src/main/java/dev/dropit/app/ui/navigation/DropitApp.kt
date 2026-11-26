@@ -381,6 +381,7 @@ private fun DropitMainScaffold(
                             activeViewer = ActiveViewer.TextReader(item, boardState.activeScope)
                         },
                         suppressItemShareSheet = activeSettingsSubPage != null,
+                        isViewerOpen = activeViewer != null,
                         onOpenSharePresets = {
                             activeSettingsSubPage = SettingsSubPage.SHARE_PRESETS
                         },
@@ -548,9 +549,11 @@ private fun DropitMainScaffold(
                     scope = viewer.scope,
                     mediaRepository = mediaRepository,
                     imageLoader = imageLoader,
+                    fileSaveStateFor = { item -> boardState.fileSaveStateFor(item.id) },
                     onSaveOriginal = { item ->
-                        boardViewModel.downloadItem(item)
-                        Toast.makeText(context, "已开始保存原图到「下载」", Toast.LENGTH_SHORT).show()
+                        boardViewModel.downloadItem(item) { feedback ->
+                            Toast.makeText(context, feedback, Toast.LENGTH_SHORT).show()
+                        }
                     },
                     onShareImage = { item ->
                         boardViewModel.prepareFileForShare(item) { uri ->
@@ -567,9 +570,11 @@ private fun DropitMainScaffold(
                     isVideo = viewer.isVideo,
                     scope = viewer.scope,
                     mediaRepository = mediaRepository,
+                    fileSaveState = boardState.fileSaveStateFor(viewer.item.id),
                     onDownloadFallback = { item ->
-                        boardViewModel.downloadItem(item)
-                        Toast.makeText(context, "已加入下载队列", Toast.LENGTH_SHORT).show()
+                        boardViewModel.downloadItem(item) { feedback ->
+                            Toast.makeText(context, feedback, Toast.LENGTH_SHORT).show()
+                        }
                     },
                     onShareMedia = { item ->
                         boardViewModel.prepareFileForShare(item) { uri ->
@@ -586,6 +591,7 @@ private fun DropitMainScaffold(
                     nowMs = nowMs,
                     scope = viewer.scope,
                     mediaRepository = mediaRepository,
+                    fileSaveState = boardState.fileSaveStateFor(viewer.item.id),
                     onCopyText = { text ->
                         copyPlainText(context, text)
                         boardViewModel.markItemCopied(viewer.item.id)
@@ -595,8 +601,9 @@ private fun DropitMainScaffold(
                     },
                     onDownloadFallback = if (viewer.item.isFile) {
                         {
-                            boardViewModel.downloadItem(viewer.item)
-                            Toast.makeText(context, "已加入下载队列", Toast.LENGTH_SHORT).show()
+                            boardViewModel.downloadItem(viewer.item) { feedback ->
+                                Toast.makeText(context, feedback, Toast.LENGTH_SHORT).show()
+                            }
                         }
                     } else {
                         null

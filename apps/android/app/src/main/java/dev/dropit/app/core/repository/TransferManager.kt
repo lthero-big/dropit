@@ -37,6 +37,8 @@ data class TransferTask(
     val status: TransferStatus = TransferStatus.QUEUED,
     val errorMessage: String? = null,
     val localResultUri: String? = null,
+    val remoteItemId: String? = null,
+    val shareAfterDownload: Boolean = false,
     val createdAt: Long = 0L,
     val updatedAt: Long = 0L,
 ) {
@@ -48,6 +50,24 @@ data class TransferTask(
 
     val isTerminal: Boolean
         get() = status == TransferStatus.SUCCEEDED || status == TransferStatus.FAILED || status == TransferStatus.CANCELLED
+}
+
+data class SavedDownloadRecord(
+    val serverOrigin: String,
+    val accountId: String? = null,
+    val remoteItemId: String,
+    val localUri: String,
+    val fileName: String,
+    val mimeType: String,
+    val fileSize: Long,
+    val savedAt: Long,
+)
+
+sealed class DownloadEnqueueResult {
+    abstract val taskId: String
+
+    data class Started(override val taskId: String) : DownloadEnqueueResult()
+    data class AlreadyInProgress(override val taskId: String) : DownloadEnqueueResult()
 }
 
 data class UploadFileRequest(
@@ -71,6 +91,10 @@ data class DownloadFileRequest(
 interface TransferManager {
     val tasks: StateFlow<List<TransferTask>>
     val activeCount: StateFlow<Int>
+    val savedDownloads: StateFlow<Map<String, SavedDownloadRecord>>
+        get() = EMPTY_SAVED_DOWNLOADS
+    val activeDownloadItemIds: StateFlow<Set<String>>
+        get() = EMPTY_ACTIVE_DOWNLOAD_ITEMS
 
     suspend fun enqueueUploads(requests: List<UploadFileRequest>): List<String>
     suspend fun enqueueStagedUploads(
@@ -80,11 +104,26 @@ interface TransferManager {
     ): List<String>
 
     suspend fun enqueueDownload(request: DownloadFileRequest): String
+    suspend fun enqueueDownloadOrReuse(request: DownloadFileRequest): DownloadEnqueueResult =
+        DownloadEnqueueResult.Started(enqueueDownload(request))
+
+    suspend fun verifySavedDownload(remoteItemId: String): SavedDownloadRecord? =
+        savedDownloads.value[remoteItemId]
+
+    suspend fun verifyAllSavedDownloads() = Unit
+
     suspend fun downloadForShare(item: ClipItem, targetScope: TargetScope): Result<Uri>
     suspend fun cancel(taskId: String)
     suspend fun retry(taskId: String)
     suspend fun clearCompleted()
     suspend fun clearAllForScopeSwitch()
+
+    companion object {
+        private val EMPTY_SAVED_DOWNLOADS: StateFlow<Map<String, SavedDownloadRecord>> =
+            MutableStateFlow<Map<String, SavedDownloadRecord>>(emptyMap()).asStateFlow()
+        private val EMPTY_ACTIVE_DOWNLOAD_ITEMS: StateFlow<Set<String>> =
+            MutableStateFlow<Set<String>>(emptySet()).asStateFlow()
+    }
 }
 
 class PlaceholderTransferManager : TransferManager {
@@ -93,6 +132,12 @@ class PlaceholderTransferManager : TransferManager {
 
     private val _activeCount = MutableStateFlow(0)
     override val activeCount: StateFlow<Int> = _activeCount.asStateFlow()
+
+    private val _savedDownloads = MutableStateFlow<Map<String, SavedDownloadRecord>>(emptyMap())
+    override val savedDownloads: StateFlow<Map<String, SavedDownloadRecord>> = _savedDownloads.asStateFlow()
+
+    private val _activeDownloadItemIds = MutableStateFlow<Set<String>>(emptySet())
+    override val activeDownloadItemIds: StateFlow<Set<String>> = _activeDownloadItemIds.asStateFlow()
 
     override suspend fun enqueueUploads(requests: List<UploadFileRequest>): List<String> = emptyList()
 

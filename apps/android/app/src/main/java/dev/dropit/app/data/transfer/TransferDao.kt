@@ -168,4 +168,105 @@ interface TransferDao {
 
     @Query("DELETE FROM transfer_tasks")
     suspend fun deleteAll()
+
+    @Query(
+        """
+        SELECT * FROM transfer_tasks
+        WHERE serverOrigin = :serverOrigin
+          AND ((:accountId IS NULL AND accountId IS NULL) OR accountId = :accountId)
+          AND direction = 'DOWNLOAD'
+          AND shareAfterDownload = 0
+          AND remoteItemId = :remoteItemId
+          AND status IN ('QUEUED', 'RUNNING')
+        ORDER BY createdAt DESC, id DESC
+        LIMIT 1
+        """,
+    )
+    suspend fun findActiveDownloadForItem(
+        serverOrigin: String,
+        accountId: String?,
+        remoteItemId: String,
+    ): TransferTaskEntity?
+
+    // ---- Saved Downloads Index (independent from transfer_tasks history cleanup) ----
+
+    @Query(
+        """
+        SELECT * FROM saved_downloads
+        WHERE serverOrigin = :serverOrigin
+          AND accountId = :accountId
+        ORDER BY savedAt DESC, remoteItemId ASC
+        """,
+    )
+    fun observeSavedDownloadsByScope(serverOrigin: String, accountId: String): Flow<List<SavedDownloadEntity>>
+
+    @Query(
+        """
+        SELECT * FROM saved_downloads
+        WHERE serverOrigin = :serverOrigin
+          AND accountId = :accountId
+        ORDER BY savedAt DESC, remoteItemId ASC
+        """,
+    )
+    suspend fun listSavedDownloadsByScope(serverOrigin: String, accountId: String): List<SavedDownloadEntity>
+
+    @Query("SELECT * FROM saved_downloads ORDER BY savedAt DESC, remoteItemId ASC")
+    suspend fun listAllSavedDownloads(): List<SavedDownloadEntity>
+
+    @Query(
+        """
+        SELECT * FROM saved_downloads
+        WHERE serverOrigin = :serverOrigin
+          AND accountId = :accountId
+          AND remoteItemId = :remoteItemId
+        LIMIT 1
+        """,
+    )
+    suspend fun getSavedDownload(
+        serverOrigin: String,
+        accountId: String,
+        remoteItemId: String,
+    ): SavedDownloadEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSavedDownload(entity: SavedDownloadEntity)
+
+    @Query(
+        """
+        DELETE FROM saved_downloads
+        WHERE serverOrigin = :serverOrigin
+          AND accountId = :accountId
+          AND remoteItemId = :remoteItemId
+        """,
+    )
+    suspend fun deleteSavedDownload(
+        serverOrigin: String,
+        accountId: String,
+        remoteItemId: String,
+    )
+
+    @Query(
+        """
+        DELETE FROM saved_downloads
+        WHERE serverOrigin = :serverOrigin
+          AND accountId = :accountId
+        """,
+    )
+    suspend fun deleteSavedDownloadsByScope(serverOrigin: String, accountId: String)
+
+    @Query("DELETE FROM saved_downloads")
+    suspend fun deleteAllSavedDownloads()
+
+    @Query(
+        """
+        UPDATE OR REPLACE saved_downloads
+        SET accountId = :newAccountId
+        WHERE serverOrigin = :serverOrigin AND accountId = :oldAccountId
+        """,
+    )
+    suspend fun reassignSavedDownloadsAccountId(
+        serverOrigin: String,
+        oldAccountId: String,
+        newAccountId: String,
+    )
 }
