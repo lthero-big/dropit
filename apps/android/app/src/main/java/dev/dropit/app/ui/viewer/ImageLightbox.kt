@@ -29,6 +29,8 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.DownloadDone
+import androidx.compose.material.icons.rounded.Downloading
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.ZoomOutMap
@@ -69,6 +71,7 @@ import dev.dropit.app.core.network.ServerUrl
 import dev.dropit.app.core.network.TargetScope
 import dev.dropit.app.core.repository.MediaRepository
 import dev.dropit.app.ui.board.ClipFormatting
+import dev.dropit.app.ui.board.FileSaveState
 import dev.dropit.app.ui.theme.DropitMediaColors
 import dev.dropit.app.ui.theme.DropitMonoTypography
 import dev.dropit.app.ui.theme.DropitTheme
@@ -86,6 +89,7 @@ fun ImageLightbox(
     onShareImage: (ClipItem) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    fileSaveStateFor: (ClipItem) -> FileSaveState = { FileSaveState.NOT_SAVED },
 ) {
     if (images.isEmpty()) return
     val safeInitialIndex = initialIndex.coerceIn(0, images.lastIndex)
@@ -217,18 +221,34 @@ fun ImageLightbox(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val saveState = fileSaveStateFor(currentItem)
+                    val saveColor = when (saveState) {
+                        FileSaveState.NOT_SAVED -> DropitMediaColors.OverlayPrimary
+                        FileSaveState.SAVING -> DropitTheme.colors.brand
+                        FileSaveState.SAVED -> DropitTheme.colors.ok
+                    }
+                    val saveIcon = when (saveState) {
+                        FileSaveState.NOT_SAVED -> Icons.Rounded.Download
+                        FileSaveState.SAVING -> Icons.Rounded.Downloading
+                        FileSaveState.SAVED -> Icons.Rounded.DownloadDone
+                    }
+                    val saveLabel = when (saveState) {
+                        FileSaveState.NOT_SAVED -> "保存原图"
+                        FileSaveState.SAVING -> "保存中"
+                        FileSaveState.SAVED -> "已保存"
+                    }
                     TextButton(
                         onClick = { onSaveOriginal(currentItem) },
                         modifier = Modifier.defaultMinSize(minHeight = 48.dp),
-                        colors = ButtonDefaults.textButtonColors(contentColor = DropitMediaColors.OverlayPrimary),
+                        colors = ButtonDefaults.textButtonColors(contentColor = saveColor),
                     ) {
                         Icon(
-                            imageVector = Icons.Rounded.Download,
+                            imageVector = saveIcon,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp),
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("保存原图")
+                        Text(saveLabel)
                     }
 
                     TextButton(

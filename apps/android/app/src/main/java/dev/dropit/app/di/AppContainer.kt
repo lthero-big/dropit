@@ -36,6 +36,7 @@ import dev.dropit.app.data.room.RoomKeyStore
 import dev.dropit.app.data.share.AndroidShareIntentExtractor
 import dev.dropit.app.data.share.DefaultShareInbox
 import dev.dropit.app.data.transfer.AndroidDownloadSink
+import dev.dropit.app.data.transfer.AndroidLocalSavedFileChecker
 import dev.dropit.app.data.transfer.AndroidTransferWorkScheduler
 import dev.dropit.app.data.transfer.AndroidUploadUriStager
 import dev.dropit.app.data.transfer.DefaultTransferManager
@@ -185,6 +186,7 @@ class DefaultAppContainer(context: Context) : AppContainer {
             uploadUriStager = AndroidUploadUriStager(appContext),
             uploadStagingDir = uploadStagingDir,
             downloadTempDir = downloadTempDir,
+            localSavedFileChecker = AndroidLocalSavedFileChecker(appContext),
         )
     }
 

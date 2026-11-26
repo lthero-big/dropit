@@ -87,6 +87,9 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         if (appContainer.authRepository.sessionState.value.isSignedIn) {
             appContainer.realtimeClient.onAppForeground()
+            lifecycleScope.launch(Dispatchers.IO) {
+                runCatching { appContainer.transferManager.verifyAllSavedDownloads() }
+            }
         }
     }
 

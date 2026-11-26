@@ -263,6 +263,18 @@ class DefaultTransferScopeProviderTest {
                 updatedAt = 1L,
             ),
         )
+        dao.upsertSavedDownload(
+            SavedDownloadEntity(
+                serverOrigin = baseUrl,
+                accountId = expectedFallbackId,
+                remoteItemId = "offline-saved-1",
+                localUri = "content://downloads/offline-1",
+                fileName = "offline.pdf",
+                mimeType = "application/pdf",
+                fileSize = 256L,
+                savedAt = 1L,
+            ),
+        )
 
         // Once online, /api/me resolves user-real-42 and reassigns existing offline rows cleanly.
         online = true
@@ -277,5 +289,10 @@ class DefaultTransferScopeProviderTest {
         assertEquals("user-real-42", migrated?.accountId)
         assertEquals(listOf("offline-task-1"), dao.listByScope(baseUrl, "user-real-42").map { it.id })
         assertTrue(dao.listByScope(baseUrl, expectedFallbackId).isEmpty())
+        assertEquals(
+            listOf("offline-saved-1"),
+            dao.listSavedDownloadsByScope(baseUrl, "user-real-42").map { it.remoteItemId },
+        )
+        assertTrue(dao.listSavedDownloadsByScope(baseUrl, expectedFallbackId).isEmpty())
     }
 }

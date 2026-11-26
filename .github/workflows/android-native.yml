@@ -139,8 +139,8 @@ jobs:
           dd if=/dev/zero bs=1024 count=32 >> "$LIVE_APK_SRC" 2>/dev/null
           TEST_UPDATE_SHA="$(sha256sum "$LIVE_APK_SRC" | awk '{print $1}')"
           node scripts/publish-android-apk.mjs "$LIVE_APK_SRC" \
-            --code 8 \
-            --name 0.4.2 \
+            --code 9 \
+            --name 0.4.3 \
             --notes "CI protocol regression fixture release" \
             --dir "$LIVE_DATA_DIR/app/android"
 
@@ -189,8 +189,8 @@ jobs:
           DROPIT_LIVE_SERVER_URL=http://127.0.0.1:18787 \
           DROPIT_LIVE_ADMIN_EMAIL=regression@dropit.test \
           DROPIT_LIVE_ADMIN_PASSWORD=DropitRegressionPass2026! \
-          DROPIT_LIVE_EXPECTED_UPDATE_VERSION=0.4.2 \
-          DROPIT_LIVE_EXPECTED_UPDATE_CODE=8 \
+          DROPIT_LIVE_EXPECTED_UPDATE_VERSION=0.4.3 \
+          DROPIT_LIVE_EXPECTED_UPDATE_CODE=9 \
           DROPIT_LIVE_EXPECTED_UPDATE_SHA256="$TEST_UPDATE_SHA" \
           DROPIT_REQUIRE_LIVE_SERVER=1 \
           ./gradlew testDebugUnitTest assembleDebug --no-daemon

@@ -20,7 +20,9 @@ import dev.dropit.app.core.realtime.BoardSnapshotState
 import dev.dropit.app.core.realtime.ConnectionState
 import dev.dropit.app.core.realtime.RealtimeClient
 import dev.dropit.app.core.repository.BoardRepository
+import dev.dropit.app.core.repository.DownloadEnqueueResult
 import dev.dropit.app.core.repository.DownloadFileRequest
+import dev.dropit.app.core.repository.SavedDownloadRecord
 import dev.dropit.app.core.repository.SpaceRepository
 import dev.dropit.app.core.repository.TransferManager
 import dev.dropit.app.core.repository.UploadFileRequest
@@ -50,6 +52,17 @@ enum class ContentTypeFilter(val label: String) {
     FILES("文件"),
 }
 
+enum class FileSaveState {
+    NOT_SAVED,
+    SAVING,
+    SAVED,
+}
+
+data class AlreadySavedFilePrompt(
+    val item: ClipItem,
+    val record: SavedDownloadRecord,
+)
+
 data class BoardSnackbar(
     val message: String,
     val showTransfersAction: Boolean = false,
@@ -75,12 +88,20 @@ data class BoardUiState(
     val isSearchExpanded: Boolean = false,
     val searchQuery: String = "",
     val copiedItemId: String? = null,
+    val savedDownloads: Map<String, SavedDownloadRecord> = emptyMap(),
+    val activeDownloadItemIds: Set<String> = emptySet(),
+    val alreadySavedPrompt: AlreadySavedFilePrompt? = null,
     val isSendingText: Boolean = false,
     val isMutatingItem: Boolean = false,
     val composerDraft: String = "",
     val snackbar: BoardSnackbar? = null,
     val sessionExpired: Boolean = false,
 ) {
+    fun fileSaveStateFor(itemId: String): FileSaveState = when {
+        itemId in activeDownloadItemIds -> FileSaveState.SAVING
+        savedDownloads.containsKey(itemId) -> FileSaveState.SAVED
+        else -> FileSaveState.NOT_SAVED
+    }
     val isReadOnly: Boolean
         get() = activeRoom == null && activeSpace?.isReadOnly == true
 
@@ -196,11 +217,14 @@ class BoardViewModel(
     private var loadJob: Job? = null
     private var copiedClearJob: Job? = null
     private var sessionExpiredHandled = false
+    private val inFlightSaveChecks = mutableSetOf<String>()
 
     init {
         observeRealtime()
         observeSessionExpired()
+        observeTransferSavedState()
         if (autoLoad) {
+            verifySavedDownloadsAsync()
             loadInitial()
         }
     }
@@ -218,8 +242,36 @@ class BoardViewModel(
         sessionExpiredHandled = false
         loadJob?.cancel()
         copiedClearJob?.cancel()
-        _uiState.value = BoardUiState()
+        inFlightSaveChecks.clear()
+        _uiState.value = BoardUiState(
+            savedDownloads = transferManager.savedDownloads.value,
+            activeDownloadItemIds = transferManager.activeDownloadItemIds.value,
+        )
+        verifySavedDownloadsAsync()
         loadInitial()
+    }
+
+    private fun observeTransferSavedState() {
+        viewModelScope.launch {
+            transferManager.savedDownloads.collect { savedMap ->
+                _uiState.update { it.copy(savedDownloads = savedMap) }
+            }
+        }
+        viewModelScope.launch {
+            transferManager.activeDownloadItemIds.collect { activeIds ->
+                _uiState.update { it.copy(activeDownloadItemIds = activeIds) }
+            }
+        }
+    }
+
+    fun verifySavedDownloadsAsync() {
+        viewModelScope.launch {
+            runCatching {
+                withContext(ioDispatcher) {
+                    transferManager.verifyAllSavedDownloads()
+                }
+            }
+        }
     }
 
     private fun observeRealtime() {
@@ -484,6 +536,7 @@ class BoardViewModel(
     fun onForeground() {
         if (_uiState.value.sessionExpired) return
         realtimeBridge.onAppForeground()
+        verifySavedDownloadsAsync()
     }
 
     fun onBackground() {
@@ -608,12 +661,50 @@ class BoardViewModel(
         }
     }
 
-    fun downloadItem(item: ClipItem) {
+    fun downloadItem(
+        item: ClipItem,
+        onFeedback: ((String) -> Unit)? = null,
+    ) {
         val scope = _uiState.value.activeScope ?: return
+        val shortName = ClipFormatting.middleEllipsizeFilename(item.filename ?: "文件", 20)
+
+        if (item.id in _uiState.value.activeDownloadItemIds) {
+            val msg = "「$shortName」正在保存中"
+            _uiState.update {
+                it.copy(
+                    snackbar = BoardSnackbar(
+                        message = msg,
+                        showTransfersAction = true,
+                    ),
+                )
+            }
+            onFeedback?.invoke(msg)
+            return
+        }
+
+        if (!inFlightSaveChecks.add(item.id)) return
+
         viewModelScope.launch {
             try {
-                withContext(ioDispatcher) {
-                    transferManager.enqueueDownload(
+                if (_uiState.value.savedDownloads.containsKey(item.id)) {
+                    val verified = withContext(ioDispatcher) {
+                        transferManager.verifySavedDownload(item.id)
+                    }
+                    if (verified != null) {
+                        _uiState.update {
+                            it.copy(
+                                alreadySavedPrompt = AlreadySavedFilePrompt(
+                                    item = item,
+                                    record = verified,
+                                ),
+                            )
+                        }
+                        return@launch
+                    }
+                }
+
+                val enqueueResult = withContext(ioDispatcher) {
+                    transferManager.enqueueDownloadOrReuse(
                         DownloadFileRequest(
                             item = item,
                             targetScope = scope,
@@ -621,18 +712,77 @@ class BoardViewModel(
                         ),
                     )
                 }
+                val msg = when (enqueueResult) {
+                    is DownloadEnqueueResult.Started -> "已开始保存「$shortName」"
+                    is DownloadEnqueueResult.AlreadyInProgress -> "「$shortName」正在保存中"
+                }
                 _uiState.update {
                     it.copy(
                         snackbar = BoardSnackbar(
-                            message = "已开始保存「${ClipFormatting.middleEllipsizeFilename(item.filename ?: "文件", 20)}」",
+                            message = msg,
                             showTransfersAction = true,
                         ),
                     )
                 }
+                onFeedback?.invoke(msg)
             } catch (e: ApiError) {
                 handleMutationError(e)
             } catch (e: Exception) {
-                showSnackbar(e.message?.takeIf { it.isNotBlank() } ?: "下载启动失败")
+                val errMsg = e.message?.takeIf { it.isNotBlank() } ?: "下载启动失败"
+                showSnackbar(errMsg)
+                onFeedback?.invoke(errMsg)
+            } finally {
+                inFlightSaveChecks.remove(item.id)
+            }
+        }
+    }
+
+    fun dismissAlreadySavedPrompt() {
+        _uiState.update { it.copy(alreadySavedPrompt = null) }
+    }
+
+    fun confirmRedownloadAlreadySaved(onFeedback: ((String) -> Unit)? = null) {
+        val prompt = _uiState.value.alreadySavedPrompt ?: return
+        _uiState.update { it.copy(alreadySavedPrompt = null) }
+        forceRedownloadItem(prompt.item, onFeedback = onFeedback)
+    }
+
+    fun forceRedownloadItem(
+        item: ClipItem,
+        onFeedback: ((String) -> Unit)? = null,
+    ) {
+        val scope = _uiState.value.activeScope ?: return
+        val shortName = ClipFormatting.middleEllipsizeFilename(item.filename ?: "文件", 20)
+        viewModelScope.launch {
+            try {
+                val enqueueResult = withContext(ioDispatcher) {
+                    transferManager.enqueueDownloadOrReuse(
+                        DownloadFileRequest(
+                            item = item,
+                            targetScope = scope,
+                            shareAfterDownload = false,
+                        ),
+                    )
+                }
+                val msg = when (enqueueResult) {
+                    is DownloadEnqueueResult.Started -> "已开始重新下载「$shortName」"
+                    is DownloadEnqueueResult.AlreadyInProgress -> "「$shortName」正在保存中"
+                }
+                _uiState.update {
+                    it.copy(
+                        snackbar = BoardSnackbar(
+                            message = msg,
+                            showTransfersAction = true,
+                        ),
+                    )
+                }
+                onFeedback?.invoke(msg)
+            } catch (e: ApiError) {
+                handleMutationError(e)
+            } catch (e: Exception) {
+                val errMsg = e.message?.takeIf { it.isNotBlank() } ?: "下载启动失败"
+                showSnackbar(errMsg)
+                onFeedback?.invoke(errMsg)
             }
         }
     }

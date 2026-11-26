@@ -23,11 +23,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Label
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.DownloadDone
+import androidx.compose.material.icons.rounded.Downloading
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Key
@@ -352,6 +355,7 @@ fun ItemMoreActionsSheet(
     onTogglePin: () -> Unit,
     onEditLabelsAndGroup: () -> Unit,
     onOpenItemShare: () -> Unit,
+    fileSaveState: FileSaveState = FileSaveState.NOT_SAVED,
     onCopyDownloadUrl: (() -> Unit)? = null,
     onOpenPreview: (() -> Unit)? = null,
     onRequestRetract: () -> Unit,
@@ -423,15 +427,37 @@ fun ItemMoreActionsSheet(
                     },
                 )
             } else {
-                SheetActionRow(
-                    icon = Icons.Rounded.Download,
-                    label = "保存到下载目录",
-                    tint = colors.fg,
-                    onClick = {
-                        onDismiss()
-                        onDownload()
-                    },
-                )
+                when (fileSaveState) {
+                    FileSaveState.NOT_SAVED -> SheetActionRow(
+                        icon = Icons.Rounded.Download,
+                        label = "保存到下载目录",
+                        tint = colors.fg,
+                        onClick = {
+                            onDismiss()
+                            onDownload()
+                        },
+                    )
+                    FileSaveState.SAVING -> SheetActionRow(
+                        icon = Icons.Rounded.Downloading,
+                        label = "正在保存到下载目录…",
+                        subtitle = "点击查看当前传输状态",
+                        tint = colors.brand,
+                        onClick = {
+                            onDismiss()
+                            onDownload()
+                        },
+                    )
+                    FileSaveState.SAVED -> SheetActionRow(
+                        icon = Icons.Rounded.DownloadDone,
+                        label = "已保存（打开或重新下载）",
+                        subtitle = "本地已存在副本，点击打开或重新下载",
+                        tint = colors.ok,
+                        onClick = {
+                            onDismiss()
+                            onDownload()
+                        },
+                    )
+                }
                 if (onCopyDownloadUrl != null) {
                     SheetActionRow(
                         icon = Icons.Rounded.ContentCopy,
@@ -1113,6 +1139,120 @@ fun ConfirmDeleteGroupDialog(
                 colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
             ) {
                 Text("取消")
+            }
+        },
+    )
+}
+
+@Composable
+fun AlreadySavedFileDialog(
+    prompt: AlreadySavedFilePrompt,
+    onOpenFile: () -> Unit,
+    onRedownload: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = DropitTheme.colors
+    val shapes = DropitTheme.shapes
+    val displayName = remember(prompt.record.fileName, prompt.item.filename) {
+        val raw = prompt.record.fileName.ifBlank { prompt.item.filename.orEmpty().ifBlank { "文件" } }
+        ClipFormatting.middleEllipsizeFilename(raw, maxChars = 36)
+    }
+    val sizeBytes = if (prompt.record.fileSize > 0L) prompt.record.fileSize else prompt.item.size
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = shapes.lg,
+        containerColor = colors.surface1,
+        titleContentColor = colors.fg,
+        textContentColor = colors.fg2,
+        tonalElevation = 0.dp,
+        icon = {
+            Icon(
+                imageVector = Icons.Rounded.DownloadDone,
+                contentDescription = null,
+                tint = colors.ok,
+            )
+        },
+        title = {
+            Text(
+                text = "文件已保存到本地",
+                style = MaterialTheme.typography.titleMedium,
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = shapes.sm,
+                    color = colors.surface0,
+                    border = BorderStroke(1.dp, colors.line1),
+                    tonalElevation = 0.dp,
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
+                        Text(
+                            text = displayName,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = colors.fg,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (sizeBytes > 0L) {
+                            Text(
+                                text = ServerUrl.formatSize(sizeBytes),
+                                style = DropitMonoTypography.meta,
+                                color = colors.fg3,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = "该文件已在本地下载目录中，可直接打开，或选择重新下载一份。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.fg2,
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onOpenFile,
+                modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                shape = shapes.md,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = colors.brand,
+                    contentColor = colors.brandFg,
+                ),
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("打开文件", fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
+                ) {
+                    Text("取消")
+                }
+                TextButton(
+                    onClick = onRedownload,
+                    modifier = Modifier.defaultMinSize(minHeight = 48.dp),
+                    colors = ButtonDefaults.textButtonColors(contentColor = colors.fg),
+                ) {
+                    Text("重新下载", fontWeight = FontWeight.Medium)
+                }
             }
         },
     )

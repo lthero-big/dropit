@@ -29,6 +29,8 @@ import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.DownloadDone
+import androidx.compose.material.icons.rounded.Downloading
 import androidx.compose.material.icons.rounded.FolderZip
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.LaptopMac
@@ -89,6 +91,7 @@ fun BoardCard(
     onOpenUrl: (String) -> Unit,
     onOpenMore: (ClipItem) -> Unit,
     modifier: Modifier = Modifier,
+    fileSaveState: FileSaveState = FileSaveState.NOT_SAVED,
     activeScope: TargetScope? = null,
     mediaRepository: MediaRepository? = null,
     imageLoader: ImageLoader? = null,
@@ -200,13 +203,29 @@ fun BoardCard(
                             onClick = { onCopyText(item) },
                         )
                     } else {
-                        CardActionChip(
-                            icon = Icons.Rounded.Download,
-                            label = "保存",
-                            contentDescription = "保存文件",
-                            tint = colors.fg2,
-                            onClick = { onDownloadFile(item) },
-                        )
+                        when (fileSaveState) {
+                            FileSaveState.NOT_SAVED -> CardActionChip(
+                                icon = Icons.Rounded.Download,
+                                label = "保存",
+                                contentDescription = "保存文件",
+                                tint = colors.fg2,
+                                onClick = { onDownloadFile(item) },
+                            )
+                            FileSaveState.SAVING -> CardActionChip(
+                                icon = Icons.Rounded.Downloading,
+                                label = "保存中",
+                                contentDescription = "正在保存文件，点击查看进度",
+                                tint = colors.brand,
+                                onClick = { onDownloadFile(item) },
+                            )
+                            FileSaveState.SAVED -> CardActionChip(
+                                icon = Icons.Rounded.DownloadDone,
+                                label = "已保存",
+                                contentDescription = "已保存到本地，点击打开或重新下载",
+                                tint = colors.ok,
+                                onClick = { onDownloadFile(item) },
+                            )
+                        }
                     }
 
                     CardActionChip(

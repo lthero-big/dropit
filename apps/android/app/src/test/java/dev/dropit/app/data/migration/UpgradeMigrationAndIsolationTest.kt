@@ -31,6 +31,7 @@ import dev.dropit.app.data.share.ShareIntentExtractor
 import dev.dropit.app.data.transfer.DefaultTransferManager
 import dev.dropit.app.data.transfer.DefaultTransferScopeProvider
 import dev.dropit.app.data.transfer.DownloadSink
+import dev.dropit.app.data.transfer.SavedDownloadEntity
 import dev.dropit.app.data.transfer.SavedDownloadResult
 import dev.dropit.app.data.transfer.TransferDao
 import dev.dropit.app.data.transfer.TransferEngine
@@ -302,6 +303,66 @@ class UpgradeMigrationAndIsolationTest {
 
         override suspend fun deleteAll() {
             state.value = emptyList()
+        }
+
+        private val savedState = MutableStateFlow<Map<Triple<String, String, String>, SavedDownloadEntity>>(emptyMap())
+
+        override suspend fun findActiveDownloadForItem(
+            serverOrigin: String,
+            accountId: String?,
+            remoteItemId: String,
+        ): TransferTaskEntity? = state.value.firstOrNull {
+            it.serverOrigin == serverOrigin &&
+                it.accountId == accountId &&
+                it.direction == TransferDirection.DOWNLOAD.name &&
+                !it.shareAfterDownload &&
+                it.remoteItemId == remoteItemId &&
+                (it.status == TransferStatus.QUEUED.name || it.status == TransferStatus.RUNNING.name)
+        }
+
+        override fun observeSavedDownloadsByScope(serverOrigin: String, accountId: String): Flow<List<SavedDownloadEntity>> =
+            savedState.map { map ->
+                map.values.filter { it.serverOrigin == serverOrigin && it.accountId == accountId }
+                    .sortedWith(compareByDescending<SavedDownloadEntity> { it.savedAt }.thenBy { it.remoteItemId })
+            }
+
+        override suspend fun listSavedDownloadsByScope(serverOrigin: String, accountId: String): List<SavedDownloadEntity> =
+            savedState.value.values.filter { it.serverOrigin == serverOrigin && it.accountId == accountId }
+                .sortedWith(compareByDescending<SavedDownloadEntity> { it.savedAt }.thenBy { it.remoteItemId })
+
+        override suspend fun listAllSavedDownloads(): List<SavedDownloadEntity> =
+            savedState.value.values.sortedWith(compareByDescending<SavedDownloadEntity> { it.savedAt }.thenBy { it.remoteItemId })
+
+        override suspend fun getSavedDownload(serverOrigin: String, accountId: String, remoteItemId: String): SavedDownloadEntity? =
+            savedState.value[Triple(serverOrigin, accountId, remoteItemId)]
+
+        override suspend fun upsertSavedDownload(entity: SavedDownloadEntity) {
+            savedState.value = savedState.value + (Triple(entity.serverOrigin, entity.accountId, entity.remoteItemId) to entity)
+        }
+
+        override suspend fun deleteSavedDownload(serverOrigin: String, accountId: String, remoteItemId: String) {
+            savedState.value = savedState.value - Triple(serverOrigin, accountId, remoteItemId)
+        }
+
+        override suspend fun deleteSavedDownloadsByScope(serverOrigin: String, accountId: String) {
+            savedState.value = savedState.value.filterValues { !(it.serverOrigin == serverOrigin && it.accountId == accountId) }
+        }
+
+        override suspend fun deleteAllSavedDownloads() {
+            savedState.value = emptyMap()
+        }
+
+        override suspend fun reassignSavedDownloadsAccountId(serverOrigin: String, oldAccountId: String, newAccountId: String) {
+            val next = LinkedHashMap<Triple<String, String, String>, SavedDownloadEntity>()
+            savedState.value.values.forEach { entity ->
+                val updated = if (entity.serverOrigin == serverOrigin && entity.accountId == oldAccountId) {
+                    entity.copy(accountId = newAccountId)
+                } else {
+                    entity
+                }
+                next[Triple(updated.serverOrigin, updated.accountId, updated.remoteItemId)] = updated
+            }
+            savedState.value = next
         }
     }
 
@@ -594,7 +655,20 @@ class UpgradeMigrationAndIsolationTest {
                 item = ClipItem(id = "it-1", spaceId = "sp-A", kind = "file", filename = "report.pdf", size = 128),
             ),
         )
+        dao.upsertSavedDownload(
+            SavedDownloadEntity(
+                serverOrigin = originA,
+                accountId = "user-A",
+                remoteItemId = "it-1",
+                localUri = "content://downloads/a-1",
+                fileName = "report.pdf",
+                mimeType = "application/pdf",
+                fileSize = 128L,
+                savedAt = 100L,
+            ),
+        )
         assertEquals(1, dao.listAll().size)
+        assertEquals(1, dao.listAllSavedDownloads().size)
 
         // 2. Revoke legacy token -> 401 emits sessionExpiredEvents -> smooth same-server re-auth preserves serverOrigin
         revokedA.set(true)
@@ -653,6 +727,7 @@ class UpgradeMigrationAndIsolationTest {
         assertTrue(roomKeyStore.allOrigins().isEmpty())
         assertTrue(schedulerCancelledAll.get())
         assertTrue(dao.listAll().isEmpty())
+        assertTrue(dao.listAllSavedDownloads().isEmpty())
         assertFalse(File(uploadStagingDir, "task-a.bin").exists())
         assertNull(shareInbox.pendingShare.value)
         assertTrue(imageCacheDir.listFiles().isNullOrEmpty())

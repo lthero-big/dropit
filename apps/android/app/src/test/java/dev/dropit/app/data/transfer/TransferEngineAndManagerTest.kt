@@ -5,6 +5,7 @@ import dev.dropit.app.core.network.DropitApiClient
 import dev.dropit.app.core.network.ServerUrl
 import dev.dropit.app.core.network.SessionCredentialsProvider
 import dev.dropit.app.core.network.TargetScope
+import dev.dropit.app.core.repository.DownloadEnqueueResult
 import dev.dropit.app.core.repository.DownloadFileRequest
 import dev.dropit.app.core.repository.StagedShareFile
 import dev.dropit.app.core.repository.TransferDirection
@@ -125,6 +126,7 @@ class TransferEngineAndManagerTest {
     private fun createHarness(
         initialScope: TransferScopeKey = TransferScopeKey(baseUrl, "user-1"),
         clockMs: () -> Long = { System.currentTimeMillis() },
+        localSavedFileChecker: LocalSavedFileChecker = FileSystemLocalSavedFileChecker,
     ): TestHarness {
         val dao = InMemoryTransferDao()
         val scopeFlow = MutableStateFlow<TransferScopeKey?>(initialScope)
@@ -156,6 +158,7 @@ class TransferEngineAndManagerTest {
             uploadUriStager = { _, _, _ -> error("not used in staged upload test") },
             uploadStagingDir = uploadStagingDir,
             downloadTempDir = downloadTempDir,
+            localSavedFileChecker = localSavedFileChecker,
             coroutineScope = managerScope,
             clockMs = clockMs,
         )
@@ -789,6 +792,130 @@ class TransferEngineAndManagerTest {
         assertEquals(10_000L, clamped.transferredBytes)
     }
 
+    @Test
+    fun savedDownloadIndex_survivesClearCompleted_isolatesScopes_dedupsActive_autoCleansDeleted_andOverwritesOnRedownload() = runTest {
+        var now = 1_000L
+        val payload = "saved-file-v1-content".toByteArray()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                return if (request.path == "/api/spaces/sp-1/items/item-save/download") {
+                    MockResponse()
+                        .setResponseCode(200)
+                        .addHeader("Content-Disposition", "attachment; filename=\"manual.pdf\"")
+                        .addHeader("Content-Type", "application/pdf")
+                        .setBody(Buffer().write(payload))
+                } else {
+                    MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        val harness = createHarness(
+            initialScope = TransferScopeKey(baseUrl, "user-A"),
+            clockMs = { now },
+        )
+        val item = ClipItem(
+            id = "item-save",
+            spaceId = "sp-1",
+            kind = "file",
+            filename = "manual.pdf",
+            mime = "application/pdf",
+            size = payload.size.toLong(),
+        )
+
+        // 1. Enqueue download -> second tap while QUEUED returns AlreadyInProgress without creating duplicate task
+        val firstRes = harness.manager.enqueueDownloadOrReuse(
+            DownloadFileRequest(item = item, targetScope = TargetScope.SpaceScope("sp-1")),
+        )
+        assertTrue(firstRes is DownloadEnqueueResult.Started)
+        assertEquals(setOf("item-save"), harness.manager.activeDownloadItemIds.first { it.contains("item-save") })
+
+        val dupRes = harness.manager.enqueueDownloadOrReuse(
+            DownloadFileRequest(item = item, targetScope = TargetScope.SpaceScope("sp-1")),
+        )
+        assertEquals(DownloadEnqueueResult.AlreadyInProgress(firstRes.taskId), dupRes)
+        assertEquals(1, harness.dao.listAll().size)
+
+        // 2. Execute download -> writes to saved_downloads and clears activeDownloadItemIds
+        now = 2_000L
+        assertEquals(TransferExecutionOutcome.Succeeded, harness.manager.executeTaskFromWorker(firstRes.taskId))
+        val savedMap = harness.manager.savedDownloads.first { it.containsKey("item-save") }
+        val firstRecord = savedMap["item-save"]!!
+        assertEquals("manual.pdf", firstRecord.fileName)
+        assertEquals("application/pdf", firstRecord.mimeType)
+        assertEquals(payload.size.toLong(), firstRecord.fileSize)
+        assertEquals(2_000L, firstRecord.savedAt)
+        assertTrue(harness.manager.activeDownloadItemIds.first { it.isEmpty() }.isEmpty())
+
+        // Share-after-download task must NOT pollute saved_downloads
+        val shareTaskId = harness.manager.enqueueDownload(
+            DownloadFileRequest(
+                item = item.copy(id = "item-share-only"),
+                targetScope = TargetScope.SpaceScope("sp-1"),
+                shareAfterDownload = true,
+            ),
+        )
+        assertNull(harness.dao.getSavedDownload(baseUrl, "user-A", "item-share-only"))
+        assertNotNull(shareTaskId)
+
+        // 3. clearCompleted wipes transfer_tasks history, but saved_downloads remains intact!
+        harness.manager.clearCompleted()
+        assertTrue(harness.dao.listByScope(baseUrl, "user-A").none { it.status == TransferStatus.SUCCEEDED.name })
+        assertNotNull(harness.manager.verifySavedDownload("item-save"))
+        assertTrue(harness.manager.savedDownloads.value.containsKey("item-save"))
+
+        // 4. Cross-account and cross-server isolation
+        harness.scopeFlow.value = TransferScopeKey(baseUrl, "user-B")
+        assertTrue(harness.manager.savedDownloads.first { it.isEmpty() }.isEmpty())
+        harness.scopeFlow.value = TransferScopeKey("https://other-server.example", "user-A")
+        assertTrue(harness.manager.savedDownloads.value.isEmpty())
+
+        // Switch back to (baseUrl, user-A) -> saved record still visible
+        harness.scopeFlow.value = TransferScopeKey(baseUrl, "user-A")
+        assertTrue(harness.manager.savedDownloads.first { it.containsKey("item-save") }.containsKey("item-save"))
+
+        // 5. Force redownload creates a new file and overwrites/updates saved_downloads index
+        now = 5_000L
+        val redownloadRes = harness.manager.enqueueDownloadOrReuse(
+            DownloadFileRequest(item = item, targetScope = TargetScope.SpaceScope("sp-1")),
+        )
+        assertTrue(redownloadRes is DownloadEnqueueResult.Started)
+        assertEquals(TransferExecutionOutcome.Succeeded, harness.manager.executeTaskFromWorker(redownloadRes.taskId))
+        val updatedRecord = harness.manager.savedDownloads.first { it["item-save"]?.savedAt == 5_000L }["item-save"]!!
+        assertTrue("Expected new local URI after redownload", updatedRecord.localUri != firstRecord.localUri)
+        assertEquals(5_000L, updatedRecord.savedAt)
+
+        // 6. Deleting local file externally -> verifySavedDownload / verifyAllSavedDownloads cleans stale row
+        val savedFile = FileSystemLocalSavedFileChecker.resolveLocalFile(updatedRecord.localUri)!!
+        assertTrue(savedFile.delete())
+        assertNull(harness.manager.verifySavedDownload("item-save"))
+        assertTrue(harness.manager.savedDownloads.first { !it.containsKey("item-save") }.isEmpty())
+        assertNull(harness.dao.getSavedDownload(baseUrl, "user-A", "item-save"))
+    }
+
+    @Test
+    fun verifyAllSavedDownloads_prunesMissingOrSizeMismatchedEntries() = runTest {
+        val validFile = File(savedDownloadsDir, "valid.bin").apply { writeBytes(ByteArray(64) { 1 }) }
+        val truncatedFile = File(savedDownloadsDir, "truncated.bin").apply { writeBytes(ByteArray(10) { 2 }) }
+        val missingFile = File(savedDownloadsDir, "deleted.bin")
+
+        val harness = createHarness(initialScope = TransferScopeKey(baseUrl, "user-1"))
+        harness.dao.upsertSavedDownload(
+            SavedDownloadEntity(baseUrl, "user-1", "it-valid", "file://${validFile.absolutePath}", "valid.bin", "application/octet-stream", 64L, 100L),
+        )
+        harness.dao.upsertSavedDownload(
+            SavedDownloadEntity(baseUrl, "user-1", "it-trunc", "file://${truncatedFile.absolutePath}", "truncated.bin", "application/octet-stream", 64L, 200L),
+        )
+        harness.dao.upsertSavedDownload(
+            SavedDownloadEntity(baseUrl, "user-1", "it-gone", "file://${missingFile.absolutePath}", "deleted.bin", "application/octet-stream", 64L, 300L),
+        )
+
+        harness.manager.verifyAllSavedDownloads()
+
+        val remaining = harness.manager.savedDownloads.first { it.size == 1 }
+        assertEquals(setOf("it-valid"), remaining.keys)
+    }
+
     private fun sha256Hex(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
         return digest.joinToString("") { String.format(Locale.ROOT, "%02x", it.toInt() and 0xff) }
@@ -973,6 +1100,78 @@ internal class InMemoryTransferDao : TransferDao {
 
     override suspend fun deleteAll() {
         state.value = emptyMap()
+    }
+
+    private val savedState = MutableStateFlow<Map<Triple<String, String, String>, SavedDownloadEntity>>(emptyMap())
+
+    override suspend fun findActiveDownloadForItem(
+        serverOrigin: String,
+        accountId: String?,
+        remoteItemId: String,
+    ): TransferTaskEntity? = state.value.values
+        .filter {
+            it.serverOrigin == serverOrigin &&
+                it.accountId == accountId &&
+                it.direction == TransferDirection.DOWNLOAD.name &&
+                !it.shareAfterDownload &&
+                it.remoteItemId == remoteItemId &&
+                (it.status == TransferStatus.QUEUED.name || it.status == TransferStatus.RUNNING.name)
+        }
+        .sortedWith(compareByDescending<TransferTaskEntity> { it.createdAt }.thenByDescending { it.id })
+        .firstOrNull()
+
+    override fun observeSavedDownloadsByScope(serverOrigin: String, accountId: String): Flow<List<SavedDownloadEntity>> =
+        savedState.map { map ->
+            map.values
+                .filter { it.serverOrigin == serverOrigin && it.accountId == accountId }
+                .sortedWith(compareByDescending<SavedDownloadEntity> { it.savedAt }.thenBy { it.remoteItemId })
+        }
+
+    override suspend fun listSavedDownloadsByScope(serverOrigin: String, accountId: String): List<SavedDownloadEntity> =
+        savedState.value.values
+            .filter { it.serverOrigin == serverOrigin && it.accountId == accountId }
+            .sortedWith(compareByDescending<SavedDownloadEntity> { it.savedAt }.thenBy { it.remoteItemId })
+
+    override suspend fun listAllSavedDownloads(): List<SavedDownloadEntity> =
+        savedState.value.values
+            .sortedWith(compareByDescending<SavedDownloadEntity> { it.savedAt }.thenBy { it.remoteItemId })
+
+    override suspend fun getSavedDownload(serverOrigin: String, accountId: String, remoteItemId: String): SavedDownloadEntity? =
+        savedState.value[Triple(serverOrigin, accountId, remoteItemId)]
+
+    override suspend fun upsertSavedDownload(entity: SavedDownloadEntity) {
+        savedState.value = savedState.value + (Triple(entity.serverOrigin, entity.accountId, entity.remoteItemId) to entity)
+    }
+
+    override suspend fun deleteSavedDownload(serverOrigin: String, accountId: String, remoteItemId: String) {
+        savedState.value = savedState.value - Triple(serverOrigin, accountId, remoteItemId)
+    }
+
+    override suspend fun deleteSavedDownloadsByScope(serverOrigin: String, accountId: String) {
+        savedState.value = savedState.value.filterValues {
+            !(it.serverOrigin == serverOrigin && it.accountId == accountId)
+        }
+    }
+
+    override suspend fun deleteAllSavedDownloads() {
+        savedState.value = emptyMap()
+    }
+
+    override suspend fun reassignSavedDownloadsAccountId(
+        serverOrigin: String,
+        oldAccountId: String,
+        newAccountId: String,
+    ) {
+        val next = LinkedHashMap<Triple<String, String, String>, SavedDownloadEntity>()
+        savedState.value.values.forEach { entity ->
+            val updated = if (entity.serverOrigin == serverOrigin && entity.accountId == oldAccountId) {
+                entity.copy(accountId = newAccountId)
+            } else {
+                entity
+            }
+            next[Triple(updated.serverOrigin, updated.accountId, updated.remoteItemId)] = updated
+        }
+        savedState.value = next
     }
 }
 

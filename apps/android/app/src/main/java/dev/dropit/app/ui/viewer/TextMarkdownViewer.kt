@@ -29,6 +29,8 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.DownloadDone
+import androidx.compose.material.icons.rounded.Downloading
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.ButtonDefaults
@@ -64,6 +66,7 @@ import dev.dropit.app.core.network.ClipItem
 import dev.dropit.app.core.network.TargetScope
 import dev.dropit.app.core.repository.MediaRepository
 import dev.dropit.app.ui.board.ClipFormatting
+import dev.dropit.app.ui.board.FileSaveState
 import dev.dropit.app.ui.theme.DropitMono
 import dev.dropit.app.ui.theme.DropitMonoTypography
 import dev.dropit.app.ui.theme.DropitTheme
@@ -82,6 +85,7 @@ fun TextMarkdownViewer(
     modifier: Modifier = Modifier,
     scope: TargetScope? = null,
     mediaRepository: MediaRepository? = null,
+    fileSaveState: FileSaveState = FileSaveState.NOT_SAVED,
     onDownloadFallback: (() -> Unit)? = null,
 ) {
     val colors = DropitTheme.colors
@@ -197,6 +201,34 @@ fun TextMarkdownViewer(
                     }
                 }
 
+                if (item.isFile && onDownloadFallback != null) {
+                    val saveIcon = when (fileSaveState) {
+                        FileSaveState.NOT_SAVED -> Icons.Rounded.Download
+                        FileSaveState.SAVING -> Icons.Rounded.Downloading
+                        FileSaveState.SAVED -> Icons.Rounded.DownloadDone
+                    }
+                    val saveDesc = when (fileSaveState) {
+                        FileSaveState.NOT_SAVED -> "保存文件"
+                        FileSaveState.SAVING -> "正在保存文件"
+                        FileSaveState.SAVED -> "已保存到本地，点击打开或重新下载"
+                    }
+                    val saveTint = when (fileSaveState) {
+                        FileSaveState.NOT_SAVED -> colors.fg2
+                        FileSaveState.SAVING -> colors.brand
+                        FileSaveState.SAVED -> colors.ok
+                    }
+                    IconButton(
+                        onClick = onDownloadFallback,
+                        modifier = Modifier.size(48.dp),
+                    ) {
+                        Icon(
+                            imageVector = saveIcon,
+                            contentDescription = saveDesc,
+                            tint = saveTint,
+                        )
+                    }
+                }
+
                 IconButton(
                     onClick = { onShareText(copyPayload) },
                     enabled = !isLoadingRemote && remoteError == null && copyPayload.isNotEmpty(),
@@ -293,18 +325,33 @@ fun TextMarkdownViewer(
                             Text("重试", fontWeight = FontWeight.SemiBold)
                         }
                         if (onDownloadFallback != null) {
+                            val fallbackIcon = when (fileSaveState) {
+                                FileSaveState.NOT_SAVED -> Icons.Rounded.Download
+                                FileSaveState.SAVING -> Icons.Rounded.Downloading
+                                FileSaveState.SAVED -> Icons.Rounded.DownloadDone
+                            }
+                            val fallbackTint = when (fileSaveState) {
+                                FileSaveState.NOT_SAVED -> colors.fg2
+                                FileSaveState.SAVING -> colors.brand
+                                FileSaveState.SAVED -> colors.ok
+                            }
+                            val fallbackLabel = when (fileSaveState) {
+                                FileSaveState.NOT_SAVED -> "下载文件"
+                                FileSaveState.SAVING -> "保存中"
+                                FileSaveState.SAVED -> "已保存"
+                            }
                             TextButton(
                                 onClick = onDownloadFallback,
                                 modifier = Modifier.defaultMinSize(minHeight = 48.dp),
-                                colors = ButtonDefaults.textButtonColors(contentColor = colors.fg2),
+                                colors = ButtonDefaults.textButtonColors(contentColor = fallbackTint),
                             ) {
                                 Icon(
-                                    imageVector = Icons.Rounded.Download,
+                                    imageVector = fallbackIcon,
                                     contentDescription = null,
                                     modifier = Modifier.size(16.dp),
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text("下载文件")
+                                Text(fallbackLabel)
                             }
                         }
                     }

@@ -30,6 +30,8 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.DownloadDone
+import androidx.compose.material.icons.rounded.Downloading
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Fullscreen
 import androidx.compose.material.icons.rounded.FullscreenExit
@@ -83,6 +85,7 @@ import dev.dropit.app.core.network.ServerUrl
 import dev.dropit.app.core.network.TargetScope
 import dev.dropit.app.core.repository.MediaRepository
 import dev.dropit.app.ui.board.ClipFormatting
+import dev.dropit.app.ui.board.FileSaveState
 import dev.dropit.app.ui.theme.DropitFileTypeColors
 import dev.dropit.app.ui.theme.DropitMediaColors
 import dev.dropit.app.ui.theme.DropitMonoTypography
@@ -104,6 +107,7 @@ fun MediaPlayerViewer(
     onShareMedia: (ClipItem) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    fileSaveState: FileSaveState = FileSaveState.NOT_SAVED,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -349,18 +353,33 @@ fun MediaPlayerViewer(
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("重试", fontWeight = FontWeight.SemiBold)
                         }
+                        val fallbackTint = when (fileSaveState) {
+                            FileSaveState.NOT_SAVED -> DropitMediaColors.OverlayPrimary
+                            FileSaveState.SAVING -> colors.brand
+                            FileSaveState.SAVED -> colors.ok
+                        }
+                        val fallbackIcon = when (fileSaveState) {
+                            FileSaveState.NOT_SAVED -> Icons.Rounded.Download
+                            FileSaveState.SAVING -> Icons.Rounded.Downloading
+                            FileSaveState.SAVED -> Icons.Rounded.DownloadDone
+                        }
+                        val fallbackLabel = when (fileSaveState) {
+                            FileSaveState.NOT_SAVED -> "下载文件"
+                            FileSaveState.SAVING -> "保存中"
+                            FileSaveState.SAVED -> "已保存"
+                        }
                         TextButton(
                             onClick = { onDownloadFallback(item) },
                             modifier = Modifier.defaultMinSize(minHeight = 48.dp),
-                            colors = ButtonDefaults.textButtonColors(contentColor = DropitMediaColors.OverlayPrimary),
+                            colors = ButtonDefaults.textButtonColors(contentColor = fallbackTint),
                         ) {
                             Icon(
-                                imageVector = Icons.Rounded.Download,
+                                imageVector = fallbackIcon,
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp),
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("下载文件")
+                            Text(fallbackLabel)
                         }
                     }
                 }
@@ -402,14 +421,29 @@ fun MediaPlayerViewer(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            val topSaveIcon = when (fileSaveState) {
+                FileSaveState.NOT_SAVED -> Icons.Rounded.Download
+                FileSaveState.SAVING -> Icons.Rounded.Downloading
+                FileSaveState.SAVED -> Icons.Rounded.DownloadDone
+            }
+            val topSaveDescription = when (fileSaveState) {
+                FileSaveState.NOT_SAVED -> "保存媒体文件"
+                FileSaveState.SAVING -> "正在保存媒体文件"
+                FileSaveState.SAVED -> "已保存到本地，点击打开或重新下载"
+            }
+            val topSaveTint = when (fileSaveState) {
+                FileSaveState.NOT_SAVED -> DropitMediaColors.OverlayPrimary
+                FileSaveState.SAVING -> colors.brand
+                FileSaveState.SAVED -> colors.ok
+            }
             IconButton(
                 onClick = { onDownloadFallback(item) },
                 modifier = Modifier.size(48.dp),
             ) {
                 Icon(
-                    imageVector = Icons.Rounded.Download,
-                    contentDescription = "保存媒体文件",
-                    tint = DropitMediaColors.OverlayPrimary,
+                    imageVector = topSaveIcon,
+                    contentDescription = topSaveDescription,
+                    tint = topSaveTint,
                 )
             }
             IconButton(

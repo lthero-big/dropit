@@ -25,8 +25,8 @@ class ProtocolContractRegressionTest {
             "Native versionCode must strictly exceed legacy Capacitor 0.3.2 (code 5)",
             BuildConfig.VERSION_CODE > 5,
         )
-        assertEquals(8, BuildConfig.VERSION_CODE)
-        assertEquals("0.4.2", BuildConfig.VERSION_NAME)
+        assertEquals(9, BuildConfig.VERSION_CODE)
+        assertEquals("0.4.3", BuildConfig.VERSION_NAME)
         assertTrue(
             "versionName must match scripts/publish-android-apk.mjs validation regex",
             Regex("^[0-9A-Za-z][0-9A-Za-z._+-]{0,39}$").matches(BuildConfig.VERSION_NAME),
@@ -36,7 +36,7 @@ class ProtocolContractRegressionTest {
             UpdateFiles.isDownloadPath("/api/app/android/download/dropit-android-${BuildConfig.VERSION_NAME}.apk"),
         )
         val label = ServerUrl.versionLabel(BuildConfig.VERSION_NAME, "a1b2c3d4e5f6", "2026-11-25T06:00:00Z")
-        assertEquals("版本 0.4.2 · a1b2c3d · 2026-11-25", label)
+        assertEquals("版本 0.4.3 · a1b2c3d · 2026-11-25", label)
     }
 
     @Test

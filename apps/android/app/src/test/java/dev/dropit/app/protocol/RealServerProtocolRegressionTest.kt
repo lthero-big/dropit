@@ -32,6 +32,7 @@ import dev.dropit.app.data.room.DefaultRoomRepository
 import dev.dropit.app.data.room.InMemoryRoomKeyStore
 import dev.dropit.app.data.transfer.DownloadName
 import dev.dropit.app.data.transfer.DownloadSink
+import dev.dropit.app.data.transfer.SavedDownloadEntity
 import dev.dropit.app.data.transfer.SavedDownloadResult
 import dev.dropit.app.data.transfer.TransferDao
 import dev.dropit.app.data.transfer.TransferEngine
@@ -111,9 +112,9 @@ class RealServerProtocolRegressionTest {
     private val adminPassword: String = System.getenv("DROPIT_LIVE_ADMIN_PASSWORD")?.takeIf { it.isNotEmpty() }
         ?: "DropitRegressionPass2026!"
     private val expectedUpdateVersion: String = System.getenv("DROPIT_LIVE_EXPECTED_UPDATE_VERSION")?.trim()?.takeIf { it.isNotEmpty() }
-        ?: "0.4.2"
+        ?: "0.4.3"
     private val expectedUpdateCode: Int = System.getenv("DROPIT_LIVE_EXPECTED_UPDATE_CODE")?.trim()?.toIntOrNull()
-        ?: 8
+        ?: 9
     private val expectedUpdateSha256: String? = System.getenv("DROPIT_LIVE_EXPECTED_UPDATE_SHA256")?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
 
     private lateinit var okHttpClient: OkHttpClient
@@ -1373,6 +1374,66 @@ class RealServerProtocolRegressionTest {
 
         override suspend fun deleteAll() {
             state.value = emptyList()
+        }
+
+        private val savedState = MutableStateFlow<Map<Triple<String, String, String>, SavedDownloadEntity>>(emptyMap())
+
+        override suspend fun findActiveDownloadForItem(
+            serverOrigin: String,
+            accountId: String?,
+            remoteItemId: String,
+        ): TransferTaskEntity? = state.value.firstOrNull {
+            it.serverOrigin == serverOrigin &&
+                it.accountId == accountId &&
+                it.direction == TransferDirection.DOWNLOAD.name &&
+                !it.shareAfterDownload &&
+                it.remoteItemId == remoteItemId &&
+                (it.status == TransferStatus.QUEUED.name || it.status == TransferStatus.RUNNING.name)
+        }
+
+        override fun observeSavedDownloadsByScope(serverOrigin: String, accountId: String): Flow<List<SavedDownloadEntity>> =
+            savedState.map { map ->
+                map.values.filter { it.serverOrigin == serverOrigin && it.accountId == accountId }
+                    .sortedWith(compareByDescending<SavedDownloadEntity> { it.savedAt }.thenBy { it.remoteItemId })
+            }
+
+        override suspend fun listSavedDownloadsByScope(serverOrigin: String, accountId: String): List<SavedDownloadEntity> =
+            savedState.value.values.filter { it.serverOrigin == serverOrigin && it.accountId == accountId }
+                .sortedWith(compareByDescending<SavedDownloadEntity> { it.savedAt }.thenBy { it.remoteItemId })
+
+        override suspend fun listAllSavedDownloads(): List<SavedDownloadEntity> =
+            savedState.value.values.sortedWith(compareByDescending<SavedDownloadEntity> { it.savedAt }.thenBy { it.remoteItemId })
+
+        override suspend fun getSavedDownload(serverOrigin: String, accountId: String, remoteItemId: String): SavedDownloadEntity? =
+            savedState.value[Triple(serverOrigin, accountId, remoteItemId)]
+
+        override suspend fun upsertSavedDownload(entity: SavedDownloadEntity) {
+            savedState.value = savedState.value + (Triple(entity.serverOrigin, entity.accountId, entity.remoteItemId) to entity)
+        }
+
+        override suspend fun deleteSavedDownload(serverOrigin: String, accountId: String, remoteItemId: String) {
+            savedState.value = savedState.value - Triple(serverOrigin, accountId, remoteItemId)
+        }
+
+        override suspend fun deleteSavedDownloadsByScope(serverOrigin: String, accountId: String) {
+            savedState.value = savedState.value.filterValues { !(it.serverOrigin == serverOrigin && it.accountId == accountId) }
+        }
+
+        override suspend fun deleteAllSavedDownloads() {
+            savedState.value = emptyMap()
+        }
+
+        override suspend fun reassignSavedDownloadsAccountId(serverOrigin: String, oldAccountId: String, newAccountId: String) {
+            val next = LinkedHashMap<Triple<String, String, String>, SavedDownloadEntity>()
+            savedState.value.values.forEach { entity ->
+                val updated = if (entity.serverOrigin == serverOrigin && entity.accountId == oldAccountId) {
+                    entity.copy(accountId = newAccountId)
+                } else {
+                    entity
+                }
+                next[Triple(updated.serverOrigin, updated.accountId, updated.remoteItemId)] = updated
+            }
+            savedState.value = next
         }
     }
 

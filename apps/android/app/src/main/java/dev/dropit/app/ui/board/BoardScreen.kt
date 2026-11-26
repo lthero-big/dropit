@@ -92,7 +92,9 @@ import dev.dropit.app.core.network.ClipItem
 import dev.dropit.app.core.network.TargetScope
 import dev.dropit.app.core.realtime.ConnectionState
 import dev.dropit.app.core.repository.MediaRepository
+import dev.dropit.app.core.repository.SavedDownloadRecord
 import dev.dropit.app.core.repository.UploadFileRequest
+import dev.dropit.app.data.transfer.DownloadName
 import dev.dropit.app.ui.rooms.ActiveRoomBanner
 import dev.dropit.app.ui.rooms.CreateRoomDialog
 import dev.dropit.app.ui.rooms.EditRoomCodeDialog
@@ -118,6 +120,7 @@ fun BoardScreen(
     onOpenMediaPlayer: (item: ClipItem, isVideo: Boolean, scope: TargetScope) -> Unit,
     onOpenTextReader: (item: ClipItem) -> Unit,
     suppressItemShareSheet: Boolean = false,
+    isViewerOpen: Boolean = false,
     onOpenSharePresets: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -365,6 +368,7 @@ fun BoardScreen(
                                     item = item,
                                     isCopied = state.copiedItemId == item.id,
                                     nowMs = nowMs,
+                                    fileSaveState = state.fileSaveStateFor(item.id),
                                     activeScope = state.activeScope,
                                     mediaRepository = mediaRepository,
                                     imageLoader = imageLoader,
@@ -618,6 +622,7 @@ fun BoardScreen(
             item = item,
             isReadOnly = state.isReadOnly,
             nowMs = nowMs,
+            fileSaveState = state.fileSaveStateFor(item.id),
             onCopy = {
                 copyToClipboard(context, ClipFormatting.copyPayloadForItem(item))
                 viewModel.markItemCopied(item.id)
@@ -745,6 +750,36 @@ fun BoardScreen(
                 }
             },
             onDismiss = { deletingGroup = null },
+        )
+    }
+
+    state.alreadySavedPrompt?.let { prompt ->
+        AlreadySavedFileDialog(
+            prompt = prompt,
+            onOpenFile = {
+                viewModel.dismissAlreadySavedPrompt()
+                openLocalSavedFile(
+                    context = context,
+                    record = prompt.record,
+                    onUnavailable = { errMsg ->
+                        if (isViewerOpen) {
+                            Toast.makeText(context, errMsg, Toast.LENGTH_SHORT).show()
+                        } else {
+                            viewModel.showSnackbar(errMsg)
+                        }
+                    },
+                )
+            },
+            onRedownload = {
+                viewModel.confirmRedownloadAlreadySaved(
+                    onFeedback = if (isViewerOpen) {
+                        { msg -> Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() }
+                    } else {
+                        null
+                    },
+                )
+            },
+            onDismiss = viewModel::dismissAlreadySavedPrompt,
         )
     }
 }
@@ -1586,6 +1621,32 @@ private fun openExternalUrl(context: Context, rawUrl: String) {
         rawUrl = rawUrl,
         fallbackErrorMessage = "无法打开链接",
     )
+}
+
+internal fun openLocalSavedFile(
+    context: Context,
+    record: SavedDownloadRecord,
+    onUnavailable: (String) -> Unit,
+) {
+    val uri = runCatching { Uri.parse(record.localUri) }.getOrNull()
+    if (uri == null || record.localUri.isBlank()) {
+        onUnavailable("无法解析本地文件路径")
+        return
+    }
+    val rawMime = DownloadName.baseMime(record.mimeType)
+    val effectiveMime = when {
+        rawMime.isNotBlank() && rawMime != "application/octet-stream" -> rawMime
+        else -> DownloadName.extension(record.fileName)?.let { DownloadName.defaultMimeForExtension(it) } ?: "*/*"
+    }
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, effectiveMime)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching {
+        context.startActivity(intent)
+    }.onFailure {
+        onUnavailable("未找到可打开此文件的应用")
+    }
 }
 
 private fun resolveUploadRequest(
